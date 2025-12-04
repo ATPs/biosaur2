@@ -61,6 +61,8 @@ Available parameters
 
 -write_hills: Add hills output if added as the parameter
 
+--stop_after_hills: Automatically enables -write_hills and stops the run after hills are written, skipping feature detection.
+
 -paseminlh: For TIMS-TOF data. Minimum number of ion mobility values for m/z peaks to be kept in the analysis. Default = 1
 
 -paseftol: For TIMS-TOF data. Ion mobility tolerance used to combine close peaks into a single one. Default = 0.05

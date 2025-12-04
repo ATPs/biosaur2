@@ -405,6 +405,8 @@ def get_initial_isotopes_python(hills_dict, isotopes_mass_accuracy, isotopes_lis
 def process_file(args):
 
     input_file_path = args['file']
+    stop_after_hills = bool(args.get('stop_after_hills'))
+    stop_after_logged = False
 
     md_correction = args['md_correction']
     if md_correction == 'Orbi':
@@ -444,7 +446,7 @@ def process_file(args):
                     data_for_analyse_tmp.append(z)
                     RT_dict[data_cur_id] = float(z['scanList']['scan'][0]['scan start time'])
                     data_cur_id += 1
-                    
+            chunk_length = len(data_for_analyse_tmp)
 
 
             hill_mass_accuracy = args['htol']
@@ -522,17 +524,32 @@ def process_file(args):
                 hills_dict, hills_features = utils.process_hills_extra(hills_dict, RT_dict, faims_val, data_start_id, mz_step, paseftol)
                 utils.write_output(hills_features, args, write_header, hills=True)
 
+            if stop_after_hills:
+                if args['write_hills']:
+                    if not stop_after_logged:
+                        logger.info('--stop_after_hills flag set, skipping feature detection after writing hills.')
+                        stop_after_logged = True
+                else:
+                    if not stop_after_logged:
+                        logger.warning('--stop_after_hills flag set but hills output is disabled; skipping feature detection anyway.')
+                        stop_after_logged = True
+                write_header = False
+                data_start_id += chunk_length
+                continue
 
 
             ready_set = process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args)
 
             write_header = False
 
-            data_start_id += len(data_for_analyse_tmp)
+            data_start_id += chunk_length
 
 
 
     elif input_file_path.lower().endswith('.hills.tsv'):
+        if stop_after_hills and not stop_after_logged:
+            logger.info('--stop_after_hills flag has no effect when reading hills.tsv input; proceeding with feature detection.')
+            stop_after_logged = True
         hills_features = pd.read_table(input_file_path)
         RT_dict = False
         write_header = True

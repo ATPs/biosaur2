@@ -1,6 +1,6 @@
 pyteomics
 scipy
-numpy>=1.17,<2
+numpy>=1.17
 pandas
 lxml
 cython

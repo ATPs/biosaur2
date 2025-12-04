@@ -47,6 +47,7 @@ def run():
     parser.add_argument('-tof', help='smart tof processing. Experimental', action='store_true')
     parser.add_argument('-profile', help='profile processing. Experimental', action='store_true')
     parser.add_argument('-write_hills', help='write tsv file with detected hills', action='store_true')
+    parser.add_argument('--stop_after_hills', help='stop processing after writing hills output', action='store_true')
     parser.add_argument('-write_extra_details', help='write extra details for features', action='store_true')
     parser.add_argument('-md_correction', help='EXPERIMENTAL. Can be Orbi, Icr or Tof. Sqrt, Linear or Uniform mass error normalization, respectively.', default='Orbi')
     parser.add_argument(
@@ -56,10 +57,15 @@ def run():
         type=int,
     )
     args = vars(parser.parse_args())
+    forced_write_hills = args['stop_after_hills'] and not args['write_hills']
+    if forced_write_hills:
+        args['write_hills'] = True
     logging.basicConfig(format='%(levelname)9s: %(asctime)s %(message)s',
             datefmt='[%H:%M:%S]', level=[logging.INFO, logging.DEBUG][args['debug']])
     logging.getLogger('matplotlib').setLevel(logging.WARNING)
     logger = logging.getLogger(__name__)
+    if forced_write_hills:
+        logger.info('--stop_after_hills requested; turning on --write_hills automatically.')
     logger.debug('Starting with args: %s', args)
 
     if os.name == 'nt':
@@ -76,8 +82,11 @@ def run():
             else:
 
                 main.process_file(deepcopy(args))
-                logger.info('Feature detection is finished for file: %s', filename)
-                if args['dia']:
+                if args['stop_after_hills']:
+                    logger.info('Hills extraction is finished for file: %s', filename)
+                else:
+                    logger.info('Feature detection is finished for file: %s', filename)
+                if args['dia'] and not args['stop_after_hills']:
                     main_dia.process_file(deepcopy(args))
         
         # except Exception as e:
