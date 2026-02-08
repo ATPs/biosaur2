@@ -9,6 +9,325 @@ logger = logging.getLogger(__name__)
 from .cutils import get_fast_dict, get_and_calc_apex_intensity_and_scan, centroid_pasef_scan
 import ast
 
+HILLS_NPZ_SCHEMA_VERSION = 1
+HILLS_NPZ_REQUIRED_KEYS = (
+    'schema_version',
+    'hills_float',
+    'hill_idx',
+    'nScans',
+    'mz',
+    'rtApex',
+    'intensityApex',
+    'intensitySum',
+    'rtStart',
+    'rtEnd',
+    'FAIMS',
+    'im',
+    'point_offsets',
+    'hills_scan_flat',
+    'hills_intensity_flat',
+    'hills_mz_flat',
+)
+HILLS_NPZ_FIXED_KEYS = (
+    'hill_idx',
+    'nScans',
+    'mz',
+    'rtApex',
+    'intensityApex',
+    'intensitySum',
+    'rtStart',
+    'rtEnd',
+    'FAIMS',
+    'im',
+)
+
+
+def _get_hills_float_name(args):
+    return args.get('hills_float', 'float32')
+
+
+def _get_hills_float_dtype(args):
+    float_name = _get_hills_float_name(args)
+    if float_name == 'float32':
+        return np.float32
+    if float_name == 'float64':
+        return np.float64
+    raise ValueError('Unsupported hills float type: %s' % (float_name, ))
+
+
+def _get_output_file(args, hills=False):
+    input_mzml_path = args['file']
+    if hills:
+        hills_ext = 'hills.tsv'
+        if args.get('hills_format', 'tsv') == 'npz':
+            hills_ext = 'hills.npz'
+        if args['o']:
+            return path.splitext(args['o'])[0] + path.extsep + hills_ext
+        return path.splitext(input_mzml_path)[0] + path.extsep + hills_ext
+    if args['o']:
+        return args['o']
+    return path.splitext(input_mzml_path)[0] + path.extsep + 'features.tsv'
+
+
+def _build_hills_dict(
+    hills_idx_array_unique,
+    hills_mz_median,
+    hills_im_median,
+    hills_lengths,
+    hills_scan_lists,
+    hills_intensity_array,
+    rt_start,
+    rt_end,
+    rt_apex,
+    hill_mass_accuracy,
+    paseftol,
+):
+    hills_dict = dict()
+    hills_dict['hills_idx_array_unique'] = np.asarray(hills_idx_array_unique)
+    hills_dict['hills_mz_median'] = np.asarray(hills_mz_median)
+
+    max_mz_value = float(np.max(hills_dict['hills_mz_median'])) if hills_dict['hills_mz_median'].size else 1.0
+    mz_step = hill_mass_accuracy * 1e-6 * max_mz_value
+    if mz_step == 0:
+        mz_step = hill_mass_accuracy * 1e-6 if hill_mass_accuracy else 1e-6
+
+    has_im = hills_im_median is not None and len(hills_im_median) and np.any(hills_im_median)
+    if has_im:
+        hills_dict['hills_im_median'] = np.asarray(hills_im_median)
+
+    hills_dict['hills_lengths'] = np.asarray(hills_lengths)
+    hills_dict['hills_scan_lists'] = [list(map(int, slist)) for slist in hills_scan_lists]
+    hills_dict['hills_scan_sets'] = [set(slist) for slist in hills_dict['hills_scan_lists']]
+    hills_dict['hills_intensity_array'] = [list(map(float, ilist)) for ilist in hills_intensity_array]
+
+    hills_dict['hills_mz_median_fast_dict'] = defaultdict(list)
+    if paseftol > 0 and has_im:
+        hills_dict['hills_im_median_fast_dict'] = defaultdict(set)
+
+    for idx_1, mz_val in enumerate(hills_dict['hills_mz_median']):
+        mz_median_int = int(mz_val / mz_step)
+        tmp_scans_list = hills_dict['hills_scan_lists'][idx_1]
+        tmp_val = (idx_1, tmp_scans_list[0], tmp_scans_list[-1])
+        hills_dict['hills_mz_median_fast_dict'][mz_median_int-1].append(tmp_val)
+        hills_dict['hills_mz_median_fast_dict'][mz_median_int].append(tmp_val)
+        hills_dict['hills_mz_median_fast_dict'][mz_median_int+1].append(tmp_val)
+
+        if paseftol > 0 and has_im:
+            im_median_int = int(hills_dict['hills_im_median'][idx_1] / paseftol)
+            hills_dict['hills_im_median_fast_dict'][im_median_int-1].add(idx_1)
+            hills_dict['hills_im_median_fast_dict'][im_median_int].add(idx_1)
+            hills_dict['hills_im_median_fast_dict'][im_median_int+1].add(idx_1)
+
+    hills_dict['hills_idict'] = [None] * len(hills_dict['hills_idx_array_unique'])
+    hills_dict['hill_sqrt_of_i'] = [None] * len(hills_dict['hills_idx_array_unique'])
+    hills_dict['hills_intensity_apex'] = [None] * len(hills_dict['hills_idx_array_unique'])
+    hills_dict['hills_scan_apex'] = [None] * len(hills_dict['hills_idx_array_unique'])
+
+    hills_dict['rtStart'] = np.asarray(rt_start)
+    hills_dict['rtEnd'] = np.asarray(rt_end)
+    hills_dict['rtApex'] = np.asarray(rt_apex)
+
+    return hills_dict, mz_step
+
+
+def _parse_ragged_column(column):
+    if len(column) == 0:
+        return np.array([], dtype=object)
+    first_value = column.iloc[0]
+    if isinstance(first_value, str):
+        return column.apply(ast.literal_eval).values
+    return column.values
+
+
+def _build_hills_npz_payload(hills_features, float_dtype, float_name):
+    row_count = len(hills_features)
+
+    point_offsets = np.zeros(row_count + 1, dtype=np.int64)
+    for idx_1, hill_feature in enumerate(hills_features):
+        point_offsets[idx_1+1] = point_offsets[idx_1] + len(hill_feature['hills_scan_lists'])
+
+    total_points = int(point_offsets[-1])
+    hills_scan_flat = np.empty(total_points, dtype=np.int32)
+    hills_intensity_flat = np.empty(total_points, dtype=float_dtype)
+    hills_mz_flat = np.empty(total_points, dtype=float_dtype)
+
+    for idx_1, hill_feature in enumerate(hills_features):
+        idx_start = point_offsets[idx_1]
+        idx_end = point_offsets[idx_1+1]
+
+        tmp_scans = np.asarray(hill_feature['hills_scan_lists'], dtype=np.int32)
+        tmp_intensity = np.asarray(hill_feature['hills_intensity_list'], dtype=float_dtype)
+        tmp_mz = np.asarray(hill_feature['hills_mz_array'], dtype=float_dtype)
+
+        if not (tmp_scans.size == tmp_intensity.size == tmp_mz.size):
+            raise ValueError('Inconsistent hills list lengths for hill index %s' % (hill_feature.get('hill_idx'), ))
+
+        hills_scan_flat[idx_start:idx_end] = tmp_scans
+        hills_intensity_flat[idx_start:idx_end] = tmp_intensity
+        hills_mz_flat[idx_start:idx_end] = tmp_mz
+
+    def as_float_array(field_name):
+        return np.asarray([hill_feature[field_name] for hill_feature in hills_features], dtype=float_dtype)
+
+    payload = {
+        'schema_version': np.array(HILLS_NPZ_SCHEMA_VERSION, dtype=np.int32),
+        'hills_float': np.array(float_name),
+        'hill_idx': np.asarray([hill_feature['hill_idx'] for hill_feature in hills_features], dtype=np.int64),
+        'nScans': np.asarray([hill_feature['nScans'] for hill_feature in hills_features], dtype=np.int32),
+        'mz': as_float_array('mz'),
+        'rtApex': as_float_array('rtApex'),
+        'intensityApex': as_float_array('intensityApex'),
+        'intensitySum': as_float_array('intensitySum'),
+        'rtStart': as_float_array('rtStart'),
+        'rtEnd': as_float_array('rtEnd'),
+        'FAIMS': as_float_array('FAIMS'),
+        'im': as_float_array('im'),
+        'point_offsets': point_offsets,
+        'hills_scan_flat': hills_scan_flat,
+        'hills_intensity_flat': hills_intensity_flat,
+        'hills_mz_flat': hills_mz_flat,
+    }
+
+    return payload
+
+
+def _validate_hills_npz_payload(payload, source_path):
+    missing_keys = [key for key in HILLS_NPZ_REQUIRED_KEYS if key not in payload]
+    if missing_keys:
+        raise ValueError('Invalid hills NPZ file %s: missing keys: %s' % (source_path, ', '.join(missing_keys)))
+
+    schema_version = int(np.asarray(payload['schema_version']).reshape(-1)[0])
+    if schema_version != HILLS_NPZ_SCHEMA_VERSION:
+        raise ValueError(
+            'Unsupported hills NPZ schema version in %s: %s (expected %s)'
+            % (source_path, schema_version, HILLS_NPZ_SCHEMA_VERSION)
+        )
+
+    row_count = int(np.asarray(payload['hill_idx']).shape[0])
+    for key in HILLS_NPZ_FIXED_KEYS:
+        if int(np.asarray(payload[key]).shape[0]) != row_count:
+            raise ValueError('Invalid hills NPZ file %s: key %s has inconsistent row count.' % (source_path, key))
+
+    point_offsets = np.asarray(payload['point_offsets'])
+    if point_offsets.ndim != 1:
+        raise ValueError('Invalid hills NPZ file %s: point_offsets must be one-dimensional.' % (source_path, ))
+    if point_offsets.size != row_count + 1:
+        raise ValueError('Invalid hills NPZ file %s: point_offsets size mismatch.' % (source_path, ))
+    if point_offsets[0] != 0:
+        raise ValueError('Invalid hills NPZ file %s: point_offsets must start at 0.' % (source_path, ))
+    if np.any(np.diff(point_offsets) < 0):
+        raise ValueError('Invalid hills NPZ file %s: point_offsets must be nondecreasing.' % (source_path, ))
+
+    flat_scan = np.asarray(payload['hills_scan_flat'])
+    flat_intensity = np.asarray(payload['hills_intensity_flat'])
+    flat_mz = np.asarray(payload['hills_mz_flat'])
+    point_count = int(flat_scan.shape[0])
+
+    if int(flat_intensity.shape[0]) != point_count or int(flat_mz.shape[0]) != point_count:
+        raise ValueError('Invalid hills NPZ file %s: flattened point arrays must have identical size.' % (source_path, ))
+    if int(point_offsets[-1]) != point_count:
+        raise ValueError('Invalid hills NPZ file %s: point_offsets end does not match flattened arrays.' % (source_path, ))
+
+    nscans = np.asarray(payload['nScans'], dtype=np.int64)
+    if not np.array_equal(np.diff(point_offsets).astype(np.int64), nscans):
+        raise ValueError('Invalid hills NPZ file %s: nScans does not match point_offsets.' % (source_path, ))
+
+    hills_float = str(np.asarray(payload['hills_float']).reshape(-1)[0])
+    if hills_float not in ('float32', 'float64'):
+        raise ValueError('Invalid hills NPZ file %s: hills_float must be float32 or float64.' % (source_path, ))
+
+
+def _load_hills_npz_payload(npz_path):
+    with np.load(npz_path, allow_pickle=False) as npz_data:
+        payload = {key: npz_data[key] for key in npz_data.files}
+    _validate_hills_npz_payload(payload, npz_path)
+    return payload
+
+
+def _merge_hills_npz_payload(existing_payload, new_payload):
+    merged_payload = {
+        'schema_version': existing_payload['schema_version'],
+        'hills_float': existing_payload['hills_float'],
+    }
+
+    for key in HILLS_NPZ_FIXED_KEYS:
+        merged_payload[key] = np.concatenate((np.asarray(existing_payload[key]), np.asarray(new_payload[key])))
+
+    merged_payload['hills_scan_flat'] = np.concatenate(
+        (np.asarray(existing_payload['hills_scan_flat']), np.asarray(new_payload['hills_scan_flat']))
+    )
+    merged_payload['hills_intensity_flat'] = np.concatenate(
+        (np.asarray(existing_payload['hills_intensity_flat']), np.asarray(new_payload['hills_intensity_flat']))
+    )
+    merged_payload['hills_mz_flat'] = np.concatenate(
+        (np.asarray(existing_payload['hills_mz_flat']), np.asarray(new_payload['hills_mz_flat']))
+    )
+
+    existing_offsets = np.asarray(existing_payload['point_offsets'])
+    new_offsets = np.asarray(new_payload['point_offsets'])
+    if new_offsets.size > 1:
+        shifted_new_offsets = new_offsets[1:] + existing_offsets[-1]
+        merged_payload['point_offsets'] = np.concatenate((existing_offsets, shifted_new_offsets))
+    else:
+        merged_payload['point_offsets'] = existing_offsets.copy()
+
+    return merged_payload
+
+
+def write_hills_npz(hills_features, output_file, write_header, args):
+    float_dtype = _get_hills_float_dtype(args)
+    float_name = _get_hills_float_name(args)
+
+    new_payload = _build_hills_npz_payload(hills_features, float_dtype, float_name)
+    if not write_header and path.exists(output_file):
+        existing_payload = _load_hills_npz_payload(output_file)
+        existing_float = str(np.asarray(existing_payload['hills_float']).reshape(-1)[0])
+        if existing_float != float_name:
+            raise ValueError(
+                'Existing hills NPZ file uses %s precision, but current run requested %s.'
+                % (existing_float, float_name)
+            )
+        payload = _merge_hills_npz_payload(existing_payload, new_payload)
+    else:
+        payload = new_payload
+
+    np.savez_compressed(output_file, **payload)
+
+
+def get_hills_features_from_hills_npz(npz_path):
+    payload = _load_hills_npz_payload(npz_path)
+    row_count = int(np.asarray(payload['hill_idx']).shape[0])
+    point_offsets = np.asarray(payload['point_offsets'], dtype=np.int64)
+    hills_scan_flat = np.asarray(payload['hills_scan_flat'])
+    hills_intensity_flat = np.asarray(payload['hills_intensity_flat'])
+    hills_mz_flat = np.asarray(payload['hills_mz_flat'])
+
+    hills_scan_lists = []
+    hills_intensity_list = []
+    hills_mz_array = []
+    for idx_1 in range(row_count):
+        idx_start = point_offsets[idx_1]
+        idx_end = point_offsets[idx_1+1]
+        hills_scan_lists.append(hills_scan_flat[idx_start:idx_end].astype(np.int64).tolist())
+        hills_intensity_list.append(hills_intensity_flat[idx_start:idx_end].astype(float).tolist())
+        hills_mz_array.append(hills_mz_flat[idx_start:idx_end].astype(float).tolist())
+
+    return {
+        'rtApex': np.asarray(payload['rtApex']),
+        'intensityApex': np.asarray(payload['intensityApex']),
+        'intensitySum': np.asarray(payload['intensitySum']),
+        'nScans': np.asarray(payload['nScans']),
+        'mz': np.asarray(payload['mz']),
+        'rtStart': np.asarray(payload['rtStart']),
+        'rtEnd': np.asarray(payload['rtEnd']),
+        'FAIMS': np.asarray(payload['FAIMS']),
+        'im': np.asarray(payload['im']),
+        'hill_idx': np.asarray(payload['hill_idx']),
+        'hills_scan_lists': hills_scan_lists,
+        'hills_intensity_list': hills_intensity_list,
+        'hills_mz_array': hills_mz_array,
+    }
+
 
 
 
@@ -49,49 +368,23 @@ def filter_hills(hills_dict, ready_set, hill_mass_accuracy, paseftol):
     return hills_dict2
 
 def get_hills_dict_from_hills_features(hills_features, hill_mass_accuracy, paseftol):
-    hills_dict = dict()
-    hills_dict['hills_idx_array_unique'] = hills_features['hill_idx'].values
-    hills_dict['hills_mz_median'] = hills_features['mz'].values
+    hills_scan_lists = _parse_ragged_column(hills_features['hills_scan_lists'])
+    hills_intensity_array = _parse_ragged_column(hills_features['hills_intensity_list'])
 
-
-    max_mz_value = max(hills_dict['hills_mz_median'])
-    mz_step = hill_mass_accuracy * 1e-6 * max_mz_value
-
-    if np.any(hills_features['im']):
-        hills_dict['hills_im_median'] = hills_features['im'].values
-
-    hills_dict['hills_lengths'] = hills_features['nScans'].values
-    hills_dict['hills_scan_lists'] = hills_features['hills_scan_lists'].apply(ast.literal_eval).values
-    hills_dict['hills_scan_sets'] = [set(slist) for slist in hills_dict['hills_scan_lists']]
-    hills_dict['hills_intensity_array'] = hills_features['hills_intensity_list'].apply(ast.literal_eval).values
-
-    hills_dict['hills_mz_median_fast_dict'] = defaultdict(list)
-    if paseftol > 0:
-        hills_dict['hills_im_median_fast_dict'] = defaultdict(set)
-
-    for idx_1, mz_val in enumerate(hills_features['mz'].values):
-        mz_median_int = int(mz_val / mz_step)
-        tmp_scans_list = hills_dict['hills_scan_lists'][idx_1]
-        tmp_val = (idx_1, tmp_scans_list[0], tmp_scans_list[-1])
-        hills_dict['hills_mz_median_fast_dict'][mz_median_int-1].append(tmp_val)
-        hills_dict['hills_mz_median_fast_dict'][mz_median_int].append(tmp_val)
-        hills_dict['hills_mz_median_fast_dict'][mz_median_int+1].append(tmp_val)
-
-        if paseftol > 0:
-            im_median_int = int(hills_features['im'].values[idx_1] / paseftol)
-            hills_dict['hills_im_median_fast_dict'][im_median_int-1].add(idx_1)
-            hills_dict['hills_im_median_fast_dict'][im_median_int].add(idx_1)
-            hills_dict['hills_im_median_fast_dict'][im_median_int+1].add(idx_1)
-
-    hills_dict['hills_idict'] = [None] * len(hills_dict['hills_idx_array_unique'])
-    hills_dict['hill_sqrt_of_i'] = [None] * len(hills_dict['hills_idx_array_unique'])
-    hills_dict['hills_intensity_apex'] = [None] * len(hills_dict['hills_idx_array_unique'])
-    hills_dict['hills_scan_apex'] = [None] * len(hills_dict['hills_idx_array_unique'])
-
-    hills_dict['rtStart'] = hills_features['rtStart'].values
-    hills_dict['rtEnd'] = hills_features['rtEnd'].values
-    hills_dict['rtApex'] = hills_features['rtApex'].values
-
+    hills_im_median = hills_features['im'].values if 'im' in hills_features else None
+    hills_dict, mz_step = _build_hills_dict(
+        hills_idx_array_unique=hills_features['hill_idx'].values,
+        hills_mz_median=hills_features['mz'].values,
+        hills_im_median=hills_im_median,
+        hills_lengths=hills_features['nScans'].values,
+        hills_scan_lists=hills_scan_lists,
+        hills_intensity_array=hills_intensity_array,
+        rt_start=hills_features['rtStart'].values,
+        rt_end=hills_features['rtEnd'].values,
+        rt_apex=hills_features['rtApex'].values,
+        hill_mass_accuracy=hill_mass_accuracy,
+        paseftol=paseftol,
+    )
     return hills_dict, mz_step
 
 
@@ -167,15 +460,11 @@ def calc_peptide_features(hills_dict, peptide_features, negative_mode, faims_val
 
 
 def write_output(peptide_features, args, write_header=True, hills=False):
+    output_file = _get_output_file(args, hills=hills)
 
-    input_mzml_path = args['file']
-
-    if args['o']:
-        output_file = args['o'] if not hills else (path.splitext(args['o'])[0]\
-            + path.extsep + 'hills.tsv')
-    else:
-        output_file = path.splitext(input_mzml_path)[0]\
-            + path.extsep + ('features.tsv' if not hills else 'hills.tsv')
+    if hills and args.get('hills_format', 'tsv') == 'npz':
+        write_hills_npz(peptide_features, output_file, write_header, args)
+        return
 
     if hills:
 

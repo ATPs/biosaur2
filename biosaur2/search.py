@@ -1,8 +1,17 @@
 from . import main, main_dia, main_dia2
 import argparse
 from copy import deepcopy
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 import logging
 import os
+
+
+def _get_biosaur2_version():
+    try:
+        return pkg_version('biosaur2')
+    except PackageNotFoundError:
+        return 'unknown'
+
 
 def run():
     parser = argparse.ArgumentParser(
@@ -16,6 +25,11 @@ def run():
     ''',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
+    parser.add_argument(
+        '--version',
+        action='version',
+        version='%(prog)s {}'.format(_get_biosaur2_version()),
+    )
     parser.add_argument('files', help='input mzML or hills (Experimental) files', nargs='+')
     parser.add_argument('-mini', help='min intensity', default=1, type=float)
     parser.add_argument('-minmz', help='min mz', default=350, type=float)
@@ -46,7 +60,9 @@ def run():
     parser.add_argument('-debug', help='log debugging information', action='store_true')
     parser.add_argument('-tof', help='smart tof processing. Experimental', action='store_true')
     parser.add_argument('-profile', help='profile processing. Experimental', action='store_true')
-    parser.add_argument('-write_hills', help='write tsv file with detected hills', action='store_true')
+    parser.add_argument('-write_hills', help='write detected hills output file (format is controlled by --hills_format)', action='store_true')
+    parser.add_argument('--hills_format', help='hills output format used by -write_hills', default='tsv', choices=['tsv', 'npz'])
+    parser.add_argument('--hills_float', help='floating-point precision for all NPZ hills float fields', default='float32', choices=['float32', 'float64'])
     parser.add_argument('--stop_after_hills', help='stop processing after writing hills output', action='store_true')
     parser.add_argument('-write_extra_details', help='write extra details for features', action='store_true')
     parser.add_argument('-md_correction', help='EXPERIMENTAL. Can be Orbi, Icr or Tof. Sqrt, Linear or Uniform mass error normalization, respectively.', default='Orbi')

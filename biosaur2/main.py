@@ -545,11 +545,14 @@ def process_file(args):
 
 
 
-    elif input_file_path.lower().endswith('.hills.tsv'):
+    elif input_file_path.lower().endswith('.hills.tsv') or input_file_path.lower().endswith('.hills.npz'):
         if stop_after_hills and not stop_after_logged:
-            logger.info('--stop_after_hills flag has no effect when reading hills.tsv input; proceeding with feature detection.')
+            logger.info('--stop_after_hills flag has no effect when reading hills input; proceeding with feature detection.')
             stop_after_logged = True
-        hills_features = pd.read_table(input_file_path)
+        if input_file_path.lower().endswith('.hills.tsv'):
+            hills_features = pd.read_table(input_file_path)
+        else:
+            hills_features = pd.DataFrame(utils.get_hills_features_from_hills_npz(input_file_path))
         RT_dict = False
         write_header = True
         data_start_id = 0
