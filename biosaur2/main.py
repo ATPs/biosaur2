@@ -268,7 +268,16 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
 
     negative_mode = args['nm']
     isotopes_for_intensity = args['iuse']
-    peptide_features = utils.calc_peptide_features(hills_dict, ready_final, negative_mode, faims_val, RT_dict, data_start_id, isotopes_for_intensity)
+    peptide_features = utils.calc_peptide_features(
+        hills_dict,
+        ready_final,
+        negative_mode,
+        faims_val,
+        RT_dict,
+        data_start_id,
+        isotopes_for_intensity,
+        include_mono_hills=not args.get('no_mono_hills', False),
+    )
 
     utils.write_output(peptide_features, args, write_header)
 
@@ -419,6 +428,9 @@ def process_file(args):
         md_correction_int = 1
 
     if input_file_path.lower().endswith('.mzml'):
+        if args.get('write_ms1', False):
+            ms1_rows = utils.collect_ms1_rows(args)
+            utils.write_ms1_output(ms1_rows, args)
 
         write_header = True
 
@@ -520,7 +532,15 @@ def process_file(args):
 
             logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array'])))
             if args['write_hills']:
-                hills_dict, hills_features = utils.process_hills_extra(hills_dict, RT_dict, faims_val, data_start_id, mz_step, paseftol)
+                hills_dict, hills_features = utils.process_hills_extra(
+                    hills_dict,
+                    RT_dict,
+                    faims_val,
+                    data_start_id,
+                    mz_step,
+                    paseftol,
+                    data_for_analyse_tmp=data_for_analyse_tmp,
+                )
                 utils.write_output(hills_features, args, write_header, hills=True)
 
             if stop_after_hills:
@@ -545,12 +565,20 @@ def process_file(args):
 
 
 
-    elif input_file_path.lower().endswith('.hills.tsv') or input_file_path.lower().endswith('.hills.npz'):
+    elif (
+        input_file_path.lower().endswith('.hills.tsv')
+        or input_file_path.lower().endswith('.hills.parquet')
+        or input_file_path.lower().endswith('.hills.npz')
+    ):
+        if args.get('write_ms1', False):
+            logger.warning('--write_ms1 requires mzML input and is ignored for hills input: %s', input_file_path)
         if stop_after_hills and not stop_after_logged:
             logger.info('--stop_after_hills flag has no effect when reading hills input; proceeding with feature detection.')
             stop_after_logged = True
         if input_file_path.lower().endswith('.hills.tsv'):
             hills_features = pd.read_table(input_file_path)
+        elif input_file_path.lower().endswith('.hills.parquet'):
+            hills_features = pd.read_parquet(input_file_path, engine='pyarrow')
         else:
             hills_features = pd.DataFrame(utils.get_hills_features_from_hills_npz(input_file_path))
         RT_dict = False

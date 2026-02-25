@@ -2,6 +2,7 @@ pyteomics
 scipy
 numpy>=1.17
 pandas
+pyarrow
 lxml
 cython
 setuptools

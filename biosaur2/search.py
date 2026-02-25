@@ -61,10 +61,60 @@ def run():
     parser.add_argument('-tof', help='smart tof processing. Experimental', action='store_true')
     parser.add_argument('-profile', help='profile processing. Experimental', action='store_true')
     parser.add_argument('-write_hills', help='write detected hills output file (format is controlled by --hills_format)', action='store_true')
-    parser.add_argument('--hills_format', help='hills output format used by -write_hills', default='tsv', choices=['tsv', 'npz'])
-    parser.add_argument('--hills_float', help='floating-point precision for all NPZ hills float fields', default='float32', choices=['float32', 'float64'])
+    parser.add_argument(
+        '--hills_format',
+        help='hills output format used by -write_hills',
+        default='tsv',
+        choices=['tsv', 'parquet'],
+    )
+    parser.add_argument(
+        '--no_hill_list',
+        help='for -write_hills output, do not include hills_scan_lists/hills_intensity_list/hills_mz_array (output cannot be reused for feature detection)',
+        action='store_true',
+    )
+    parser.add_argument(
+        '--write_ms1',
+        help='write MS1 summary output (scan_id, RT in seconds, total_intensity)',
+        action='store_true',
+    )
+    parser.add_argument(
+        '--ms1_format',
+        help='MS1 summary output format used by --write_ms1',
+        default='tsv',
+        choices=['tsv', 'parquet'],
+    )
+    parser.add_argument(
+        '--feature_format',
+        help='feature output format',
+        default='tsv',
+        choices=['tsv', 'parquet'],
+    )
+    parser.add_argument(
+        '--no-mono-hills',
+        help='do not include mono_hills_scan_lists and mono_hills_intensity_list in feature output',
+        action='store_true',
+    )
+    parser.add_argument(
+        '--64',
+        dest='use64',
+        help=(
+            'for parquet output, store rtApex/mz/rtStart/rtEnd/FAIMS/im/hill_idx and list elements '
+            'in hills_scan_lists/hills_intensity_list/hills_mz_array (and mono_hills_* lists), '
+            'plus MS1 columns scan_id/RT/total_intensity, as 64-bit types; default parquet mode uses 32-bit types.'
+        ),
+        action='store_true',
+    )
     parser.add_argument('--stop_after_hills', help='stop processing after writing hills output', action='store_true')
-    parser.add_argument('-write_extra_details', help='write extra details for features', action='store_true')
+    parser.add_argument(
+        '-write_extra_details',
+        help=(
+            'write additional per-feature diagnostic columns to feature output '
+            '(including isotope candidate details such as isotopes, '
+            'intensity_array_for_cos_corr, monoisotope hill/index IDs). '
+            'This option is intended for debugging/inspection and increases output size.'
+        ),
+        action='store_true',
+    )
     parser.add_argument('-md_correction', help='EXPERIMENTAL. Can be Orbi, Icr or Tof. Sqrt, Linear or Uniform mass error normalization, respectively.', default='Orbi')
     parser.add_argument(
         "-combine_every",
@@ -73,6 +123,8 @@ def run():
         type=int,
     )
     args = vars(parser.parse_args())
+    if args['no_mono_hills'] and args['dia']:
+        parser.error('--no-mono-hills cannot be used with -dia because DIA processing requires mono_hills_* columns.')
     forced_write_hills = args['stop_after_hills'] and not args['write_hills']
     if forced_write_hills:
         args['write_hills'] = True

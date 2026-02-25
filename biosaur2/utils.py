@@ -1,24 +1,23 @@
 from pyteomics import mzml
 import numpy as np
+import pandas as pd
 from collections import defaultdict, Counter
 from os import path
 import math
+import re
 from scipy.optimize import curve_fit
 import logging
 logger = logging.getLogger(__name__)
 from .cutils import get_fast_dict, get_and_calc_apex_intensity_and_scan, centroid_pasef_scan
 import ast
 
+_SCAN_ID_MISMATCH_WARNED = False
+
 HILLS_NPZ_SCHEMA_VERSION = 1
 HILLS_NPZ_REQUIRED_KEYS = (
     'schema_version',
-    'hills_float',
-    'hill_idx',
-    'nScans',
     'mz',
     'rtApex',
-    'intensityApex',
-    'intensitySum',
     'rtStart',
     'rtEnd',
     'FAIMS',
@@ -26,19 +25,88 @@ HILLS_NPZ_REQUIRED_KEYS = (
     'point_offsets',
     'hills_scan_flat',
     'hills_intensity_flat',
-    'hills_mz_flat',
 )
 HILLS_NPZ_FIXED_KEYS = (
-    'hill_idx',
-    'nScans',
     'mz',
     'rtApex',
-    'intensityApex',
-    'intensitySum',
     'rtStart',
     'rtEnd',
     'FAIMS',
     'im',
+)
+HILLS_BASE_COLUMNS = (
+    'rtApex',
+    'intensityApex',
+    'intensitySum',
+    'nScans',
+    'mz',
+    'rtStart',
+    'rtEnd',
+    'FAIMS',
+    'im',
+    'scanApex',
+    'hill_idx',
+)
+HILLS_LIST_COLUMNS = (
+    'hills_scan_lists',
+    'hills_intensity_list',
+    'hills_mz_array',
+)
+FEATURE_BASE_COLUMNS = (
+    'massCalib',
+    'rtApex',
+    'intensityApex',
+    'intensitySum',
+    'charge',
+    'nIsotopes',
+    'nScans',
+    'mz',
+    'rtStart',
+    'rtEnd',
+    'FAIMS',
+    'im',
+)
+FEATURE_POST_MONO_COLUMNS = (
+    'scanApex',
+    'isoerror',
+    'isoerror2',
+)
+FEATURE_MONO_HILLS_COLUMNS = (
+    'mono_hills_scan_lists',
+    'mono_hills_intensity_list',
+)
+FEATURE_EXTRA_COLUMNS = (
+    'isoerror',
+    'isotopes',
+    'intensity_array_for_cos_corr',
+    'monoisotope hill idx',
+    'monoisotope idx',
+)
+PARQUET_FLOAT_COLUMNS = (
+    'rtApex',
+    'mz',
+    'rtStart',
+    'rtEnd',
+    'FAIMS',
+    'im',
+)
+PARQUET_INT_COLUMNS = (
+    'hill_idx',
+    'scanApex',
+)
+PARQUET_INT_LIST_COLUMNS = (
+    'hills_scan_lists',
+    'mono_hills_scan_lists',
+)
+PARQUET_FLOAT_LIST_COLUMNS = (
+    'hills_intensity_list',
+    'hills_mz_array',
+    'mono_hills_intensity_list',
+)
+MS1_OUTPUT_COLUMNS = (
+    'scan_id',
+    'RT',
+    'total_intensity',
 )
 
 
@@ -55,18 +123,33 @@ def _get_hills_float_dtype(args):
     raise ValueError('Unsupported hills float type: %s' % (float_name, ))
 
 
-def _get_output_file(args, hills=False):
+def _get_output_file(args, hills=False, ms1=False):
     input_mzml_path = args['file']
+    if hills and ms1:
+        raise ValueError('hills and ms1 output modes are mutually exclusive.')
+
     if hills:
         hills_ext = 'hills.tsv'
-        if args.get('hills_format', 'tsv') == 'npz':
-            hills_ext = 'hills.npz'
+        if args.get('hills_format', 'tsv') == 'parquet':
+            hills_ext = 'hills.parquet'
         if args['o']:
             return path.splitext(args['o'])[0] + path.extsep + hills_ext
         return path.splitext(input_mzml_path)[0] + path.extsep + hills_ext
+
+    if ms1:
+        ms1_ext = 'ms1.tsv'
+        if args.get('ms1_format', 'tsv') == 'parquet':
+            ms1_ext = 'ms1.parquet'
+        if args['o']:
+            return path.splitext(args['o'])[0] + path.extsep + ms1_ext
+        return path.splitext(input_mzml_path)[0] + path.extsep + ms1_ext
+
     if args['o']:
         return args['o']
-    return path.splitext(input_mzml_path)[0] + path.extsep + 'features.tsv'
+    feature_ext = 'features.tsv'
+    if args.get('feature_format', 'tsv') == 'parquet':
+        feature_ext = 'features.parquet'
+    return path.splitext(input_mzml_path)[0] + path.extsep + feature_ext
 
 
 def _build_hills_dict(
@@ -139,6 +222,96 @@ def _parse_ragged_column(column):
     return column.values
 
 
+def _format_tsv_float(value):
+    if math.isnan(value) or math.isinf(value):
+        return str(value)
+    formatted = f'{value:.5f}'.rstrip('0').rstrip('.')
+    if formatted == '-0':
+        return '0'
+    return formatted
+
+
+def _format_tsv_cell(value):
+    if isinstance(value, np.generic):
+        return _format_tsv_cell(value.item())
+    if isinstance(value, np.ndarray):
+        return _format_tsv_cell(value.tolist())
+    if isinstance(value, float):
+        return _format_tsv_float(value)
+    if isinstance(value, (list, tuple)):
+        return '[' + ', '.join(_format_tsv_cell(v) for v in value) + ']'
+    return str(value)
+
+
+def _get_parquet_dtypes(args):
+    if args.get('use64'):
+        return np.int64, np.float64
+    return np.int32, np.float32
+
+
+def _cast_parquet_list(value, dtype):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return np.asarray([], dtype=dtype)
+    if isinstance(value, np.ndarray):
+        return np.asarray(value, dtype=dtype)
+    if isinstance(value, (list, tuple)):
+        return np.asarray(value, dtype=dtype)
+    return np.asarray([value], dtype=dtype)
+
+
+def _apply_parquet_types(df, args):
+    int_dtype, float_dtype = _get_parquet_dtypes(args)
+
+    for col in PARQUET_FLOAT_COLUMNS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='raise').astype(float_dtype)
+
+    for col in PARQUET_INT_COLUMNS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='raise').astype(int_dtype)
+
+    for col in PARQUET_INT_LIST_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda v: _cast_parquet_list(v, int_dtype))
+
+    for col in PARQUET_FLOAT_LIST_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda v: _cast_parquet_list(v, float_dtype))
+
+    return df
+
+
+def _prepare_parquet_dataframe(rows, columns, args):
+    df = pd.DataFrame(rows, columns=columns)
+    return _apply_parquet_types(df, args)
+
+
+def _write_parquet_dataframe(new_df, output_file, write_header, args):
+    if not write_header and path.exists(output_file):
+        try:
+            existing_df = pd.read_parquet(output_file, engine='pyarrow')
+        except ImportError as exc:
+            raise ImportError(
+                'Parquet support requires optional dependency pyarrow. Please install pyarrow.'
+            ) from exc
+        new_df = pd.concat((existing_df, new_df), ignore_index=True)
+
+    new_df = _apply_parquet_types(new_df, args)
+
+    try:
+        new_df.to_parquet(
+            output_file,
+            index=False,
+            compression='zstd',
+            compression_level=3,
+            engine='pyarrow',
+        )
+    except ImportError as exc:
+        raise ImportError(
+            'Parquet support requires optional dependency pyarrow. Please install pyarrow.'
+        ) from exc
+
+
 def _build_hills_npz_payload(hills_features, float_dtype, float_name):
     row_count = len(hills_features)
 
@@ -149,7 +322,6 @@ def _build_hills_npz_payload(hills_features, float_dtype, float_name):
     total_points = int(point_offsets[-1])
     hills_scan_flat = np.empty(total_points, dtype=np.int32)
     hills_intensity_flat = np.empty(total_points, dtype=float_dtype)
-    hills_mz_flat = np.empty(total_points, dtype=float_dtype)
 
     for idx_1, hill_feature in enumerate(hills_features):
         idx_start = point_offsets[idx_1]
@@ -157,27 +329,19 @@ def _build_hills_npz_payload(hills_features, float_dtype, float_name):
 
         tmp_scans = np.asarray(hill_feature['hills_scan_lists'], dtype=np.int32)
         tmp_intensity = np.asarray(hill_feature['hills_intensity_list'], dtype=float_dtype)
-        tmp_mz = np.asarray(hill_feature['hills_mz_array'], dtype=float_dtype)
-
-        if not (tmp_scans.size == tmp_intensity.size == tmp_mz.size):
+        if tmp_scans.size != tmp_intensity.size:
             raise ValueError('Inconsistent hills list lengths for hill index %s' % (hill_feature.get('hill_idx'), ))
 
         hills_scan_flat[idx_start:idx_end] = tmp_scans
         hills_intensity_flat[idx_start:idx_end] = tmp_intensity
-        hills_mz_flat[idx_start:idx_end] = tmp_mz
 
     def as_float_array(field_name):
         return np.asarray([hill_feature[field_name] for hill_feature in hills_features], dtype=float_dtype)
 
     payload = {
         'schema_version': np.array(HILLS_NPZ_SCHEMA_VERSION, dtype=np.int32),
-        'hills_float': np.array(float_name),
-        'hill_idx': np.asarray([hill_feature['hill_idx'] for hill_feature in hills_features], dtype=np.int64),
-        'nScans': np.asarray([hill_feature['nScans'] for hill_feature in hills_features], dtype=np.int32),
         'mz': as_float_array('mz'),
         'rtApex': as_float_array('rtApex'),
-        'intensityApex': as_float_array('intensityApex'),
-        'intensitySum': as_float_array('intensitySum'),
         'rtStart': as_float_array('rtStart'),
         'rtEnd': as_float_array('rtEnd'),
         'FAIMS': as_float_array('FAIMS'),
@@ -185,7 +349,6 @@ def _build_hills_npz_payload(hills_features, float_dtype, float_name):
         'point_offsets': point_offsets,
         'hills_scan_flat': hills_scan_flat,
         'hills_intensity_flat': hills_intensity_flat,
-        'hills_mz_flat': hills_mz_flat,
     }
 
     return payload
@@ -203,10 +366,14 @@ def _validate_hills_npz_payload(payload, source_path):
             % (source_path, schema_version, HILLS_NPZ_SCHEMA_VERSION)
         )
 
-    row_count = int(np.asarray(payload['hill_idx']).shape[0])
+    row_count = int(np.asarray(payload['mz']).shape[0])
     for key in HILLS_NPZ_FIXED_KEYS:
         if int(np.asarray(payload[key]).shape[0]) != row_count:
             raise ValueError('Invalid hills NPZ file %s: key %s has inconsistent row count.' % (source_path, key))
+
+    for optional_key in ('hill_idx', 'nScans', 'intensityApex', 'intensitySum'):
+        if optional_key in payload and int(np.asarray(payload[optional_key]).shape[0]) != row_count:
+            raise ValueError('Invalid hills NPZ file %s: key %s has inconsistent row count.' % (source_path, optional_key))
 
     point_offsets = np.asarray(payload['point_offsets'])
     if point_offsets.ndim != 1:
@@ -220,21 +387,27 @@ def _validate_hills_npz_payload(payload, source_path):
 
     flat_scan = np.asarray(payload['hills_scan_flat'])
     flat_intensity = np.asarray(payload['hills_intensity_flat'])
-    flat_mz = np.asarray(payload['hills_mz_flat'])
     point_count = int(flat_scan.shape[0])
 
-    if int(flat_intensity.shape[0]) != point_count or int(flat_mz.shape[0]) != point_count:
+    if int(flat_intensity.shape[0]) != point_count:
         raise ValueError('Invalid hills NPZ file %s: flattened point arrays must have identical size.' % (source_path, ))
     if int(point_offsets[-1]) != point_count:
         raise ValueError('Invalid hills NPZ file %s: point_offsets end does not match flattened arrays.' % (source_path, ))
 
-    nscans = np.asarray(payload['nScans'], dtype=np.int64)
-    if not np.array_equal(np.diff(point_offsets).astype(np.int64), nscans):
-        raise ValueError('Invalid hills NPZ file %s: nScans does not match point_offsets.' % (source_path, ))
+    if 'hills_mz_flat' in payload:
+        flat_mz = np.asarray(payload['hills_mz_flat'])
+        if int(flat_mz.shape[0]) != point_count:
+            raise ValueError('Invalid hills NPZ file %s: flattened point arrays must have identical size.' % (source_path, ))
 
-    hills_float = str(np.asarray(payload['hills_float']).reshape(-1)[0])
-    if hills_float not in ('float32', 'float64'):
-        raise ValueError('Invalid hills NPZ file %s: hills_float must be float32 or float64.' % (source_path, ))
+    if 'nScans' in payload:
+        nscans = np.asarray(payload['nScans'], dtype=np.int64)
+        if not np.array_equal(np.diff(point_offsets).astype(np.int64), nscans):
+            raise ValueError('Invalid hills NPZ file %s: nScans does not match point_offsets.' % (source_path, ))
+
+    if 'hills_float' in payload:
+        hills_float = str(np.asarray(payload['hills_float']).reshape(-1)[0])
+        if hills_float not in ('float32', 'float64'):
+            raise ValueError('Invalid hills NPZ file %s: hills_float must be float32 or float64.' % (source_path, ))
 
 
 def _load_hills_npz_payload(npz_path):
@@ -247,11 +420,16 @@ def _load_hills_npz_payload(npz_path):
 def _merge_hills_npz_payload(existing_payload, new_payload):
     merged_payload = {
         'schema_version': existing_payload['schema_version'],
-        'hills_float': existing_payload['hills_float'],
     }
 
     for key in HILLS_NPZ_FIXED_KEYS:
         merged_payload[key] = np.concatenate((np.asarray(existing_payload[key]), np.asarray(new_payload[key])))
+
+    for optional_key in ('hill_idx', 'nScans', 'intensityApex', 'intensitySum'):
+        if optional_key in existing_payload and optional_key in new_payload:
+            merged_payload[optional_key] = np.concatenate(
+                (np.asarray(existing_payload[optional_key]), np.asarray(new_payload[optional_key]))
+            )
 
     merged_payload['hills_scan_flat'] = np.concatenate(
         (np.asarray(existing_payload['hills_scan_flat']), np.asarray(new_payload['hills_scan_flat']))
@@ -259,9 +437,10 @@ def _merge_hills_npz_payload(existing_payload, new_payload):
     merged_payload['hills_intensity_flat'] = np.concatenate(
         (np.asarray(existing_payload['hills_intensity_flat']), np.asarray(new_payload['hills_intensity_flat']))
     )
-    merged_payload['hills_mz_flat'] = np.concatenate(
-        (np.asarray(existing_payload['hills_mz_flat']), np.asarray(new_payload['hills_mz_flat']))
-    )
+    if 'hills_mz_flat' in existing_payload and 'hills_mz_flat' in new_payload:
+        merged_payload['hills_mz_flat'] = np.concatenate(
+            (np.asarray(existing_payload['hills_mz_flat']), np.asarray(new_payload['hills_mz_flat']))
+        )
 
     existing_offsets = np.asarray(existing_payload['point_offsets'])
     new_offsets = np.asarray(new_payload['point_offsets'])
@@ -276,17 +455,10 @@ def _merge_hills_npz_payload(existing_payload, new_payload):
 
 def write_hills_npz(hills_features, output_file, write_header, args):
     float_dtype = _get_hills_float_dtype(args)
-    float_name = _get_hills_float_name(args)
 
-    new_payload = _build_hills_npz_payload(hills_features, float_dtype, float_name)
+    new_payload = _build_hills_npz_payload(hills_features, float_dtype, _get_hills_float_name(args))
     if not write_header and path.exists(output_file):
         existing_payload = _load_hills_npz_payload(output_file)
-        existing_float = str(np.asarray(existing_payload['hills_float']).reshape(-1)[0])
-        if existing_float != float_name:
-            raise ValueError(
-                'Existing hills NPZ file uses %s precision, but current run requested %s.'
-                % (existing_float, float_name)
-            )
         payload = _merge_hills_npz_payload(existing_payload, new_payload)
     else:
         payload = new_payload
@@ -294,13 +466,106 @@ def write_hills_npz(hills_features, output_file, write_header, args):
     np.savez_compressed(output_file, **payload)
 
 
+def write_hills_parquet(hills_features, output_file, write_header, args, columns_for_output):
+    new_df = _prepare_parquet_dataframe(hills_features, columns_for_output, args)
+    _write_parquet_dataframe(new_df, output_file, write_header, args)
+
+
+def write_features_parquet(peptide_features, output_file, write_header, columns_for_output, args):
+    new_df = _prepare_parquet_dataframe(peptide_features, columns_for_output, args)
+    _write_parquet_dataframe(new_df, output_file, write_header, args)
+
+
+def _extract_ms1_scan_id(spec, fallback_idx):
+    global _SCAN_ID_MISMATCH_WARNED
+
+    spec_id = str(spec.get('id', ''))
+    m = re.search(r'scan=(\d+)', spec_id)
+    scan_from_id = None
+    if m:
+        scan_from_id = int(m.group(1))
+
+    scan_from_index = None
+    if 'index' in spec:
+        try:
+            scan_from_index = int(spec['index']) + 1
+        except (TypeError, ValueError):
+            scan_from_index = None
+
+    if scan_from_id is not None:
+        if (
+            scan_from_index is not None
+            and scan_from_id != scan_from_index
+            and not _SCAN_ID_MISMATCH_WARNED
+        ):
+            logger.warning(
+                'Mismatch between spectrum id scan= value (%d) and index+1 (%d). '
+                'Using scan= value for scan_id/scanApex.',
+                scan_from_id,
+                scan_from_index,
+            )
+            _SCAN_ID_MISMATCH_WARNED = True
+        return scan_from_id
+
+    if scan_from_index is not None:
+        return scan_from_index
+
+    return int(fallback_idx) + 1
+
+
+def collect_ms1_rows(args):
+    rows = []
+    input_mzml_path = args['file']
+
+    for fallback_idx, spec in enumerate(MS1OnlyMzML(source=input_mzml_path)):
+        scan_info = spec['scanList']['scan'][0]
+        rt_seconds = float(scan_info['scan start time']) * 60.0
+        total_intensity = float(spec.get('total ion current', np.sum(spec.get('intensity array', []))))
+        rows.append(
+            {
+                'scan_id': _extract_ms1_scan_id(spec, fallback_idx),
+                'RT': rt_seconds,
+                'total_intensity': total_intensity,
+            }
+        )
+
+    return rows
+
+
+def write_ms1_output(ms1_rows, args):
+    output_file = _get_output_file(args, ms1=True)
+
+    if args.get('ms1_format', 'tsv') == 'parquet':
+        int_dtype, float_dtype = _get_parquet_dtypes(args)
+        df = pd.DataFrame(ms1_rows, columns=MS1_OUTPUT_COLUMNS)
+        if len(df):
+            df['scan_id'] = pd.to_numeric(df['scan_id'], errors='raise').astype(int_dtype)
+            df['RT'] = pd.to_numeric(df['RT'], errors='raise').astype(float_dtype)
+            df['total_intensity'] = pd.to_numeric(df['total_intensity'], errors='raise').astype(float_dtype)
+        df.to_parquet(
+            output_file,
+            index=False,
+            compression='zstd',
+            compression_level=3,
+            engine='pyarrow',
+        )
+        return
+
+    with open(output_file, 'w') as out_file:
+        out_file.write('\t'.join(MS1_OUTPUT_COLUMNS) + '\n')
+        for row in ms1_rows:
+            out_file.write('\t'.join([_format_tsv_cell(row[col]) for col in MS1_OUTPUT_COLUMNS]) + '\n')
+
+
 def get_hills_features_from_hills_npz(npz_path):
     payload = _load_hills_npz_payload(npz_path)
-    row_count = int(np.asarray(payload['hill_idx']).shape[0])
+    row_count = int(np.asarray(payload['mz']).shape[0])
     point_offsets = np.asarray(payload['point_offsets'], dtype=np.int64)
     hills_scan_flat = np.asarray(payload['hills_scan_flat'])
     hills_intensity_flat = np.asarray(payload['hills_intensity_flat'])
-    hills_mz_flat = np.asarray(payload['hills_mz_flat'])
+    has_flat_mz = 'hills_mz_flat' in payload
+    if has_flat_mz:
+        hills_mz_flat = np.asarray(payload['hills_mz_flat'])
 
     hills_scan_lists = []
     hills_intensity_list = []
@@ -310,19 +575,20 @@ def get_hills_features_from_hills_npz(npz_path):
         idx_end = point_offsets[idx_1+1]
         hills_scan_lists.append(hills_scan_flat[idx_start:idx_end].astype(np.int64).tolist())
         hills_intensity_list.append(hills_intensity_flat[idx_start:idx_end].astype(float).tolist())
-        hills_mz_array.append(hills_mz_flat[idx_start:idx_end].astype(float).tolist())
+        if has_flat_mz:
+            hills_mz_array.append(hills_mz_flat[idx_start:idx_end].astype(float).tolist())
+        else:
+            hills_mz_array.append(np.full(idx_end - idx_start, payload['mz'][idx_1], dtype=float).tolist())
 
     return {
         'rtApex': np.asarray(payload['rtApex']),
-        'intensityApex': np.asarray(payload['intensityApex']),
-        'intensitySum': np.asarray(payload['intensitySum']),
-        'nScans': np.asarray(payload['nScans']),
+        'nScans': np.diff(point_offsets).astype(np.int32),
         'mz': np.asarray(payload['mz']),
         'rtStart': np.asarray(payload['rtStart']),
         'rtEnd': np.asarray(payload['rtEnd']),
         'FAIMS': np.asarray(payload['FAIMS']),
         'im': np.asarray(payload['im']),
-        'hill_idx': np.asarray(payload['hill_idx']),
+        'hill_idx': np.asarray(payload['hill_idx']) if 'hill_idx' in payload else np.arange(row_count, dtype=np.int64),
         'hills_scan_lists': hills_scan_lists,
         'hills_intensity_list': hills_intensity_list,
         'hills_mz_array': hills_mz_array,
@@ -368,6 +634,14 @@ def filter_hills(hills_dict, ready_set, hill_mass_accuracy, paseftol):
     return hills_dict2
 
 def get_hills_dict_from_hills_features(hills_features, hill_mass_accuracy, paseftol):
+    missing_cols = [col for col in ('hills_scan_lists', 'hills_intensity_list') if col not in hills_features.columns]
+    if missing_cols:
+        raise ValueError(
+            'Hills input is missing required columns: %s. '
+            'If this hills file was generated with --no_hill_list, it cannot be used for feature detection.'
+            % (', '.join(missing_cols), )
+        )
+
     hills_scan_lists = _parse_ragged_column(hills_features['hills_scan_lists'])
     hills_intensity_array = _parse_ragged_column(hills_features['hills_intensity_list'])
 
@@ -388,7 +662,7 @@ def get_hills_dict_from_hills_features(hills_features, hill_mass_accuracy, pasef
     return hills_dict, mz_step
 
 
-def process_hills_extra(hills_dict, RT_dict, faims_val, data_start_id, mz_step, paseftol):
+def process_hills_extra(hills_dict, RT_dict, faims_val, data_start_id, mz_step, paseftol, data_for_analyse_tmp=None):
 
     hills_features = []
     for idx_1 in range(len(hills_dict['hills_idx_array_unique'])):
@@ -406,16 +680,31 @@ def process_hills_extra(hills_dict, RT_dict, faims_val, data_start_id, mz_step, 
             hill_feature['im'] = hills_dict['hills_im_median'][idx_1]
         else:
             hill_feature['im'] = 0
+        if data_for_analyse_tmp is not None and hill_scan_apex_1 < len(data_for_analyse_tmp):
+            hill_feature['scanApex'] = int(
+                data_for_analyse_tmp[hill_scan_apex_1].get('scan_id', hill_scan_apex_1 + data_start_id + 1)
+            )
+        else:
+            hill_feature['scanApex'] = int(hill_scan_apex_1 + data_start_id + 1)
         hill_feature['hill_idx'] = hills_dict['hills_idx_array_unique'][idx_1]
-        hill_feature['hills_scan_lists'] = hills_dict['hills_scan_lists'][idx_1]
-        hill_feature['hills_intensity_list'] = hills_dict['hills_intensity_array'][idx_1]
-        hill_feature['hills_mz_array'] = hills_dict['tmp_mz_array'][idx_1]
+        hill_feature['hills_scan_lists'] = [int(v) for v in hills_dict['hills_scan_lists'][idx_1]]
+        hill_feature['hills_intensity_list'] = [float(v) for v in hills_dict['hills_intensity_array'][idx_1]]
+        hill_feature['hills_mz_array'] = [float(v) for v in hills_dict['tmp_mz_array'][idx_1]]
         hills_features.append(hill_feature)
 
     return hills_dict, hills_features
 
 
-def calc_peptide_features(hills_dict, peptide_features, negative_mode, faims_val, RT_dict, data_start_id, isotopes_for_intensity):
+def calc_peptide_features(
+    hills_dict,
+    peptide_features,
+    negative_mode,
+    faims_val,
+    RT_dict,
+    data_start_id,
+    isotopes_for_intensity,
+    include_mono_hills=True,
+):
 
     for pep_feature in peptide_features:
 
@@ -453,8 +742,9 @@ def calc_peptide_features(hills_dict, peptide_features, negative_mode, faims_val
             pep_feature['rtStart'] = hills_dict['rtStart'][pep_feature['monoisotope idx']]
             pep_feature['rtEnd'] = hills_dict['rtEnd'][pep_feature['monoisotope idx']]
 
-        pep_feature['mono_hills_scan_lists'] = hills_dict['hills_scan_lists'][pep_feature['monoisotope idx']]
-        pep_feature['mono_hills_intensity_list'] =  hills_dict['hills_intensity_array'][pep_feature['monoisotope idx']]
+        if include_mono_hills:
+            pep_feature['mono_hills_scan_lists'] = [int(v) for v in hills_dict['hills_scan_lists'][pep_feature['monoisotope idx']]]
+            pep_feature['mono_hills_intensity_list'] = [float(v) for v in hills_dict['hills_intensity_array'][pep_feature['monoisotope idx']]]
 
     return peptide_features
 
@@ -462,47 +752,26 @@ def calc_peptide_features(hills_dict, peptide_features, negative_mode, faims_val
 def write_output(peptide_features, args, write_header=True, hills=False):
     output_file = _get_output_file(args, hills=hills)
 
-    if hills and args.get('hills_format', 'tsv') == 'npz':
-        write_hills_npz(peptide_features, output_file, write_header, args)
-        return
-
     if hills:
 
-        columns_for_output = [
-            'rtApex',
-            'intensityApex',
-            'intensitySum',
-            'nScans',
-            'mz',
-            'rtStart',
-            'rtEnd',
-            'FAIMS',
-            'im',
-        ]
-        # if args['write_extra_details']:
-        columns_for_output += ['hill_idx', 'hills_scan_lists', 'hills_intensity_list', 'hills_mz_array']
+        columns_for_output = list(HILLS_BASE_COLUMNS)
+        if not args.get('no_hill_list', False):
+            columns_for_output += list(HILLS_LIST_COLUMNS)
     else:
-        columns_for_output = [
-            'massCalib',
-            'rtApex',
-            'intensityApex',
-            'intensitySum',
-            'charge',
-            'nIsotopes',
-            'nScans',
-            'mz',
-            'rtStart',
-            'rtEnd',
-            'FAIMS',
-            'im',
-            'mono_hills_scan_lists',
-            'mono_hills_intensity_list',
-            'scanApex',
-            'isoerror',
-            'isoerror2',
-        ]
+        columns_for_output = list(FEATURE_BASE_COLUMNS)
+        if not args.get('no_mono_hills', False):
+            columns_for_output += list(FEATURE_MONO_HILLS_COLUMNS)
+        columns_for_output += list(FEATURE_POST_MONO_COLUMNS)
         if args['write_extra_details']:
-            columns_for_output += ['isoerror','isotopes','intensity_array_for_cos_corr','monoisotope hill idx','monoisotope idx']
+            columns_for_output += list(FEATURE_EXTRA_COLUMNS)
+
+    if hills and args.get('hills_format', 'tsv') == 'parquet':
+        write_hills_parquet(peptide_features, output_file, write_header, args, columns_for_output)
+        return
+
+    if (not hills) and args.get('feature_format', 'tsv') == 'parquet':
+        write_features_parquet(peptide_features, output_file, write_header, columns_for_output, args)
+        return
 
     if write_header:
 
@@ -512,7 +781,7 @@ def write_output(peptide_features, args, write_header=True, hills=False):
 
     out_file = open(output_file, 'a')
     for pep_feature in peptide_features:
-        out_file.write('\t'.join([str(pep_feature[col]) for col in columns_for_output]) + '\n')
+        out_file.write('\t'.join([_format_tsv_cell(pep_feature[col]) for col in columns_for_output]) + '\n')
 
     out_file.close()
 
@@ -777,8 +1046,9 @@ def process_mzml(args):
         logger.info("Combining every %s MS1 scans.", combine_every)
     buffer = []  # temporary storage for z's to be merged
 
-    for z in MS1OnlyMzML(source=input_mzml_path):
+    for fallback_idx, z in enumerate(MS1OnlyMzML(source=input_mzml_path)):
         if z['ms level'] == 1:
+            z['scan_id'] = _extract_ms1_scan_id(z, fallback_idx)
 
             if 'raw ion mobility array' in z:
                 z['mean inverse reduced ion mobility array'] = z['raw ion mobility array']

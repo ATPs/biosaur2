@@ -16,19 +16,31 @@ def process_file(args):
 
     input_mzml_path = args['file']
     basename_mzml = path.basename(input_mzml_path)
+    feature_format = args.get('feature_format', 'tsv')
 
     if args['o']:
         output_file = args['o']
     else:
-        output_file = path.splitext(input_mzml_path)[0]\
-            + path.extsep + 'features.tsv'
+        output_file = path.splitext(input_mzml_path)[0] + path.extsep + (
+            'features.parquet' if feature_format == 'parquet' else 'features.tsv'
+        )
 
-    df1_features = pd.read_table(output_file)
-    # df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: ast.literal_eval(','.join(x.split(' '))))
-    # df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: x.replace('[', '').replace(']', '').split(' '))#ast.literal_eval(','.join(x.split(' '))))
-    df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: ast.literal_eval(x))
+    if feature_format == 'parquet':
+        df1_features = pd.read_parquet(output_file, engine='pyarrow')
+        df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(
+            lambda x: x.tolist() if isinstance(x, np.ndarray) else list(x)
+        )
+        df1_features['mono_hills_intensity_list'] = df1_features['mono_hills_intensity_list'].apply(
+            lambda x: x.tolist() if isinstance(x, np.ndarray) else list(x)
+        )
+    else:
+        df1_features = pd.read_table(output_file)
+        # df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: ast.literal_eval(','.join(x.split(' '))))
+        # df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: x.replace('[', '').replace(']', '').split(' '))#ast.literal_eval(','.join(x.split(' '))))
+        df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: ast.literal_eval(x))
+        df1_features['mono_hills_intensity_list'] = df1_features['mono_hills_intensity_list'].apply(lambda x: ast.literal_eval(x))
+
     df1_features['mono_hills_scan_sets'] = df1_features['mono_hills_scan_lists'].apply(lambda x: set(x))
-    df1_features['mono_hills_intensity_list'] = df1_features['mono_hills_intensity_list'].apply(lambda x: ast.literal_eval(x))
 
     def calc_idict(x):
         hill_idict_1 = dict()
