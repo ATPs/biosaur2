@@ -76,7 +76,6 @@ FEATURE_MONO_HILLS_COLUMNS = (
     'mono_hills_intensity_list',
 )
 FEATURE_EXTRA_COLUMNS = (
-    'isoerror',
     'isotopes',
     'intensity_array_for_cos_corr',
     'monoisotope hill idx',
