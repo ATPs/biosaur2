@@ -11,7 +11,7 @@ from multiprocessing import Queue, Process, cpu_count
 from collections import Counter, defaultdict
 import os
 
-def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args):
+def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1):
     isotopes_mass_accuracy = args['itol']
 
     min_charge = args['cmin']
@@ -266,6 +266,15 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
     logger.info('Number of detected isotope clusters: %d', len(ready_final))
 
 
+    hill_to_feature_idx = {}
+    for offset, pep_feature in enumerate(ready_final):
+        feature_idx = next_feature_idx + offset
+        pep_feature['feature_idx'] = feature_idx
+        hill_to_feature_idx[pep_feature['monoisotope hill idx']] = feature_idx
+        for cand in pep_feature['isotopes']:
+            hill_to_feature_idx[cand['isotope_hill_idx']] = feature_idx
+    next_feature_idx += len(ready_final)
+
     negative_mode = args['nm']
     isotopes_for_intensity = args['iuse']
     peptide_features = utils.calc_peptide_features(
@@ -281,7 +290,7 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
 
     utils.write_output(peptide_features, args, write_header)
 
-    return ready_set
+    return ready_set, hill_to_feature_idx, next_feature_idx
 
 def split_peaks_python(qout, hills_dict, data_for_analyse_tmp, args, counter_hills_idx, sorted_idx_child_process, sorted_idx_array_child_process, i, checked_id, win_sys=False):
 
@@ -415,6 +424,7 @@ def process_file(args):
     input_file_path = args['file']
     stop_after_hills = bool(args.get('stop_after_hills'))
     stop_after_logged = False
+    next_feature_idx = 1
 
     md_correction = args['md_correction']
     if md_correction == 'Orbi':
@@ -427,7 +437,7 @@ def process_file(args):
         logger.WARNING('md_correction parameter MUST BE Orbi,Tof or ICR. Using Orbi now')
         md_correction_int = 1
 
-    if input_file_path.lower().endswith('.mzml'):
+    if input_file_path.lower().endswith('.mzml') or input_file_path.lower().endswith('.mzml.gz'):
         if args.get('write_ms1', False):
             ms1_rows = utils.collect_ms1_rows(args)
             utils.write_ms1_output(ms1_rows, args)
@@ -531,6 +541,7 @@ def process_file(args):
             hills_dict = process_hills(hills_dict, data_for_analyse_tmp, mz_step, paseftol, args)
 
             logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array'])))
+            hills_features = None
             if args['write_hills']:
                 hills_dict, hills_features = utils.process_hills_extra(
                     hills_dict,
@@ -541,10 +552,10 @@ def process_file(args):
                     paseftol,
                     data_for_analyse_tmp=data_for_analyse_tmp,
                 )
-                utils.write_output(hills_features, args, write_header, hills=True)
 
             if stop_after_hills:
                 if args['write_hills']:
+                    utils.write_output(hills_features, args, write_header, hills=True)
                     if not stop_after_logged:
                         logger.info('--stop_after_hills flag set, skipping feature detection after writing hills.')
                         stop_after_logged = True
@@ -556,8 +567,21 @@ def process_file(args):
                 data_start_id += chunk_length
                 continue
 
-
-            ready_set = process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args)
+            _, hill_to_feature_idx, next_feature_idx = process_features_iteration(
+                hills_dict,
+                faims_val,
+                mz_step,
+                paseftol,
+                RT_dict,
+                data_start_id,
+                write_header,
+                args,
+                next_feature_idx=next_feature_idx,
+            )
+            if args['write_hills']:
+                for hill_feature in hills_features:
+                    hill_feature['feature_idx'] = int(hill_to_feature_idx.get(hill_feature['hill_idx'], -1))
+                utils.write_output(hills_features, args, write_header, hills=True)
 
             write_header = False
 
@@ -619,8 +643,17 @@ def process_file(args):
 
             logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array_unique'])))
 
-
-            ready_set = process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args)
+            _, _, next_feature_idx = process_features_iteration(
+                hills_dict,
+                faims_val,
+                mz_step,
+                paseftol,
+                RT_dict,
+                data_start_id,
+                write_header,
+                args,
+                next_feature_idx=next_feature_idx,
+            )
 
 
             write_header = False

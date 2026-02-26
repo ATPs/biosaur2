@@ -3,3 +3,4 @@
 build
 biosaur2/*.so
 biosaur2/cutils.c
+dev/test

@@ -21,6 +21,7 @@ def run():
     Example usage
     -------------
     $ biosaur2 input.mzML
+    $ biosaur2 input.mzML.gz
     -------------
     ''',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -30,7 +31,11 @@ def run():
         action='version',
         version='%(prog)s {}'.format(_get_biosaur2_version()),
     )
-    parser.add_argument('files', help='input mzML or hills (Experimental) files', nargs='+')
+    parser.add_argument(
+        'files',
+        help='input files: mzML (.mzML/.mzML.gz) or hills (Experimental) (.hills.tsv/.hills.parquet/.hills.npz)',
+        nargs='+',
+    )
     parser.add_argument('-mini', help='min intensity', default=1, type=float)
     parser.add_argument('-minmz', help='min mz', default=350, type=float)
     parser.add_argument('-maxmz', help='max mz', default=1500, type=float)

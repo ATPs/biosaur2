@@ -2,7 +2,9 @@ from pyteomics import mzml
 import numpy as np
 import pandas as pd
 from collections import defaultdict, Counter
+from contextlib import contextmanager
 from os import path
+import gzip
 import math
 import re
 from scipy.optimize import curve_fit
@@ -99,6 +101,7 @@ PARQUET_INT_COLUMNS = (
     'nIsotopes',
     'nScans',
     'hill_idx',
+    'feature_idx',
     'scanApex',
     'monoisotope hill idx',
     'monoisotope idx',
@@ -130,6 +133,35 @@ def _get_hills_float_dtype(args):
     if float_name == 'float64':
         return np.float64
     raise ValueError('Unsupported hills float type: %s' % (float_name, ))
+
+
+def _feature_idx_enabled(args):
+    return bool(args.get('write_hills')) and (not bool(args.get('stop_after_hills')))
+
+
+def _is_mzml_gzip_path(input_file_path):
+    return str(input_file_path).lower().endswith('.mzml.gz')
+
+
+@contextmanager
+def open_mzml_source(input_file_path):
+    if _is_mzml_gzip_path(input_file_path):
+        with gzip.open(input_file_path, 'rb') as source:
+            yield source
+    else:
+        yield input_file_path
+
+
+def iter_ms1_spectra(input_file_path):
+    with open_mzml_source(input_file_path) as mzml_source:
+        for spec in MS1OnlyMzML(source=mzml_source):
+            yield spec
+
+
+def iter_all_spectra(input_file_path):
+    with open_mzml_source(input_file_path) as mzml_source:
+        for spec in mzml.read(mzml_source):
+            yield spec
 
 
 def _get_output_file(args, hills=False, ms1=False):
@@ -526,7 +558,7 @@ def collect_ms1_rows(args):
     rows = []
     input_mzml_path = args['file']
 
-    for fallback_idx, spec in enumerate(MS1OnlyMzML(source=input_mzml_path)):
+    for fallback_idx, spec in enumerate(iter_ms1_spectra(input_mzml_path)):
         scan_info = spec['scanList']['scan'][0]
         rt_seconds = float(scan_info['scan start time']) * 60.0
         total_intensity = float(spec.get('total ion current', np.sum(spec.get('intensity array', []))))
@@ -760,17 +792,22 @@ def calc_peptide_features(
 
 def write_output(peptide_features, args, write_header=True, hills=False):
     output_file = _get_output_file(args, hills=hills)
+    add_feature_idx = _feature_idx_enabled(args)
 
     if hills:
 
         columns_for_output = list(HILLS_BASE_COLUMNS)
         if not args.get('no_hill_list', False):
             columns_for_output += list(HILLS_LIST_COLUMNS)
+        if add_feature_idx:
+            columns_for_output.append('feature_idx')
     else:
         columns_for_output = list(FEATURE_BASE_COLUMNS)
         if not args.get('no_mono_hills', False):
             columns_for_output += list(FEATURE_MONO_HILLS_COLUMNS)
         columns_for_output += list(FEATURE_POST_MONO_COLUMNS)
+        if add_feature_idx:
+            columns_for_output.append('feature_idx')
         if args['write_extra_details']:
             columns_for_output += list(FEATURE_EXTRA_COLUMNS)
 
@@ -1055,7 +1092,7 @@ def process_mzml(args):
         logger.info("Combining every %s MS1 scans.", combine_every)
     buffer = []  # temporary storage for z's to be merged
 
-    for fallback_idx, z in enumerate(MS1OnlyMzML(source=input_mzml_path)):
+    for fallback_idx, z in enumerate(iter_ms1_spectra(input_mzml_path)):
         if z['ms level'] == 1:
             z['scan_id'] = _extract_ms1_scan_id(z, fallback_idx)
 
@@ -1175,7 +1212,7 @@ def process_mzml_dia(args):
     cnt = 0
     ms1_scans = 0
 
-    for z in mzml.read(input_mzml_path):
+    for z in iter_all_spectra(input_mzml_path):
         if z['ms level'] == 1:
             ms1_scans += 1
         elif z['ms level'] == 2:
