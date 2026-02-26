@@ -82,16 +82,26 @@ FEATURE_EXTRA_COLUMNS = (
     'monoisotope idx',
 )
 PARQUET_FLOAT_COLUMNS = (
+    'massCalib',
     'rtApex',
+    'intensityApex',
+    'intensitySum',
     'mz',
     'rtStart',
     'rtEnd',
     'FAIMS',
     'im',
+    'isoerror',
+    'isoerror2',
 )
 PARQUET_INT_COLUMNS = (
+    'charge',
+    'nIsotopes',
+    'nScans',
     'hill_idx',
     'scanApex',
+    'monoisotope hill idx',
+    'monoisotope idx',
 )
 PARQUET_INT_LIST_COLUMNS = (
     'hills_scan_lists',
