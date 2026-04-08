@@ -200,68 +200,70 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
 
     ready_final = []
     ready_set = set()
-    ready = sorted(ready, key=func_for_sort)
-    cur_isotopes = ready[0]['nIsotopes']
+    if not ready:
+        logger.info('No isotope clusters remained after smart mass accuracy filtering.')
+    else:
+        ready = sorted(ready, key=func_for_sort)
+        cur_isotopes = ready[0]['nIsotopes']
 
-
-    while cur_l < max_l:
-        pep_feature = ready[cur_l]
-        n_iso = pep_feature['nIsotopes']
-        if n_iso < cur_isotopes:
-            ready = sorted(ready, key=func_for_sort)
-            cur_isotopes = n_iso
-            cur_l = 0
+        while cur_l < max_l:
             pep_feature = ready[cur_l]
+            n_iso = pep_feature['nIsotopes']
+            if n_iso < cur_isotopes:
+                ready = sorted(ready, key=func_for_sort)
+                cur_isotopes = n_iso
+                cur_l = 0
+                pep_feature = ready[cur_l]
 
-        if pep_feature['monoisotope hill idx'] not in ready_set:
-            if not any(cand['isotope_hill_idx'] in ready_set for cand in pep_feature['isotopes']):
-                ready_final.append(pep_feature)
-                ready_set.add(pep_feature['monoisotope hill idx'])
-                for cand in pep_feature['isotopes']:
-                    ready_set.add(cand['isotope_hill_idx'])
-                del ready[cur_l]
-                max_l -= 1
-                cur_l -= 1
+            if pep_feature['monoisotope hill idx'] not in ready_set:
+                if not any(cand['isotope_hill_idx'] in ready_set for cand in pep_feature['isotopes']):
+                    ready_final.append(pep_feature)
+                    ready_set.add(pep_feature['monoisotope hill idx'])
+                    for cand in pep_feature['isotopes']:
+                        ready_set.add(cand['isotope_hill_idx'])
+                    del ready[cur_l]
+                    max_l -= 1
+                    cur_l -= 1
 
-            else:
-                tmp = []
+                else:
+                    tmp = []
 
-                for cand in pep_feature['isotopes']:
-                    if cand['isotope_hill_idx'] not in ready_set:
-                        tmp.append(cand)
-                    else:
-                        break
+                    for cand in pep_feature['isotopes']:
+                        if cand['isotope_hill_idx'] not in ready_set:
+                            tmp.append(cand)
+                        else:
+                            break
 
-                tmp_n_isotopes = len(tmp)
+                    tmp_n_isotopes = len(tmp)
 
-                if tmp_n_isotopes:
+                    if tmp_n_isotopes:
 
-                    all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
-                    all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
-                    all_exp_intensity = all_exp_intensity[:tmp_n_isotopes+1]
-                    cos_corr, number_of_passed_isotopes = checking_cos_correlation_for_carbon(all_theoretical_int, all_exp_intensity, 0.6)
-                    if cos_corr:
-                        ready[cur_l]['cos_cor_isotopes'] = cos_corr
-                        ready[cur_l]['isotopes'] = tmp
-                        ready[cur_l]['nIsotopes'] = tmp_n_isotopes + 1
-                        ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
-                        cur_l -= 1
+                        all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
+                        all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
+                        all_exp_intensity = all_exp_intensity[:tmp_n_isotopes+1]
+                        cos_corr, number_of_passed_isotopes = checking_cos_correlation_for_carbon(all_theoretical_int, all_exp_intensity, 0.6)
+                        if cos_corr:
+                            ready[cur_l]['cos_cor_isotopes'] = cos_corr
+                            ready[cur_l]['isotopes'] = tmp
+                            ready[cur_l]['nIsotopes'] = tmp_n_isotopes + 1
+                            ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
+                            cur_l -= 1
+                        else:
+                            del ready[cur_l]
+                            max_l -= 1
+                            cur_l -= 1
+
+
                     else:
                         del ready[cur_l]
                         max_l -= 1
                         cur_l -= 1
+            else:
+                del ready[cur_l]
+                max_l -= 1
+                cur_l -= 1
 
-
-                else:
-                    del ready[cur_l]
-                    max_l -= 1
-                    cur_l -= 1
-        else:
-            del ready[cur_l]
-            max_l -= 1
-            cur_l -= 1
-
-        cur_l += 1
+            cur_l += 1
 
     logger.info('Number of detected isotope clusters: %d', len(ready_final))
 
