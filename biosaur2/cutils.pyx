@@ -215,6 +215,8 @@ def get_initial_isotopes(dict hills_dict, float isotopes_mass_accuracy, list iso
 
                     cos_corr, number_of_passed_isotopes = checking_cos_correlation_for_carbon(all_theoretical_int, all_exp_intensity, 0.6)
 
+
+
                     if cos_corr:
 
                         iter_candidates = iter_candidates[:number_of_passed_isotopes]
@@ -325,6 +327,15 @@ def meanfilt(list data, int window_width):
 
     return np.clip(np.convolve(data,kern, mode='same'), a_min=0, a_max=None)
 
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(True)
+def meanfilt_from_nparray(np.ndarray data, int window_width):
+    cdef np.ndarray kern
+    kern=np.ones(2*window_width+1)/(2*window_width+1)
+
+    return np.clip(np.convolve(data,kern, mode='same'), a_min=0, a_max=None)
 
 
 
