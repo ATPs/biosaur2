@@ -450,7 +450,7 @@ def centroid_pasef_scan(dict scandict, float mz_step, float hill_mz_accuracy, fl
 def split_peaks(dict hills_dict, list data_for_analyse_tmp, dict args, dict counter_hills_idx, list sorted_idx_child_process, np.ndarray sorted_idx_array_child_process, int nproc, int checked_id):
 
     cdef float hillValleyFactor, min_val, mult_val
-    cdef int min_length_hill, idx_start, idx_end, cur_new_idx, idx_1, hill_idx, hill_length, c_len, l_idx, idx
+    cdef int min_length_hill, idx_start, idx_end, cur_new_idx, idx_1, hill_idx, hill_length, c_len, l_idx, idx, last_idx_confirmed
     cdef np.ndarray idx_sort, tmp_scans, tmp_orig_idx, new_index_list, smothed_intensity
     cdef list tmp_intensity, min_idx_list, recheck_r_r 
 
@@ -509,10 +509,13 @@ def split_peaks(dict hills_dict, list data_for_analyse_tmp, dict args, dict coun
                                 min_val = mult_val
                 idx += 1
             if len(min_idx_list):
+                last_idx_confirmed = 0
                 for min_idx, end_idx, recheck_idx in zip(min_idx_list, min_idx_list[1:] + [hill_length, ], recheck_r_r):
                     r_r = max(smothed_intensity[recheck_idx+1:end_idx+1]) / float(smothed_intensity[recheck_idx])
-                    if r_r >= hillValleyFactor:
+                    l_r = max(smothed_intensity[last_idx_confirmed:recheck_idx]) / float(smothed_intensity[recheck_idx])
+                    if r_r >= hillValleyFactor and l_r >= hillValleyFactor:
                         new_index_list[idx_start+min_idx:idx_start+hill_length] = cur_new_idx
+                        last_idx_confirmed = recheck_idx
                         cur_new_idx += 1
 
         idx_start = idx_end
