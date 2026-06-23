@@ -511,7 +511,6 @@ def split_peaks(dict hills_dict, list data_for_analyse_tmp, dict args, dict coun
             if len(min_idx_list):
                 for min_idx, end_idx, recheck_idx in zip(min_idx_list, min_idx_list[1:] + [hill_length, ], recheck_r_r):
                     r_r = max(smothed_intensity[recheck_idx+1:end_idx+1]) / float(smothed_intensity[recheck_idx])
-                    l_r = max(smothed_intensity[last_idx_confirmed:recheck_idx]) / float(smothed_intensity[recheck_idx])
                     if r_r >= hillValleyFactor:
                         new_index_list[idx_start+min_idx:idx_start+hill_length] = cur_new_idx
                         cur_new_idx += 1
