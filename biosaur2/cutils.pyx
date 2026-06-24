@@ -334,9 +334,108 @@ def meanfilt(list data, int window_width):
 def meanfilt_from_nparray(np.ndarray data, int window_width):
     cdef np.ndarray kern
     kern=np.ones(2*window_width+1)/(2*window_width+1)
-
     return np.clip(np.convolve(data,kern, mode='same'), a_min=0, a_max=None)
 
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(True)
+def compute_xic_area_fast(np.ndarray rts, np.ndarray intensities):
+    if rts.size < 2:
+        return 0.0
+    return float(np.trapz(intensities, rts))
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(True)
+def find_apex(np.ndarray tmp_intensity, np.ndarray tmp_rts, float rt_msms, bint autoxic):
+
+    cdef float hillValleyFactor, min_val, mult_val
+    cdef int min_length_hill, idx_end, cur_new_idx, hill_length, c_len, l_idx, idx
+    cdef np.ndarray new_index_list, smothed_intensity
+    cdef list min_idx_list, recheck_r_r 
+
+    hillValleyFactor = 1.5
+    min_length_hill = 3
+
+
+    hill_length = len(tmp_intensity)
+    idx_end = hill_length
+
+    new_index_list = np.zeros(hill_length).astype(int)
+
+    cur_new_idx = 1
+
+
+    if hill_length >= min_length_hill * 2:
+
+        smothed_intensity = meanfilt_from_nparray(tmp_intensity, 3)
+        c_len = hill_length - min_length_hill
+        idx = min_length_hill - 1
+        min_idx_list = []
+        min_val = 0
+        l_idx = 0
+        recheck_r_r = []
+
+
+        while idx <= c_len:
+
+            if len(min_idx_list) and (idx >= min_idx_list[-1] + min_length_hill - (min_idx_list[-1] - recheck_r_r[-1])):
+                l_idx = min_idx_list[-1]
+
+            l_r = max(smothed_intensity[l_idx:idx]) / float(smothed_intensity[idx])
+            if l_r >= hillValleyFactor:
+                r_r = max(smothed_intensity[idx+1:]) / float(smothed_intensity[idx])
+                if r_r >= hillValleyFactor:
+                    mult_val = l_r * r_r
+                    include_factor = (1 if l_r > r_r else 0)
+                    if (min_length_hill <= idx + include_factor <= c_len):
+                        if not len(min_idx_list) or (idx + include_factor >= min_idx_list[-1] + min_length_hill):
+                            min_idx_list.append(idx + include_factor)
+                            recheck_r_r.append(idx)
+                            min_val = mult_val
+                        elif mult_val > min_val:
+                            min_idx_list[-1] = idx + include_factor
+                            recheck_r_r[-1] = idx
+                            min_val = mult_val
+            idx += 1
+        if len(min_idx_list):
+            for min_idx, end_idx, recheck_idx in zip(min_idx_list, min_idx_list[1:] + [hill_length, ], recheck_r_r):
+                r_r = max(smothed_intensity[recheck_idx+1:end_idx+1]) / float(smothed_intensity[recheck_idx])
+                if r_r >= hillValleyFactor:
+                    new_index_list[min_idx:hill_length] = cur_new_idx
+                    cur_new_idx += 1
+
+
+        for first_opt_rt_index, first_opt_rt in enumerate(tmp_rts):
+            if first_opt_rt > rt_msms:
+                break
+        new_id_by_rt = new_index_list[first_opt_rt_index]
+        idx_mask = (new_index_list == new_id_by_rt)
+        tmp_intensity_masked = tmp_intensity[idx_mask]
+        tmp_rts_masked = tmp_rts[idx_mask]
+        idx_max = np.argmax(tmp_intensity_masked)
+        i_apex = tmp_intensity_masked[idx_max]
+        rt_apex = tmp_rts_masked[idx_max]
+
+        if autoxic:
+            pass
+        else:
+            tmp_intensity_masked = tmp_intensity
+            tmp_rts_masked = tmp_rts
+        pep_xic = compute_xic_area_fast(tmp_rts_masked, tmp_intensity_masked)
+
+    else:
+        tmp_intensity_masked = tmp_intensity
+        tmp_rts_masked = tmp_rts
+        idx_max = np.argmax(tmp_intensity_masked)
+        i_apex = tmp_intensity_masked[idx_max]
+        rt_apex = tmp_rts_masked[idx_max]
+        pep_xic = compute_xic_area_fast(tmp_rts_masked, tmp_intensity_masked)
+
+    return i_apex, rt_apex, tmp_rts_masked[0], tmp_rts_masked[-1], pep_xic
 
 
 @cython.cdivision(True)
