@@ -214,7 +214,11 @@ def get_initial_isotopes(dict hills_dict, float isotopes_mass_accuracy, list iso
                         i_local_isotope += 1
 
                     cos_corr, number_of_passed_isotopes = checking_cos_correlation_for_carbon(all_theoretical_int, all_exp_intensity, 0.6)
-
+                    if neutral_mass >= 1500:
+                        cos_corr2, number_of_passed_isotopes2 = checking_cos_correlation_for_carbon(all_theoretical_int[1:], all_exp_intensity[:-1], 0.6)
+                        if cos_corr2 >= cos_corr:
+                            cos_corr = cos_corr2
+                            number_of_passed_isotopes = number_of_passed_isotopes2
 
 
                     if cos_corr:
@@ -416,25 +420,37 @@ def find_apex(np.ndarray tmp_intensity, np.ndarray tmp_rts, float rt_msms, bint 
         idx_mask = (new_index_list == new_id_by_rt)
         tmp_intensity_masked = tmp_intensity[idx_mask]
         tmp_rts_masked = tmp_rts[idx_mask]
-        idx_max = np.argmax(tmp_intensity_masked)
-        i_apex = tmp_intensity_masked[idx_max]
-        rt_apex = tmp_rts_masked[idx_max]
+        if len(tmp_intensity_masked):
+            idx_max = np.argmax(tmp_intensity_masked)
+            i_apex = tmp_intensity_masked[idx_max]
+            rt_apex = tmp_rts_masked[idx_max]
 
-        if autoxic:
-            pass
+            if autoxic:
+                pass
+            else:
+                tmp_intensity_masked = tmp_intensity
+                tmp_rts_masked = tmp_rts
+            pep_xic = compute_xic_area_fast(tmp_rts_masked, tmp_intensity_masked)
         else:
+            if len(tmp_intensity):
+                tmp_intensity_masked = tmp_intensity
+                tmp_rts_masked = tmp_rts
+                idx_max = np.argmax(tmp_intensity_masked)
+                i_apex = tmp_intensity_masked[idx_max]
+                rt_apex = tmp_rts_masked[idx_max]
+                pep_xic = compute_xic_area_fast(tmp_rts_masked, tmp_intensity_masked)
+            else:
+                return 0, rt_msms, rt_msms, rt_msms, 0
+    else:
+        if len(tmp_intensity):
             tmp_intensity_masked = tmp_intensity
             tmp_rts_masked = tmp_rts
-        pep_xic = compute_xic_area_fast(tmp_rts_masked, tmp_intensity_masked)
-
-    else:
-        tmp_intensity_masked = tmp_intensity
-        tmp_rts_masked = tmp_rts
-        idx_max = np.argmax(tmp_intensity_masked)
-        i_apex = tmp_intensity_masked[idx_max]
-        rt_apex = tmp_rts_masked[idx_max]
-        pep_xic = compute_xic_area_fast(tmp_rts_masked, tmp_intensity_masked)
-
+            idx_max = np.argmax(tmp_intensity_masked)
+            i_apex = tmp_intensity_masked[idx_max]
+            rt_apex = tmp_rts_masked[idx_max]
+            pep_xic = compute_xic_area_fast(tmp_rts_masked, tmp_intensity_masked)
+        else:
+            return 0, rt_msms, rt_msms, rt_msms, 0
     return i_apex, rt_apex, tmp_rts_masked[0], tmp_rts_masked[-1], pep_xic
 
 
