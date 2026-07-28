@@ -14,8 +14,7 @@ from .spectra import faims_sort_key, group_spectra_by_faims
 from .hills import assign_deterministic_hill_ids, normalize_hills_dataframe
 from .preprocessing import (
     centroid_pasef_data,
-    collect_ms1_rows,
-    process_mzml,
+    ingest_mzml,
     process_profile,
     process_tof,
 )
@@ -489,13 +488,13 @@ def process_file(args):
         md_correction_int = 1
 
     if input_file_path.lower().endswith('.mzml') or input_file_path.lower().endswith('.mzml.gz'):
-        if args.get('write_ms1', False):
-            ms1_rows = collect_ms1_rows(args)
-            utils.write_ms1_output(ms1_rows, args)
-
         write_header = True
-
-        data_for_analyse = process_mzml(args)
+        ingestion = ingest_mzml(args)
+        if args.get('write_ms1', False):
+            utils.write_ms1_output(ingestion.ms1_rows, args)
+        if args.get('write_ms2', False):
+            utils.write_ms2_output(ingestion.ms2_rows, args)
+        data_for_analyse = ingestion.spectra
 
         #Process faims
 

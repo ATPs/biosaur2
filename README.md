@@ -90,12 +90,13 @@ not written by default. The compact file retains baseline-compatible values
 and only the additional `feature_idx` and `area_sum` needed for assignment and
 area quantification.
 
-## Hills, MS1, and DuckDB database output
+## Hills, MS1, MS2, and DuckDB database output
 
 ```bash
 biosaur2 sample.mzML.gz \
   --write-hills --hills-format parquet \
-  --write-ms1 --ms1-format parquet
+  --write-ms1 --ms1-format parquet \
+  --write-ms2
 
 # Small preprocessing-oriented outputs
 biosaur2 sample.mzML.gz \
@@ -109,7 +110,15 @@ Hills retain their compact nested shape. When point lists are enabled,
 `hills_rt_list` stores exact per-point seconds so a hills file can be reused
 without reconstructing RT. `--no-hill-list` removes all large hill point arrays
 and makes that output unsuitable as feature-detection input. MS1 contains only
-`scan_id`, `RT`, and `total_intensity`.
+`scan_id`, `RT`, and `total_intensity`. `--write-ms2` writes one separate
+`<input-stem>.ms2.parquet` precursor sidecar. It contains no fragment arrays or
+chromatogram payloads. Its indexes are zero-based; RT is seconds; selected-ion
+m/z and isolation target m/z remain distinct; and missing precursor m/z,
+charge, unresolved `spectrumRef`, and missing preceding MS1 are recorded in
+the documented `metadata_flags` bitmask. `ion_mobility` is populated only for
+inverse reduced mobility (1/K0), so drift-time values are not mixed into that
+column. The flags are `0x0001` missing precursor m/z, `0x0002` missing charge,
+`0x0004` unresolved `spectrumRef`, and `0x0008` missing precursor MS1.
 
 Parquet features, hills, and MS1 are separate requested products; the feature
 product itself is always one file. To keep requested products in one database:
@@ -121,8 +130,10 @@ biosaur2 sample.mzML.gz --duckdb-output sample.biosaur2.duckdb \
 ```
 
 A `.duckdb` file contains a small `runs` provenance table, compact `features`,
-and only explicitly requested `hills` and `ms1` tables. Unlike ordinary
-Parquet fallback, explicit `--duckdb-output` requires DuckDB.
+and only explicitly requested `hills` and `ms1` tables. With `--write-ms2`,
+the MS2 product remains the separate Parquet sidecar beside the database and
+is published atomically with it. Unlike ordinary Parquet fallback, explicit
+`--duckdb-output` requires DuckDB.
 
 Structured outputs record schema and package versions, input path and size,
 parameters, units, numeric and rounding policies, writer settings, and
@@ -142,6 +153,17 @@ directory; with multiple `--duckdb-output` inputs, that option must also be a
 directory. All target collisions are checked before processing begins.
 Hills inputs are feature-detection inputs only; `--stop-after-hills`,
 `--write-hills`, and `--write-ms1` are rejected for them.
+
+Use `--run-workers N` to bound normal mzML file-level parallelism. The default
+is `1`, preserving the existing per-file `-nprocs` behavior. When `N > 1`, each
+file runs in a fresh spawned process with effective `nprocs=1`; Biosaur2 logs
+the requested and effective configuration and never nests file workers with
+internal detection workers. At most `N` files are active, so completed file
+memory is released before the worker handles another input. A final batch
+report is printed in input order. By default the first failed file stops new
+submissions; `--continue-on-error` completes independent files but still exits
+nonzero if any fail. `--write-ms2` and `--run-workers > 1` are supported only
+by the normal mzML feature workflow, not experimental DIA/DIA2 or hills input.
 
 DIA and DIA2 remain experimental and receive compatibility smoke coverage.
 `.duckdb` output is not supported in DIA modes. `--no-mono-hills` is not

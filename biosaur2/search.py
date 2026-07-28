@@ -6,9 +6,13 @@ import logging
 import os
 from pathlib import Path
 import sys
+import time
+import traceback
 from .output import input_stem
+from .output import planned_output_paths
 from .duckdb_output import DuckDBOutputManager, uses_duckdb
 from .legacy_output import CompactOutputManager
+from .parallel import WorkerFailure, run_bounded_process_tasks
 
 
 class _HelpFormatter(
@@ -60,6 +64,11 @@ def _is_hills_input(filename):
     return lower.endswith((".hills.tsv", ".hills.parquet", ".hills.npz"))
 
 
+def _is_mzml_input(filename):
+    lower = str(filename).lower()
+    return lower.endswith((".mzml", ".mzml.gz"))
+
+
 def _create_output_manager(run_args):
     if run_args.get('dia2'):
         return None
@@ -81,6 +90,94 @@ def _create_output_manager(run_args):
             run_args['parquet_engine'] = 'pyarrow'
             run_args['_parquet_engine_fallback'] = 'duckdb_to_pyarrow'
     return CompactOutputManager(run_args)
+
+
+def _run_file_worker(run_args):
+    """Process one file and return only a compact parent-safe status record."""
+
+    started = time.monotonic()
+    manager = None
+    filename = run_args["file"]
+    try:
+        manager = _create_output_manager(run_args)
+        if manager is not None:
+            run_args["_output_manager"] = manager
+        if run_args["dia2"]:
+            main_dia2.process_file(run_args)
+        else:
+            main.process_file(run_args)
+        if manager is not None:
+            manager.finalize()
+            manager = None
+        if run_args["dia"] and not run_args["stop_after_hills"]:
+            dia_args = {
+                key: deepcopy(value)
+                for key, value in run_args.items()
+                if key != "_output_manager"
+            }
+            main_dia.process_file(dia_args)
+        return {
+            "file": filename,
+            "status": "success",
+            "runtime_sec": time.monotonic() - started,
+            "error": None,
+            "traceback": None,
+        }
+    except BaseException as exc:
+        if manager is not None:
+            manager.abort()
+        return {
+            "file": filename,
+            "status": "failed",
+            "runtime_sec": time.monotonic() - started,
+            "error": "%s: %s" % (type(exc).__name__, exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def _run_args_for_file(args, filename, multiple_inputs):
+    run_args = {
+        key: value
+        for key, value in args.items()
+        if key not in {"files", "continue_on_error"}
+    }
+    run_args["file"] = filename
+    if multiple_inputs and run_args["o"]:
+        extension = "parquet" if run_args.get("feature_format") == "parquet" else "tsv"
+        output_directory = Path(run_args["o"])
+        run_args["o"] = str(
+            output_directory / ("%s.features.%s" % (input_stem(filename), extension))
+        )
+        if not run_args.get("duckdb_output"):
+            run_args["_ms2_output_directory"] = str(output_directory)
+    run_args["_multiple_inputs"] = multiple_inputs
+    run_args["_requested_nprocs"] = args["nprocs"]
+    if args["run_workers"] > 1:
+        run_args["nprocs"] = 1
+    return run_args
+
+
+def _log_batch_report(logger, files, results):
+    logger.info("Batch report: file\tstatus\truntime_sec\terror")
+    for index, filename in enumerate(files):
+        result = results.get(index)
+        if result is None:
+            result = {
+                "status": "not_run",
+                "runtime_sec": None,
+                "error": None,
+                "traceback": None,
+            }
+        runtime = result["runtime_sec"]
+        logger.info(
+            "%s\t%s\t%s\t%s",
+            filename,
+            result["status"],
+            "" if runtime is None else "%.3f" % runtime,
+            result["error"] or "",
+        )
+        if result.get("traceback"):
+            logger.error("File failed: %s\n%s", filename, result["traceback"])
 
 
 def run():
@@ -146,6 +243,17 @@ Examples:
     parser.add_argument('-cmin', help='min charge', default=1, type=int)
     parser.add_argument('-cmax', help='max charge', default=6, type=int)
     parser.add_argument('-nprocs', help='number of processes', default=4, type=int)
+    parser.add_argument(
+        '--run-workers',
+        help='bounded file-level worker count; each file uses one detection worker when greater than one',
+        default=1,
+        type=_positive_integer,
+    )
+    parser.add_argument(
+        '--continue-on-error',
+        help='continue scheduling independent input files after a failed file',
+        action='store_true',
+    )
     parser.add_argument('-dia',  help='create mgf file for DIA MS/MS. Experimental', action='store_true')
     parser.add_argument('-dia2',  help='create mgf file for DIA MS/MS with no look at MS1 spectra. Experimental', action='store_true')
     parser.add_argument('-diahtol', help='mass accuracy for DIA hills in ppm', default=25, type=float)
@@ -174,6 +282,11 @@ Examples:
         '--write_ms1', '--write-ms1',
         dest='write_ms1',
         help='write MS1 summary output (scan_id, RT in seconds, total_intensity)',
+        action='store_true',
+    )
+    parser.add_argument(
+        '--write-ms2',
+        help='write compact precursor-only <input-stem>.ms2.parquet sidecar',
         action='store_true',
     )
     parser.add_argument(
@@ -250,6 +363,7 @@ Examples:
         (not args['stop_after_hills'] and args['feature_format'] == 'parquet')
         or ((args['write_hills'] or args['stop_after_hills']) and args['hills_format'] == 'parquet')
         or (args['write_ms1'] and args['ms1_format'] == 'parquet')
+        or args['write_ms2']
     )
     if _option_was_supplied('--parquet-engine', '--parquet_engine') and (
         not parquet_requested and not args['duckdb_output']
@@ -268,6 +382,7 @@ Examples:
                 (args['stop_after_hills'], '--stop-after-hills'),
                 (args['write_hills'], '--write-hills'),
                 (args['write_ms1'], '--write-ms1'),
+                (args['write_ms2'], '--write-ms2'),
             )
             if enabled
         ]
@@ -276,6 +391,14 @@ Examples:
                 '%s cannot be used with hills input: %s'
                 % (', '.join(invalid_options), filename)
             )
+    if args['write_ms2'] and (
+        args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
+    ):
+        parser.error('--write-ms2 is supported only for the normal mzML feature workflow.')
+    if args['run_workers'] > 1 and (
+        args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
+    ):
+        parser.error('--run-workers greater than 1 is supported only for normal mzML inputs.')
     forced_write_hills = args['stop_after_hills'] and not args['write_hills']
     if forced_write_hills:
         args['write_hills'] = True
@@ -309,61 +432,74 @@ Examples:
                 parser.error('--duckdb-output must be a directory for multiple inputs.')
             duckdb_directory.mkdir(parents=True, exist_ok=True)
 
-    jobs = []
-    try:
-        for filename in args['files']:
-            run_args = deepcopy(args)
-            run_args['file'] = filename
-            if multiple_inputs and run_args['o']:
-                extension = (
-                    'parquet'
-                    if run_args.get('feature_format') == 'parquet'
-                    else 'tsv'
-                )
-                run_args['o'] = str(
-                    Path(run_args['o'])
-                    / ('%s.features.%s' % (input_stem(filename), extension))
-                )
-            manager = _create_output_manager(run_args)
-            if manager is not None:
-                run_args['_output_manager'] = manager
-            jobs.append((filename, run_args, manager))
-    except BaseException:
-        for _filename, _run_args, manager in jobs:
-            if manager is not None:
-                manager.abort()
-        raise
+    planned_paths = []
+    for filename in args['files']:
+        run_args = _run_args_for_file(args, filename, multiple_inputs)
+        planned_paths.extend(planned_output_paths(run_args))
+    if len(planned_paths) != len(set(planned_paths)):
+        parser.error('Output paths collide.')
+    existing = [path for path in planned_paths if path.exists()]
+    if existing and not args['overwrite']:
+        parser.error(
+            'Output already exists; use --overwrite: %s'
+            % ', '.join(map(str, existing))
+        )
 
-    for filename, run_args, manager in jobs:
-        logger.info('Starting file: %s', filename)
-        if 1:
-            try:
-                if run_args['dia2']:
-                    main_dia2.process_file(run_args)
-                else:
-                    main.process_file(run_args)
-                if manager is not None:
-                    manager.finalize()
-            except BaseException:
-                if manager is not None:
-                    manager.abort()
-                raise
-            if not run_args['dia2']:
-                if args['stop_after_hills']:
-                    logger.info('Hills extraction is finished for file: %s', filename)
-                else:
-                    logger.info('Feature detection is finished for file: %s', filename)
-                if args['dia'] and not args['stop_after_hills']:
-                    dia_args = {
-                        key: deepcopy(value)
-                        for key, value in run_args.items()
-                        if key != '_output_manager'
-                    }
-                    main_dia.process_file(dia_args)
-        
-        # except Exception as e:
-        #     logger.error(e)
-        #     logger.error('Feature detection failed for file: %s', filename)
+    requested_nprocs = args['nprocs']
+    effective_nprocs = 1 if args['run_workers'] > 1 else requested_nprocs
+    logger.info(
+        'Effective parallel configuration: run_workers=%d, nprocs=%d (requested nprocs=%d)',
+        args['run_workers'],
+        effective_nprocs,
+        requested_nprocs,
+    )
+    results = {}
+    if args['run_workers'] == 1:
+        for index, filename in enumerate(args['files']):
+            logger.info('Starting file: %s', filename)
+            result = _run_file_worker(
+                _run_args_for_file(args, filename, multiple_inputs)
+            )
+            results[index] = result
+            if result['status'] == 'failed' and not args['continue_on_error']:
+                break
+    else:
+        def task_arguments():
+            for filename in args['files']:
+                yield (_run_args_for_file(args, filename, multiple_inputs),)
+
+        raw_results, _started = run_bounded_process_tasks(
+            _run_file_worker,
+            task_arguments(),
+            args['run_workers'],
+            (
+                None
+                if args['continue_on_error']
+                else lambda result: (
+                    isinstance(result, WorkerFailure)
+                    or result.get('status') == 'failed'
+                )
+            ),
+        )
+        for index, result in raw_results.items():
+            if isinstance(result, WorkerFailure):
+                results[index] = {
+                    'file': args['files'][index],
+                    'status': 'failed',
+                    'runtime_sec': None,
+                    'error': '%s: %s' % (result.exception_type, result.message),
+                    'traceback': result.traceback_text,
+                }
+            else:
+                results[index] = result
+
+    if multiple_inputs or any(
+        result['status'] == 'failed' for result in results.values()
+    ):
+        _log_batch_report(logger, args['files'], results)
+    failed = [result for result in results.values() if result['status'] == 'failed']
+    if failed:
+        raise RuntimeError('%d input file(s) failed; see batch report for details.' % len(failed))
 
 if __name__ == '__main__':
     run()

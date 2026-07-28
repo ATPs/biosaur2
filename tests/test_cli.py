@@ -75,8 +75,25 @@ def test_help_documents_compact_output_contract():
         "minutes",
         "half-away-from-zero",
         "--write-extra-details",
+        "--run-workers",
+        "--continue-on-error",
+        "--write-ms2",
     ):
         assert text in result.stdout
+
+
+def test_ms2_and_file_parallelism_reject_unsupported_modes(tmp_path):
+    hills = tmp_path / "sample.hills.parquet"
+    hills.write_bytes(b"not read")
+    result = _run(hills, "--write-ms2")
+    assert result.returncode != 0
+    assert "--write-ms2 cannot be used with hills input" in result.stderr
+
+    mzml = tmp_path / "sample.mzML"
+    mzml.write_bytes(b"not read")
+    result = _run(mzml, "-dia", "--run-workers", "2")
+    assert result.returncode != 0
+    assert "normal mzML" in result.stderr
 
 
 def test_all_multi_input_collisions_are_checked_before_processing(tmp_path):

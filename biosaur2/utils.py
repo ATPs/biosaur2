@@ -1,4 +1,4 @@
-from pyteomics import mzml
+from pyteomics import mzml, xml
 import ast
 from collections import defaultdict
 from contextlib import contextmanager
@@ -60,6 +60,14 @@ def iter_ms1_spectra(input_file_path):
 def iter_all_spectra(input_file_path):
     with open_mzml_source(input_file_path) as mzml_source:
         for spec in mzml.read(mzml_source):
+            yield spec
+
+
+def iter_ms1_and_ms2_metadata(input_file_path):
+    """Yield decoded MS1 spectra and metadata-only non-MS1 spectra once."""
+
+    with open_mzml_source(input_file_path) as mzml_source:
+        for spec in MS1AndMetadataMzML(source=mzml_source):
             yield spec
 
 
@@ -241,6 +249,13 @@ def write_ms1_output(ms1_rows, args):
     manager.append_ms1(ms1_rows)
 
 
+def write_ms2_output(ms2_rows, args):
+    manager = args.get('_output_manager')
+    if manager is None:
+        raise RuntimeError('Output manager is required.')
+    manager.append_ms2(ms2_rows)
+
+
 def get_hills_features_from_hills_npz(npz_path):
     payload = _load_hills_npz_payload(npz_path)
     row_count = int(np.asarray(payload['mz']).shape[0])
@@ -286,6 +301,32 @@ class MS1OnlyMzML(mzml.MzML):
      _default_iter_path = '//spectrum[./*[local-name()="cvParam" and @name="ms level" and @value="1"]]' 
      _use_index = False 
      _iterative = False
+
+
+class MS1AndMetadataMzML(mzml.MzML):
+    """Decode peak arrays only for MS1 while retaining MS2 XML metadata."""
+
+    _default_iter_path = "//spectrum"
+    _use_index = False
+
+    def _get_info_smart(self, element, **kwargs):
+        if xml._local_name(element) == "spectrum":
+            ms_level = None
+            for child in element.iterchildren():
+                if (
+                    xml._local_name(child) == "cvParam"
+                    and child.get("name") == "ms level"
+                ):
+                    try:
+                        ms_level = int(child.get("value"))
+                    except (TypeError, ValueError):
+                        pass
+                    break
+            if ms_level != 1:
+                for child in list(element.iterchildren()):
+                    if xml._local_name(child) == "binaryDataArrayList":
+                        element.remove(child)
+        return super()._get_info_smart(element, **kwargs)
 
 def calibrate_mass(bwidth, mass_left, mass_right, true_md):
     result = fit_mass_calibration(true_md, bin_width=bwidth)

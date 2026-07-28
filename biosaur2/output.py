@@ -35,6 +35,74 @@ def input_stem(path_value: str) -> str:
     return Path(name).stem
 
 
+def ms2_output_path(args: Mapping[str, Any]) -> Path:
+    """Return the fixed input-stem MS2 sidecar path for one run."""
+
+    stem = input_stem(str(args["file"]))
+    explicit_directory = args.get("_ms2_output_directory")
+    if explicit_directory:
+        return Path(explicit_directory) / (stem + ".ms2.parquet")
+    duckdb_output = args.get("duckdb_output")
+    if duckdb_output:
+        requested = Path(duckdb_output)
+        directory = requested.parent if requested.suffix.lower() == ".duckdb" else requested
+    else:
+        explicit = args.get("o")
+        if explicit:
+            path = Path(explicit)
+            if args.get("_multiple_inputs"):
+                directory = path
+            else:
+                directory = path.parent
+        else:
+            directory = Path(args["file"]).parent
+    return directory / (stem + ".ms2.parquet")
+
+
+def planned_output_paths(args: Mapping[str, Any]):
+    """Resolve final outputs without creating writers or staging files."""
+
+    input_path = Path(args["file"])
+    explicit = args.get("o")
+    if explicit:
+        explicit_path = Path(explicit)
+        prefix = (
+            explicit_path.with_suffix("")
+            if explicit_path.suffix.lower() in {".tsv", ".parquet"}
+            else explicit_path
+        )
+    else:
+        prefix = input_path.parent / input_stem(str(input_path))
+
+    paths = []
+    duckdb_output = args.get("duckdb_output")
+    if duckdb_output:
+        requested = Path(duckdb_output)
+        paths.append(
+            requested
+            if requested.suffix.lower() == ".duckdb"
+            else requested / (input_stem(str(input_path)) + ".biosaur2.duckdb")
+        )
+    else:
+        if not args.get("stop_after_hills"):
+            feature_format = args.get("feature_format", "tsv")
+            if explicit and str(explicit).lower().endswith("." + feature_format):
+                paths.append(Path(explicit))
+            else:
+                paths.append(Path("%s.features.%s" % (prefix, feature_format)))
+        if args.get("write_hills"):
+            paths.append(
+                Path("%s.hills.%s" % (prefix, args.get("hills_format", "tsv")))
+            )
+        if args.get("write_ms1"):
+            paths.append(
+                Path("%s.ms1.%s" % (prefix, args.get("ms1_format", "tsv")))
+            )
+    if args.get("write_ms2"):
+        paths.append(ms2_output_path(args))
+    return paths
+
+
 def _format_tsv(value, decimals="roundtrip"):
     if value is None:
         return ""
@@ -200,6 +268,9 @@ def build_provenance(args: Mapping[str, Any]):
             else "exact_point_rt"
         ),
         "combine_every": args.get("combine_every", 1),
+        "run_workers": args.get("run_workers", 1),
+        "requested_nprocs": args.get("_requested_nprocs", args.get("nprocs")),
+        "effective_nprocs": args.get("nprocs"),
         "calibration": {
             "hill": args.get("hill_calibration", {"status": "not_requested"}),
             "isotope": args.get("isotope_calibration", {}),

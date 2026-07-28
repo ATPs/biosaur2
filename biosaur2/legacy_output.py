@@ -13,6 +13,7 @@ from .output import (
     _temporary_neighbor,
     build_provenance,
     input_stem,
+    ms2_output_path,
     publish_staged_files,
     round_intensity,
 )
@@ -22,6 +23,8 @@ from .schema import (
     feature_columns,
     hill_columns,
     MS1_COLUMNS,
+    MS2_COLUMNS,
+    MS2_SCHEMA_VERSION,
 )
 
 
@@ -124,6 +127,31 @@ def compact_ms1(row: Mapping[str, Any], args: Mapping[str, Any]):
     }
 
 
+def compact_ms2(row: Mapping[str, Any], args: Mapping[str, Any]):
+    return {
+        "run_id": row.get("run_id"),
+        "ms2_event_id": row.get("ms2_event_id"),
+        "ms2_index": row.get("ms2_index"),
+        "spectrum_index": row.get("spectrum_index"),
+        "native_id": row.get("native_id"),
+        "native_scan_number": row.get("native_scan_number"),
+        "rt_sec": row.get("rt_sec"),
+        "precursor_ms1_index": row.get("precursor_ms1_index"),
+        "precursor_resolution": row.get("precursor_resolution"),
+        "selected_ion_mz": row.get("selected_ion_mz"),
+        "isolation_target_mz": row.get("isolation_target_mz"),
+        "isolation_lower_offset": row.get("isolation_lower_offset"),
+        "isolation_upper_offset": row.get("isolation_upper_offset"),
+        "precursor_mz": row.get("precursor_mz"),
+        "precursor_mz_source": row.get("precursor_mz_source"),
+        "charge": row.get("charge"),
+        "selected_ion_intensity": row.get("selected_ion_intensity"),
+        "faims_cv": row.get("faims_cv"),
+        "ion_mobility": row.get("ion_mobility"),
+        "metadata_flags": row.get("metadata_flags", 0),
+    }
+
+
 def compact_sort_key(row, kind, mode="mz_rt"):
     if kind == "features":
         if mode == "none":
@@ -147,6 +175,8 @@ def compact_sort_key(row, kind, mode="mz_rt"):
             row.get("rtApex") or 0.0,
             row.get("hill_idx") or 0,
         )
+    if kind == "ms2":
+        return (row.get("ms2_event_id") or 0,)
     return (row.get("scan_id") if row.get("scan_id") is not None else -1,)
 
 
@@ -162,13 +192,14 @@ def row_batches(rows, batch_size=100000):
 
 
 class _CompactParquetSink:
-    def __init__(self, final_path: Path, schema: pa.Schema, args):
+    def __init__(self, final_path: Path, schema: pa.Schema, args, dictionary_columns=()):
         self.final_path = final_path
         self.schema = schema
         self.args = args
         self.temp_path = _temporary_neighbor(final_path)
         self.writer = None
         self.row_count = 0
+        self.dictionary_columns = tuple(dictionary_columns)
 
     def _open(self):
         if self.writer is not None:
@@ -178,7 +209,7 @@ class _CompactParquetSink:
             compression = None
         kwargs = {
             "compression": compression,
-            "use_dictionary": False,
+            "use_dictionary": list(self.dictionary_columns) or False,
             "use_byte_stream_split": [
                 field.name
                 for field in self.schema
@@ -259,6 +290,8 @@ class CompactOutputManager:
         return input_path.parent / input_stem(str(input_path))
 
     def _target(self, kind, output_format):
+        if kind == "ms2":
+            return ms2_output_path(self.args)
         explicit = self.args.get("o")
         if kind == "features" and explicit and str(explicit).endswith(
             "." + output_format
@@ -275,7 +308,16 @@ class CompactOutputManager:
                 self.overwrite,
                 decimals=self.args.get("tsv_float_decimals", "roundtrip"),
             )
-        return _CompactParquetSink(target, self.schemas[kind], self.args)
+        dictionary_columns = ()
+        if kind == "ms2":
+            dictionary_columns = (
+                "run_id",
+                "precursor_resolution",
+                "precursor_mz_source",
+            )
+        return _CompactParquetSink(
+            target, self.schemas[kind], self.args, dictionary_columns
+        )
 
     def _build_sinks(self):
         if not self.args.get("stop_after_hills"):
@@ -296,6 +338,8 @@ class CompactOutputManager:
             self.sinks["ms1"] = self._sink(
                 "ms1", self.args.get("ms1_format", "tsv"), MS1_COLUMNS
             )
+        if self.args.get("write_ms2"):
+            self.sinks["ms2"] = self._sink("ms2", "parquet", MS2_COLUMNS)
 
     def _preflight(self):
         targets = [sink.final_path for sink in self.sinks.values()]
@@ -334,6 +378,14 @@ class CompactOutputManager:
         converted.sort(key=lambda row: compact_sort_key(row, "ms1"))
         self.sinks["ms1"].append(converted)
 
+    def append_ms2(self, rows):
+        if "ms2" not in self.sinks:
+            return
+        for batch in row_batches(rows):
+            converted = [compact_ms2(row, self.args) for row in batch]
+            converted.sort(key=lambda row: compact_sort_key(row, "ms2"))
+            self.sinks["ms2"].append(converted)
+
     def stage(self):
         if self._staged:
             return
@@ -344,8 +396,25 @@ class CompactOutputManager:
         ]
         if parquet_sinks:
             self.provenance = build_provenance(self.args)
-            for sink in parquet_sinks:
-                sink.add_provenance(self.provenance)
+            for name, sink in self.sinks.items():
+                if not isinstance(sink, _CompactParquetSink):
+                    continue
+                provenance = dict(self.provenance)
+                if name == "ms2":
+                    provenance.update(
+                        {
+                            "ms2_schema_version": MS2_SCHEMA_VERSION,
+                            "ms2_rt_unit": "second",
+                            "ms2_mobility_unit": "1/K0",
+                            "ms2_metadata_flags": (
+                                "0x0001 missing_precursor_mz; "
+                                "0x0002 missing_charge; "
+                                "0x0004 unresolved_spectrum_ref; "
+                                "0x0008 missing_precursor_ms1"
+                            ),
+                        }
+                    )
+                sink.add_provenance(provenance)
         for sink in self.sinks.values():
             sink.close()
         self._staged = True

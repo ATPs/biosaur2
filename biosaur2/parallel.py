@@ -7,7 +7,7 @@ import os
 import queue
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -155,6 +155,88 @@ def run_process_tasks(
         raise
     finally:
         for process in processes:
+            process.join()
+        result_queue.close()
+        result_queue.join_thread()
+
+
+def run_bounded_process_tasks(
+    function: Callable[..., Any],
+    task_args: Iterable[Sequence[Any]],
+    max_workers: int,
+    stop_on_result: Optional[Callable[[Any], bool]] = None,
+    poll_seconds: float = 0.1,
+) -> Tuple[Dict[int, Any], List[int]]:
+    """Run one spawned process per task with a bounded active set.
+
+    ``task_args`` is consumed only as process slots become available. A worker
+    never processes a second task, so its entire file-level memory footprint is
+    released on exit. Returned keys are the input task order indexes.
+    """
+
+    if max_workers < 1:
+        raise ValueError("max_workers must be a positive integer")
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    task_iterator = enumerate(task_args)
+    active = {}
+    results = {}
+    started = []
+    stop_submitting = False
+
+    def start_next():
+        try:
+            worker_id, args = next(task_iterator)
+        except StopIteration:
+            return False
+        process = context.Process(
+            target=_worker_entry,
+            args=(result_queue, worker_id, function, tuple(args)),
+        )
+        process.start()
+        active[worker_id] = process
+        started.append(worker_id)
+        return True
+
+    try:
+        while len(active) < max_workers and start_next():
+            pass
+        while active:
+            try:
+                status, worker_id, payload = result_queue.get(timeout=poll_seconds)
+            except queue.Empty:
+                failed = [
+                    (worker_id, process.exitcode)
+                    for worker_id, process in active.items()
+                    if process.exitcode not in (None, 0)
+                ]
+                if not failed:
+                    continue
+                worker_id, exit_code = failed[0]
+                payload = WorkerFailure(
+                    worker_id=worker_id,
+                    exception_type="ProcessExit",
+                    message="child exited with code %s before reporting" % exit_code,
+                    traceback_text="",
+                )
+                status = "error"
+
+            process = active.pop(worker_id, None)
+            if process is None:
+                continue
+            process.join()
+            result = payload if status == "ok" else payload
+            results[worker_id] = result
+            if status == "error" or (
+                stop_on_result is not None and stop_on_result(result)
+            ):
+                stop_submitting = True
+            if not stop_submitting:
+                while len(active) < max_workers and start_next():
+                    pass
+        return results, started
+    finally:
+        for process in active.values():
             process.join()
         result_queue.close()
         result_queue.join_thread()

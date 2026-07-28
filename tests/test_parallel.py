@@ -5,6 +5,7 @@ import pytest
 from biosaur2.parallel import (
     WorkerProcessError,
     balanced_ranges,
+    run_bounded_process_tasks,
     run_process_tasks,
 )
 
@@ -20,6 +21,10 @@ def _fail(message):
 def _sleep(value):
     time.sleep(value)
     return value
+
+
+def _failed_status(value):
+    return {"value": value, "status": "failed"}
 
 
 @pytest.mark.parametrize(
@@ -59,3 +64,23 @@ def test_child_exception_propagates_with_traceback_without_hang():
     assert error.value.failure.exception_type == "ValueError"
     assert "expected failure" in str(error.value)
     assert "_fail" in error.value.failure.traceback_text
+
+
+def test_bounded_file_scheduler_does_not_eagerly_consume_large_batches():
+    consumed = []
+
+    def task_args():
+        for value in range(1808):
+            consumed.append(value)
+            yield (value,)
+
+    results, started = run_bounded_process_tasks(
+        _failed_status,
+        task_args(),
+        max_workers=4,
+        stop_on_result=lambda result: result["status"] == "failed",
+    )
+
+    assert started == [0, 1, 2, 3]
+    assert consumed == [0, 1, 2, 3]
+    assert set(results) == {0, 1, 2, 3}
