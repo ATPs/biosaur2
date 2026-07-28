@@ -52,7 +52,6 @@ setup(
     extras_require       = {'duckdb': ['duckdb>=1.0']},
     ext_modules          = make_extensions(),
     classifiers          = ['Intended Audience :: Science/Research',
-                            'Programming Language :: Python :: 3.9',
                             'Programming Language :: Python :: 3.12',
                             'Topic :: Education',
                             'Topic :: Scientific/Engineering :: Bio-Informatics',
