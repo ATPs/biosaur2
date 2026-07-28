@@ -18,7 +18,9 @@ jobs:
     - name: Build wheels
       uses: pypa/cibuildwheel@v2.18.1
       env:
-        CIBW_SKIP: "cp36-* cp37-* cp38-* *-win32 *_i686 pp*"
+        CIBW_BUILD: "cp312-*"
+        CIBW_SKIP: "*-win32 *_i686 pp*"
+        CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
