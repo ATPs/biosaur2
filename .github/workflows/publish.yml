@@ -14,11 +14,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Build wheels
       uses: pypa/cibuildwheel@v2.18.1
       env:
-        CIBW_SKIP: "cp36-* cp37-* cp38-* cp312-* *-win32 *_i686 pp*"
+        CIBW_SKIP: "cp36-* cp37-* cp38-* *-win32 *_i686 pp*"
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -32,8 +32,8 @@ jobs:
     needs: build
 
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v3
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
     - run : |
         pip install -r requirements.txt
         python setup.py sdist

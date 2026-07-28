@@ -38,7 +38,10 @@ def get_and_calc_apex_intensity_and_scan(dict hills_dict, int idx_1):
     hill_scan_apex_1 = hills_dict['hills_scan_apex'][idx_1]
     if hill_intensity_apex_1 is None:
 
-        hill_intensity_apex_1 = 0
+        if not hills_dict['hills_intensity_array'][idx_1]:
+            raise ValueError('Cannot calculate an apex for an empty hill.')
+        hill_intensity_apex_1 = hills_dict['hills_intensity_array'][idx_1][0]
+        hill_scan_apex_1 = hills_dict['hills_scan_lists'][idx_1][0]
 
         for int_val, scan_val in zip(hills_dict['hills_intensity_array'][idx_1], hills_dict['hills_scan_lists'][idx_1]):
             if int_val > hill_intensity_apex_1:
@@ -809,17 +812,17 @@ def detect_hills(list data_for_analyse_tmp, dict args, float mz_step, float pase
             if flag1 or flag2 or flag3:
 
                 if flag1:
-                    all_idx = prev_fast_dict[fm]
+                    all_idx = list(prev_fast_dict[fm])
                     if flag2:
                         all_idx += prev_fast_dict[fm-1]
                     if flag3:
                         all_idx += prev_fast_dict[fm+1]
                 elif flag2:
-                    all_idx = prev_fast_dict[fm-1]
+                    all_idx = list(prev_fast_dict[fm-1])
                     if flag3:
                         all_idx += prev_fast_dict[fm+1]
                 elif flag3:
-                    all_idx = prev_fast_dict[fm+1]
+                    all_idx = list(prev_fast_dict[fm+1])
 
                 if paseftol > 0:
                     flag1_im = fi in prev_fast_dict_im
@@ -827,7 +830,7 @@ def detect_hills(list data_for_analyse_tmp, dict args, float mz_step, float pase
                     flag3_im = fi+1 in prev_fast_dict_im
 
                 best_intensity = 0
-                best_idx_prev = 0
+                best_idx_prev = -1
                 mz_cur = z['m/z array'][idx]
 
 
@@ -856,7 +859,7 @@ def detect_hills(list data_for_analyse_tmp, dict args, float mz_step, float pase
                         best_idx_prev = idx_prev
                         hills_dict['hills_idx_array'][last_idx+1+idx] = hills_dict['hills_idx_array'][prev_idx+1+idx_prev]
                         
-                if best_idx_prev != 0:
+                if best_idx_prev != -1:
                     banned_prev_idx_set.add(best_idx_prev)
                     total_mass_diff.append(best_mass_diff_with_sign)
 

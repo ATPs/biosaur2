@@ -1,103 +1,166 @@
-biosaur2 - A feature detection LC-MS1 spectra. This project is a rewriten version of Biosaur software (https://github.com/abdrakhimov1/Biosaur).
------------------------------------------------------------------------
+# biosaur2
 
-The centroided mzML file is required for of the script.
+Biosaur2 detects isotope features in centroided LC-MS1 mzML data. Version
+0.4.0 improves deterministic processing, retention-time and native-scan
+correctness, multiprocessing reliability, calibration fallbacks, and compact
+output.
 
-Algorithm can be run with following command:
+## Install and run
 
-    biosaur2 path_to_MZML
+```bash
+pip install biosaur2
+biosaur2 sample.mzML.gz
+```
 
-or with precomputed hills input:
+The plain command writes `sample.features.tsv`. Existing output is not replaced
+unless `--overwrite` is supplied. DuckDB is optional but is the preferred
+Parquet writer:
 
-    biosaur2 path_to_input.hills.tsv
-    biosaur2 path_to_input.hills.parquet
+```bash
+pip install 'biosaur2[duckdb]'
+biosaur2 sample.mzML.gz --feature-format parquet
+```
 
-The script outputs peptide features in `tsv` by default, or `parquet` when `--feature_format parquet` is used.
+Each requested Parquet product uses DuckDB Parquet V2, ZSTD level 6, and a
+default row group of 122880. Feature Parquet is one `sample.features.parquet`,
+not a directory or a set of normalized sidecars. DuckDB is also selected when
+only hills or MS1 uses Parquet while features remain TSV. If DuckDB is
+unavailable, Biosaur2 emits a visible warning and falls back to an optimized
+PyArrow writer. Selecting `--parquet-engine pyarrow` explicitly avoids that
+fallback check.
 
-All available arguments can be shown with command "biosaur2 -h".
+## Compact feature output
 
-The default parameter minlh (the minimal number of consecutive scans for peptide feature) is 1 and this value is optimimal for ultra-short LC gradients (a few minutes). For the longer LC gradients, this value can be increased for reducing of feature detection time and removing noise isotopic clusters.
+Default feature columns, in order, are:
 
-For TOF data please add "-tof" argument.
+```text
+massCalib rtApex intensityApex intensitySum charge nIsotopes nScans mz
+rtStart rtEnd FAIMS im mono_hills_scan_lists mono_hills_intensity_list
+scanApex isoerror isoerror2 feature_idx area_sum
+```
 
-For PASEF data please convert mzML file using msconvert and '--combineIonMobilitySpectra --filter "msLevel 1" ' options. Do not use option --filter "scanSumming"! The latter is often required for MS/MS data analysis but breaks MS1 feature detection. 
+`--no-mono-hills` removes the two large `mono_hills_*` arrays. This is useful
+for downstream preprocessing that does not reuse the embedded monoisotopic
+trace. `--write-extra-details` keeps its original role and appends `isotopes`,
+`intensity_array_for_cos_corr`, `monoisotope hill idx`, and `monoisotope idx`
+to the same feature file. It is intended for diagnostics and increases size.
 
-For negative mode data please add "-nm" argument.
+The default Parquet/DuckDB physical types are:
 
-Citing biosaur2
--------------------
-Abdrakhimov, et al. Biosaur: An open-source Python software for liquid chromatography-mass spectrometry peptide feature detection with ion mobility support. https://doi.org/10.1002/rcm.9045
+| Columns | Type |
+| --- | --- |
+| floating scalars and float-list elements | FLOAT32 |
+| `charge`, `nIsotopes` | INT8 |
+| `nScans` | INT16 |
+| `scanApex`, `feature_idx`, scan-list elements | INT32 |
 
-Installation
--------------
-Using the pip:
+`--64` widens structured numeric output. Internal detection, calibration,
+scoring, conflict resolution, and area calculation continue in float64.
+Narrow-integer overflow is an output error rather than a wrap.
 
-    pip install biosaur2
-    
-Available parameters
--------------
--minlh: Minimum number of MS1 scans for peaks extracted from the mzML file. Optimal usually is in 1-3 range for 5-15 min LC gradients and 5-10 for 60-180 min gradients. Default = 2
+Feature and hill `rtStart`, `rtApex`, and `rtEnd` are in minutes, matching the
+0.3.2 column contract. MS1 `RT` is in seconds. Missing FAIMS, compatible ion
+mobility (`im`), native `scanApex`, `isoerror2`, and `area_sum` values are null;
+missing FAIMS is not encoded as zero.
 
--mini : Minimal intensity threshold for peaks extracted from the mzML file. Default = 1
+`feature_idx` is deterministic, one-based, and always present. Hills use the
+same value to identify their assigned feature; an unassigned hill has
+`feature_idx = -1`.
 
--minmz : Minimal m/z value for peaks extracted from the mzML file. Default = 350
+## Intensities and area
 
--maxmz : Maximal m/z value for peaks extracted from the mzML file. Default = 1500
+`-iuse -1`, the default, uses all assigned isotopes for `intensityApex`,
+`intensitySum`, and `area_sum`; `-iuse 0` selects mono only, and `-iuse N`
+selects mono plus up to N assigned isotopes.
 
--htol : Mass accuracy in ppm to combine peaks into hills between scans. Default = 8 ppm
+`area_sum` is the sum of raw trapezoidal trace areas for that isotope subset in
+instrument-intensity × seconds. It is null if any selected trace cannot be
+integrated. Exact per-point RT is used when available. For older hills without
+point RT, Biosaur2 interpolates from the hill start/apex/end anchors and records
+that fact in structured-output provenance.
 
--itol : Mass accuracy in ppm for isotopic hills. Default = 8 ppm
+Output intensities are rounded half away from zero to zero decimal places by
+default and remain stored as floating point. This happens only during output;
+it cannot alter feature detection or area calculation. Use
+`--intensity-decimals none` to preserve fractional output or provide a
+nonnegative decimal count.
 
--ignore_iso_calib : Turn off accurate isotope error estimation if added as the parameter. Input "itol" value will be used instead of gaussian fitting of mass errors and systematic shifts for every isotope number.  
+Derived QC, shape, score, status, flag, isotope-row, and trace-point columns are
+not written by default. The compact file retains baseline-compatible values
+and only the additional `feature_idx` and `area_sum` needed for assignment and
+area quantification.
 
--o : Path to output feature file. Default is the input mzML name with `.features.tsv` (or `.features.parquet` when `--feature_format parquet`) in the same folder.
+## Hills, MS1, and DuckDB database output
 
--hvf: Threshold to split hills into multiple if local minimum intensity multiplied by hvf is less than both surrounding local maximums. All peaks after splitting must have at least max(2, minlh) MS1 scans. Default = 1.3
+```bash
+biosaur2 sample.mzML.gz \
+  --write-hills --hills-format parquet \
+  --write-ms1 --ms1-format parquet
 
--ivf: Threshold to split isotope pattern into multiple features if local minimum intensity multiplied by ivf is less right local maximum. Local minimum position should be higher than max(4rd isotope, isotope position with maximum intensity according to averagine model). Default = 5.0
+# Small preprocessing-oriented outputs
+biosaur2 sample.mzML.gz \
+  --write-hills --hills-format parquet --no-hill-list \
+  --no-mono-hills \
+  --write-ms1 --ms1-format parquet \
+  --feature-format parquet
+```
 
--nm : Negative mode. 1-true, 0-false. Affect only neutral mass column calculated in the output features table.  Default = 0
+Hills retain their compact nested shape. When point lists are enabled,
+`hills_rt_list` stores exact per-point seconds so a hills file can be reused
+without reconstructing RT. `--no-hill-list` removes all large hill point arrays
+and makes that output unsuitable as feature-detection input. MS1 contains only
+`scan_id`, `RT`, and `total_intensity`.
 
--cmin: Minimum allowed charge for isotopic clusters. Default = 1
+Parquet features, hills, and MS1 are separate requested products; the feature
+product itself is always one file. To keep requested products in one database:
 
--cmax: Maximal allowed charge for isotopic clusters. Default = 6
+```bash
+biosaur2 sample.mzML.gz --duckdb-output sample.biosaur2.duckdb
+biosaur2 sample.mzML.gz --duckdb-output sample.biosaur2.duckdb \
+  --write-hills --write-ms1
+```
 
--nprocs: Number of processes used by biosau2. Automatically set to 1 for Windows system due to multiprocessing issues. Default = 4
+A `.duckdb` file contains a small `runs` provenance table, compact `features`,
+and only explicitly requested `hills` and `ms1` tables. Unlike ordinary
+Parquet fallback, explicit `--duckdb-output` requires DuckDB.
 
--write_hills: Add hills output if added as the parameter. Output format is controlled by `--hills_format`. When used without `--stop_after_hills`, both feature and hills outputs include `feature_idx` (1-based feature label). In hills output, `feature_idx = -1` means the hill is not assigned to any detected feature.
+Structured outputs record schema and package versions, input path and size,
+parameters, units, numeric and rounding policies, writer settings, and
+calibration/area provenance. They do not reread the input to calculate a
+content hash. Publication is atomic. TSV has a header but no metadata preamble
+or sidecar.
 
---hills_format: Format for hills output generated by `-write_hills`. Supported values: `tsv`, `parquet`. Default = `tsv`. The `parquet` output is compressed with `zstd` (balanced compression ratio and speed).
+## Input RT and multiple files
 
---no_hill_list: For `-write_hills`, exclude `hills_scan_lists`, `hills_intensity_list`, and `hills_mz_array` from the hills output. This reduces size, but such a hills file cannot be used later as input for feature detection.
+mzML retention-time metadata takes precedence. `--input-rt-unit` is the
+fallback for metadata-free mzML or hills input and defaults to seconds. Use
+`--input-rt-unit minutes` for pre-0.4 hills files whose scalar RT values are in
+minutes.
 
-`-write_hills` output now includes `scanApex` (the mzML scan ID corresponding to `rtApex`, using the `scan=` value from spectrum ID, e.g. `scan=1`).
+Multiple inputs are accepted. With ordinary output, `-o` must be an output
+directory; with multiple `--duckdb-output` inputs, that option must also be a
+directory. All target collisions are checked before processing begins.
+Hills inputs are feature-detection inputs only; `--stop-after-hills`,
+`--write-hills`, and `--write-ms1` are rejected for them.
 
---write_ms1: Write MS1 summary output (default file suffix: `.ms1.tsv` or `.ms1.parquet`). Default columns: `scan_id`, `RT`, `total_intensity`. `scan_id` follows mzML `scan=` numbering (e.g. `scan=1`), and `RT` is written in seconds.
+DIA and DIA2 remain experimental and receive compatibility smoke coverage.
+`.duckdb` output is not supported in DIA modes. `--no-mono-hills` is not
+accepted with `-dia`, because that workflow consumes the monoisotopic arrays.
 
---ms1_format: Format for MS1 summary output generated by `--write_ms1`. Supported values: `tsv`, `parquet`. Default = `tsv`.
+## 0.4 migration notes
 
---feature_format: Format for feature output. Supported values: `tsv`, `parquet`. Default = `tsv`.
+Version 0.4.0 intentionally removes the experimental normalized three-file
+layout and the public options `--parquet-layout`, `--legacy-columns`,
+`--scalar-float`, `--intensity-float`, `--quantification`,
+`--output-rt-unit`, and DuckDB Parquet V1 selection. They are rejected instead
+of silently acting as compatibility aliases. Use `--64` for wide structured
+storage and `--input-rt-unit` only to describe metadata-free input.
 
---stop_after_hills: Automatically enables -write_hills and stops the run after hills are written, skipping feature detection. In this mode, `feature_idx` is not added because feature detection is skipped.
+Run `biosaur2 --help` for all detection and output controls, defaults, units,
+types, file naming, and examples.
 
--write_extra_details: Add extra diagnostic columns to feature output (for example: isotope candidate details, theoretical/experimental isotope intensity vectors, and monoisotopic hill/index identifiers). Useful for debugging and method development; increases output file size.
+## Citation
 
---no-mono-hills: Exclude `mono_hills_scan_lists` and `mono_hills_intensity_list` from feature output (`-dia` requires these columns, so this option cannot be combined with `-dia`).
-
---64: For parquet output, store key hill/feature coordinates, MS1 summary columns, and list elements as 64-bit values. By default, parquet output uses 32-bit values (`int32`/`float32`), including list elements in `hills_scan_lists`, `hills_intensity_list`, `hills_mz_array`, and `mono_hills_*` columns.
-
--paseminlh: For TIMS-TOF data. Minimum number of ion mobility values for m/z peaks to be kept in the analysis. Default = 1
-
--paseftol: For TIMS-TOF data. Ion mobility tolerance used to combine close peaks into a single one. Default = 0.05
-
--pasefmini: For TIMS-TOF data. Minimal intensity threshold for peaks after combining peaks with close m/z (itol option) and ion mobility (paseftol option) values. Default = 100
-
--tof: Experimental. If added as the parameter, biosaur2 estimates noise intensity distribution across m/z range and automatically calculates intensity cutoffs for different m/z value ranges. This is an alternative way to reduce noise to the "-mini" option which is a fixed intensity threshold for all m/z values. Can be usefull for TOF data
-
-    
-
-Links
------
-
-- GitHub repo & issue tracker: https://github.com/markmipt/biosaur2
-- Mailing list: markmipt@gmail.com
+Abdrakhimov et al., “Biosaur: An open-source Python software for liquid
+chromatography-mass spectrometry peptide feature detection with ion mobility
+support.” https://doi.org/10.1002/rcm.9045

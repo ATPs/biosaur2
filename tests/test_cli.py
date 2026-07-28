@@ -1,0 +1,117 @@
+import subprocess
+import sys
+
+import pytest
+
+
+def _run(*arguments):
+    return subprocess.run(
+        [sys.executable, "-m", "biosaur2.search", *map(str, arguments)],
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_invalid_output_controls_fail_during_argument_validation(tmp_path):
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    result = _run(source, "--intensity-decimals", "bad")
+    assert result.returncode != 0
+    assert "nonnegative integer" in result.stderr
+
+    result = _run(
+        source,
+        "--feature-format",
+        "parquet",
+        "--parquet-compression",
+        "snappy",
+        "--parquet-compression-level",
+        "3",
+    )
+    assert result.returncode != 0
+    assert "supported only by zstd and brotli" in result.stderr
+
+    result = _run(
+        source,
+        "--stop-after-hills",
+        "--feature-format",
+        "parquet",
+        "--parquet-engine",
+        "duckdb",
+    )
+    assert result.returncode != 0
+    assert "requires at least one Parquet output" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "removed_option",
+    [
+        "--parquet-layout",
+        "--legacy-columns",
+        "--scalar-float",
+        "--intensity-float",
+        "--quantification",
+        "--output-rt-unit",
+        "--duckdb-parquet-version",
+    ],
+)
+def test_removed_output_options_are_rejected(tmp_path, removed_option):
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    result = _run(source, removed_option, "value")
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
+
+
+def test_help_documents_compact_output_contract():
+    result = _run("--help")
+    assert result.returncode == 0
+    for text in (
+        "one compact features.parquet file",
+        "DuckDB V2",
+        "float32",
+        "feature_idx",
+        "area_sum",
+        "minutes",
+        "half-away-from-zero",
+        "--write-extra-details",
+    ):
+        assert text in result.stdout
+
+
+def test_all_multi_input_collisions_are_checked_before_processing(tmp_path):
+    first = tmp_path / "first.mzML"
+    second = tmp_path / "second.mzML"
+    first.write_bytes(b"not read")
+    second.write_bytes(b"not read")
+    output = tmp_path / "outputs"
+    output.mkdir()
+    (output / "second.features.tsv").write_text("existing\n")
+
+    result = _run(first, second, "-o", output)
+    assert result.returncode != 0
+    assert "Output already exists" in result.stderr
+    assert not (output / "first.features.tsv").exists()
+
+
+@pytest.mark.parametrize(
+    "option", ["--stop-after-hills", "--write-hills", "--write-ms1"]
+)
+def test_hills_input_rejects_mzml_only_output_options(tmp_path, option):
+    source = tmp_path / "sample.hills.parquet"
+    source.write_bytes(b"not read")
+    result = _run(source, option)
+    assert result.returncode != 0
+    assert "%s cannot be used with hills input" % option in result.stderr
+
+
+def test_mixed_inputs_are_validated_before_any_output_manager(tmp_path):
+    mzml_source = tmp_path / "first.mzML"
+    hills_source = tmp_path / "second.hills.parquet"
+    mzml_source.write_bytes(b"not read")
+    hills_source.write_bytes(b"not read")
+    output = tmp_path / "outputs"
+    result = _run(mzml_source, hills_source, "--write-ms1", "-o", output)
+    assert result.returncode != 0
+    assert "--write-ms1 cannot be used with hills input" in result.stderr
+    assert not output.exists()

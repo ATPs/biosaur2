@@ -1,4 +1,3 @@
-from . import utils
 from . import main
 import itertools
 from os import path
@@ -6,7 +5,8 @@ import pandas as pd
 import ast
 import math
 import logging
-from .cutils import get_initial_isotopes, checking_cos_correlation_for_carbon, split_peaks, split_peaks_old, detect_hills, process_hills, get_and_calc_values_for_cos_corr, cos_correlation, get_and_calc_apex_intensity_and_scan
+from .cutils import detect_hills, process_hills, get_and_calc_values_for_cos_corr, cos_correlation, get_and_calc_apex_intensity_and_scan
+from .preprocessing import centroid_pasef_data, process_mzml_dia
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def process_file(args):
     t_i = 1
 
 
-    data_for_analyse, ms1_count, ms2_count = utils.process_mzml_dia(args)
+    data_for_analyse, ms1_count, ms2_count = process_mzml_dia(args)
 
     isolation_target_func = lambda x: x['precursorList']['precursor'][0]['isolationWindow']['isolation window target m/z']
     isolation_window_func = lambda x: x['precursorList']['precursor'][0]['isolationWindow']['isolation window lower offset']
@@ -116,16 +116,14 @@ def process_file(args):
 
         if all('ignore_ion_mobility' not in z for z in data_for_analyse_tmp):
             logger.debug('%d %d', sum(('ignore_ion_mobility' in z for z in data_for_analyse_tmp)), len(data_for_analyse_tmp))
-            utils.centroid_pasef_data(data_for_analyse_tmp, args, mz_step)
+            centroid_pasef_data(data_for_analyse_tmp, args, mz_step)
         else:
             args['paseftol'] = False
 
         paseftol = args['paseftol']
-        diadynrange = args['diadynrange']
-
         hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp, args, mz_step, paseftol, dia=True)
 
-        hills_dict = main.split_peaks_multi(hills_dict, data_for_analyse_tmp, args['hvf'], args)
+        hills_dict = main.split_peaks_multi(hills_dict, data_for_analyse_tmp, args)
 
         mz_step = isolation_window
 
@@ -170,8 +168,6 @@ def process_file(args):
                 hill_scans_1_list_first, hill_scans_1_list_last = hill_scans_1_list[0], hill_scans_1_list[-1]
 
                 tmp_candidates = []
-                intensity_threshold = 0
-
                 # start_pos = 0
                 # for start_pos in last_scans_ms2:
 
@@ -180,7 +176,7 @@ def process_file(args):
                 for idx_2 in idx_sorted_by_rt_start[last_scans_ms2 >= hill_scans_1_list_first]:
 
                     hill_scans_2_list = hills_dict['hills_scan_lists'][idx_2]
-                    hill_scans_2_list_first, hill_scans_2_list_last = hill_scans_2_list[0], hill_scans_2_list[-1]
+                    hill_scans_2_list_first = hill_scans_2_list[0]
 
                     # if hill_scans_2_list_last < hill_scans_1_list_first:
                     #     pass

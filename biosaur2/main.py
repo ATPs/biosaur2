@@ -1,17 +1,81 @@
 from . import utils
+from collections import Counter
+from copy import deepcopy
+import logging
+
 import numpy as np
 import pandas as pd
 from scipy.stats import binom
-import itertools
-from copy import deepcopy
-import logging
-logger = logging.getLogger(__name__)
-from .cutils import get_initial_isotopes, checking_cos_correlation_for_carbon, split_peaks, split_peaks_old, detect_hills, process_hills
-from multiprocessing import Queue, Process, cpu_count
-from collections import Counter, defaultdict
-import os
 
-def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1):
+from .cutils import get_initial_isotopes, checking_cos_correlation_for_carbon, split_peaks, detect_hills, process_hills, get_and_calc_apex_intensity_and_scan
+from .parallel import balanced_ranges, run_process_tasks
+from .calibration import fit_mass_calibration
+from .spectra import faims_sort_key, group_spectra_by_faims
+from .hills import assign_deterministic_hill_ids, normalize_hills_dataframe
+from .preprocessing import (
+    centroid_pasef_data,
+    collect_ms1_rows,
+    process_mzml,
+    process_profile,
+    process_tof,
+)
+
+logger = logging.getLogger(__name__)
+
+def _split_peaks_task(*args):
+    return list(split_peaks(*args))
+
+
+def _candidate_hill_ids(candidate):
+    return tuple(
+        sorted(
+            [int(candidate['monoisotope hill idx'])]
+            + [int(value['isotope_hill_idx']) for value in candidate['isotopes']]
+        )
+    )
+
+
+def _candidate_conflict_key(candidate, hills_dict):
+    mono_index = int(candidate['monoisotope idx'])
+    _, apex_intensity, _ = get_and_calc_apex_intensity_and_scan(
+        hills_dict, mono_index
+    )
+    mass_errors = [abs(float(value['mass_diff_ppm'])) for value in candidate['isotopes']]
+    mean_absolute_error = float(np.mean(mass_errors)) if mass_errors else float('inf')
+    isotope_count = int(candidate['nIsotopes'])
+    isotope_cosine = float(candidate['cos_cor_isotopes'])
+    return (
+        -(isotope_count + isotope_cosine),
+        -isotope_count,
+        -isotope_cosine,
+        -float(apex_intensity),
+        mean_absolute_error,
+        float(candidate['hill_mz_1']),
+        int(candidate['charge']),
+        _candidate_hill_ids(candidate),
+    )
+
+
+def _final_feature_key(candidate, hills_dict, RT_dict, data_start_id):
+    mono_index = int(candidate['monoisotope idx'])
+    _, _, apex_scan = get_and_calc_apex_intensity_and_scan(hills_dict, mono_index)
+    if RT_dict is False:
+        apex_rt = float(hills_dict['rtApex'][mono_index])
+    else:
+        apex_rt = float(RT_dict[apex_scan + data_start_id])
+    return (
+        float(candidate['hill_mz_1']),
+        apex_rt,
+        int(candidate['charge']),
+        int(candidate['monoisotope hill idx']),
+        _candidate_hill_ids(candidate),
+    )
+
+def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1, data_for_analyse_tmp=None):
+    if not len(hills_dict.get('hills_idx_array_unique', ())):
+        utils.write_output([], args, write_header)
+        return set(), {}, next_feature_idx
+
     isotopes_mass_accuracy = args['itol']
 
     min_charge = args['cmin']
@@ -43,43 +107,51 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
     elif md_correction == 'Icr':
         md_correction_int = 3
     else:
-        logger.WARNING('md_correction parameter MUST BE Orbi,Tof or ICR. Using Orbi now')
+        logger.warning('md_correction parameter MUST BE Orbi,Tof or ICR. Using Orbi now')
         md_correction_int = 1
 
-    if n_procs == 1:
-        qout = []
-        ready = []
-        procs = []
-
-        sorted_idx_full = [idx_1 for (idx_1, hill_idx_1), hill_mz_1 in sorted(list(zip(list(enumerate(hills_dict['hills_idx_array_unique'])), hills_dict['hills_mz_median'])), key=lambda x: x[-1])]
-        sorted_idx_child_process = sorted_idx_full
-
-        qout = get_initial_isotopes_python(hills_dict, isotopes_mass_accuracy, isotopes_list, a, min_charge, max_charge, mz_step, paseftol, faims_val, ivf, list(sorted_idx_child_process), qout, win_sys=True, md_correction_int=md_correction_int)
-
-        ready.extend(qout)
-
+    ready = []
+    sorted_idx_full = [
+        idx_1
+        for (idx_1, _hill_idx), _hill_mz in sorted(
+            zip(enumerate(hills_dict['hills_idx_array_unique']), hills_dict['hills_mz_median']),
+            key=lambda value: value[-1],
+        )
+    ]
+    ranges = balanced_ranges(len(sorted_idx_full), n_procs)
+    algorithm_faims_value = 0.0 if faims_val is None else faims_val
+    common_args = (
+        hills_dict,
+        isotopes_mass_accuracy,
+        isotopes_list,
+        a,
+        min_charge,
+        max_charge,
+        mz_step,
+        paseftol,
+        algorithm_faims_value,
+        ivf,
+    )
+    if len(ranges) == 1:
+        start, end = ranges[0]
+        ready.extend(
+            get_initial_isotopes(
+                *common_args,
+                list(sorted_idx_full[start:end]),
+                md_correction_int,
+            )
+        )
     else:
-        qout = Queue()
-        ready = []
-        procs = []
+        task_args = [
+            common_args
+            + (list(sorted_idx_full[start:end]), md_correction_int)
+            for start, end in ranges
+        ]
+        for worker_result in run_process_tasks(get_initial_isotopes, task_args):
+            ready.extend(worker_result)
 
-        sorted_idx_full = [idx_1 for (idx_1, hill_idx_1), hill_mz_1 in sorted(list(zip(list(enumerate(hills_dict['hills_idx_array_unique'])), hills_dict['hills_mz_median'])), key=lambda x: x[-1])]
-        len_full = len(sorted_idx_full)
-        step = int(len_full / n_procs)
-        for i in range(n_procs):
-            sorted_idx_child_process = sorted_idx_full[i*step:i*step+step]
-
-            p = Process(
-                target=get_initial_isotopes_python,
-                args=(hills_dict, isotopes_mass_accuracy, isotopes_list, a, min_charge, max_charge, mz_step, paseftol, faims_val, ivf, list(sorted_idx_child_process), qout, False, md_correction_int))
-            p.start()
-            procs.append(p)
-
-        for _ in range(n_procs):
-            for ready_child_process in iter(qout.get, None):
-                ready.extend(ready_child_process)
-        for p in procs:
-            p.join()
+    for candidate in ready:
+        candidate['FAIMS'] = faims_val
 
 
     logger.info('Number of potential isotope clusters: %d', len(ready))
@@ -109,24 +181,21 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
 
                 if len(isotopes_mass_error_map[ic]) >= 1000:
 
-                    try:
-
-                        true_md = np.array(isotopes_mass_error_map[ic])
-
-                        mass_left = -min(isotopes_mass_error_map[ic])
-                        mass_right = max(isotopes_mass_error_map[ic])
-
-
-                        mass_shift, mass_sigma, covvalue = utils.calibrate_mass(0.05, mass_left, mass_right, true_md)
-                        if abs(mass_shift) >= max(mass_left, mass_right):
-                            mass_shift, mass_sigma, covvalue = utils.calibrate_mass(0.25, mass_left, mass_right, true_md)
-                        if np.isinf(covvalue):
-                            mass_shift, mass_sigma, covvalue = utils.calibrate_mass(0.05, mass_left, mass_right, true_md)
-
-                        isotopes_mass_error_map[ic] = [mass_shift, mass_sigma]
-
-                    except:
-                        isotopes_mass_error_map[ic] = [0, 10]
+                    calibration = fit_mass_calibration(
+                        isotopes_mass_error_map[ic], bin_width=0.05
+                    )
+                    if calibration.status == 'applied':
+                        isotopes_mass_error_map[ic] = [
+                            calibration.shift,
+                            calibration.sigma,
+                        ]
+                    else:
+                        logger.warning(
+                            'Isotope %d calibration not applied: %s',
+                            ic,
+                            calibration.reason,
+                        )
+                        isotopes_mass_error_map[ic] = [0, args['itol']]
 
                 else:
                     if ic -1 in isotopes_mass_error_map:
@@ -142,6 +211,16 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                 isotopes_mass_error_map[ic][0] += isotopes_mass_error_map[ic-1][0] - isotopes_mass_error_map.get(ic-2, [0, ])[0]
                 isotopes_mass_error_map[ic][1] *= isotopes_mass_error_map[ic-1][1] / isotopes_mass_error_map.get(ic-2, isotopes_mass_error_map[ic-1])[1]
 
+    args.setdefault('isotope_calibration', {})[
+        'null' if faims_val is None else str(faims_val)
+    ] = {
+        str(ordinal): {
+            'shift': float(values[0]),
+            'sigma': float(values[1]),
+            'status': 'not_applied' if args['ignore_iso_calib'] else 'applied_or_fallback',
+        }
+        for ordinal, values in isotopes_mass_error_map.items()
+    }
     logger.info('Average mass shift between monoisotopic and first 13C isotope: %.3f ppm', isotopes_mass_error_map[1][0])
     logger.info('Average mass std between monoisotopic and first 13C isotope: %.3f ppm', isotopes_mass_error_map[1][1])
 
@@ -196,7 +275,7 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
     max_l = len(ready)
     cur_l = 0
 
-    func_for_sort = lambda x: -x['nIsotopes']-x['cos_cor_isotopes']
+    func_for_sort = lambda candidate: _candidate_conflict_key(candidate, hills_dict)
 
     ready_final = []
     ready_set = set()
@@ -267,6 +346,11 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
 
     logger.info('Number of detected isotope clusters: %d', len(ready_final))
 
+    ready_final.sort(
+        key=lambda candidate: _final_feature_key(
+            candidate, hills_dict, RT_dict, data_start_id
+        )
+    )
 
     hill_to_feature_idx = {}
     for offset, pep_feature in enumerate(ready_final):
@@ -288,24 +372,15 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
         data_start_id,
         isotopes_for_intensity,
         include_mono_hills=not args.get('no_mono_hills', False),
+        quantification_args=args,
+        spectra=data_for_analyse_tmp,
     )
 
     utils.write_output(peptide_features, args, write_header)
 
     return ready_set, hill_to_feature_idx, next_feature_idx
 
-def split_peaks_python(qout, hills_dict, data_for_analyse_tmp, args, counter_hills_idx, sorted_idx_child_process, sorted_idx_array_child_process, i, checked_id, win_sys=False):
-
-    new_index_list = split_peaks(hills_dict, data_for_analyse_tmp, args, counter_hills_idx, sorted_idx_child_process, sorted_idx_array_child_process, i, checked_id)
-    if win_sys:
-        return (i, list(new_index_list))
-    else:
-        qout.put((i, list(new_index_list)))
-        qout.put(None)
-
-def split_peaks_multi(hills_dict, data_for_analyse_tmp, hvf, args):
-
-    hillValleyFactor = hvf
+def split_peaks_multi(hills_dict, data_for_analyse_tmp, args):
     min_length_hill = args['minlh']
 
     hills_dict['orig_idx_array'] = np.array(hills_dict['orig_idx_array'])
@@ -324,8 +399,9 @@ def split_peaks_multi(hills_dict, data_for_analyse_tmp, hvf, args):
     hills_dict['scan_idx_array'] = hills_dict['scan_idx_array'][idx_minl]
     hills_dict['orig_idx_array'] = hills_dict['orig_idx_array'][idx_minl]
 
-    all_sets = []
-    all_sorted_idx = []
+    if not len(hills_dict['orig_idx_array']):
+        hills_dict['hills_idx_array_unique'] = []
+        return hills_dict
 
     if len(hills_dict['orig_idx_array']):
 
@@ -338,61 +414,42 @@ def split_peaks_multi(hills_dict, data_for_analyse_tmp, hvf, args):
 
         data_for_analyse_tmp_intensity = [z['intensity array'] for z in data_for_analyse_tmp]
 
-        n_procs = args['nprocs']
-
-
-
-        if n_procs == 1:
-            qout = []
-            procs = []
-            new_idx_res = dict()
-            checked_id = 0
-
-            sorted_idx_child_process = list(hills_dict['hills_idx_array_unique'])
+        requested_procs = args['nprocs']
+        len_full = len(hills_dict['hills_idx_array_unique'])
+        if len_full <= 1000 * requested_procs:
+            requested_procs = 1
+        ranges = balanced_ranges(len_full, requested_procs)
+        task_args = []
+        checked_id = 0
+        for worker_id, (start, end) in enumerate(ranges):
+            sorted_idx_child_process = list(
+                hills_dict['hills_idx_array_unique'][start:end]
+            )
             idx_unique_set = set(sorted_idx_child_process)
-            local_idx = np.array([z in idx_unique_set for z in list(hills_dict['hills_idx_array'])])
+            local_idx = np.array(
+                [value in idx_unique_set for value in hills_dict['hills_idx_array']]
+            )
             sorted_idx_array_child_process = hills_dict['hills_idx_array'][local_idx]
-            sorted_idx_child_process = sorted(list(idx_unique_set))
-            i = 0
+            task_args.append(
+                (
+                    hills_dict,
+                    data_for_analyse_tmp_intensity,
+                    args,
+                    counter_hills_idx,
+                    sorted_idx_child_process,
+                    sorted_idx_array_child_process,
+                    worker_id,
+                    checked_id,
+                )
+            )
+            checked_id += len(sorted_idx_array_child_process)
 
-            qout = split_peaks_python(qout, hills_dict, data_for_analyse_tmp_intensity, args, counter_hills_idx, sorted_idx_child_process, sorted_idx_array_child_process, i, checked_id, win_sys=True)
-
-            new_idx_res[qout[0]] = qout[1]
-
+        if len(task_args) == 1:
+            worker_results = [_split_peaks_task(*task_args[0])]
         else:
-
-            qout = Queue()
-            new_idx_res = dict()
-            procs = []
-            ar2 = []
-            len_full = len(hills_dict['hills_idx_array_unique'])
-            if len_full <= 1000 * n_procs:
-                n_procs = 1
-            step = int(len_full / n_procs) + 1
-            checked_id = 0
-            for i in range(n_procs):
-                sorted_idx_child_process = list(hills_dict['hills_idx_array_unique'][i*step:i*step+step])
-                idx_unique_set = set(sorted_idx_child_process)
-                all_sets.append(idx_unique_set)
-                local_idx = np.array([z in idx_unique_set for z in list(hills_dict['hills_idx_array'])])
-                sorted_idx_array_child_process = hills_dict['hills_idx_array'][local_idx]
-                ar2.append(sorted_idx_array_child_process)
-                sorted_idx_child_process = sorted(list(idx_unique_set))
-
-                all_sorted_idx.append(local_idx)
-                p = Process(
-                    target=split_peaks_python,
-                    args=(qout, hills_dict, data_for_analyse_tmp_intensity, args, counter_hills_idx, sorted_idx_child_process, sorted_idx_array_child_process, i, checked_id))
-                checked_id += len(sorted_idx_array_child_process)
-                    # args=(hills_dict, isotopes_mass_accuracy, isotopes_list, a, min_charge, max_charge, mz_step, paseftol, faims_val, list(sorted_idx_child_process), qout))
-                p.start()
-                procs.append(p)
-
-            for _ in range(n_procs):
-                for ready_child_process in iter(qout.get, None):
-                    new_idx_res[ready_child_process[0]] = ready_child_process[1]
-            for p in procs:
-                p.join()
+            worker_results = run_process_tasks(_split_peaks_task, task_args)
+        new_idx_res = dict(enumerate(worker_results))
+        n_procs = len(worker_results)
 
     final_idx_array = []
     last_id = 1
@@ -412,21 +469,13 @@ def split_peaks_multi(hills_dict, data_for_analyse_tmp, hvf, args):
 
     return hills_dict
 
-def get_initial_isotopes_python(hills_dict, isotopes_mass_accuracy, isotopes_list, a, min_charge, max_charge, mz_step, paseftol, faims_val, ivf, sorted_idx_child_process, qout, win_sys=False, md_correction_int=1):
-
-    ready_local = get_initial_isotopes(hills_dict, isotopes_mass_accuracy, isotopes_list, a, min_charge, max_charge, mz_step, paseftol, faims_val, ivf, sorted_idx_child_process, md_correction_int)
-    if win_sys:
-        return ready_local
-    else:
-        qout.put(ready_local)
-        qout.put(None)
-
 def process_file(args):
 
     input_file_path = args['file']
     stop_after_hills = bool(args.get('stop_after_hills'))
     stop_after_logged = False
     next_feature_idx = 1
+    next_hill_idx = 1
 
     md_correction = args['md_correction']
     if md_correction == 'Orbi':
@@ -436,40 +485,35 @@ def process_file(args):
     elif md_correction == 'Icr':
         md_correction_int = 3
     else:
-        logger.WARNING('md_correction parameter MUST BE Orbi,Tof or ICR. Using Orbi now')
+        logger.warning('md_correction parameter MUST BE Orbi,Tof or ICR. Using Orbi now')
         md_correction_int = 1
 
     if input_file_path.lower().endswith('.mzml') or input_file_path.lower().endswith('.mzml.gz'):
         if args.get('write_ms1', False):
-            ms1_rows = utils.collect_ms1_rows(args)
+            ms1_rows = collect_ms1_rows(args)
             utils.write_ms1_output(ms1_rows, args)
 
         write_header = True
 
-        data_for_analyse = utils.process_mzml(args)
+        data_for_analyse = process_mzml(args)
 
         #Process faims
 
-        faims_set = set([z.get('FAIMS compensation voltage', 0) for z in data_for_analyse])
-        if any(z for z in faims_set):
-            logger.info('Detected FAIMS values: %s', faims_set)
+        faims_groups = group_spectra_by_faims(data_for_analyse)
+        if len(faims_groups) > 1 or faims_groups[0][0] is not None:
+            logger.info('Detected FAIMS values: %s', [value for value, _ in faims_groups])
 
         data_start_id = 0
-        data_cur_id = 0
-        RT_dict = dict()
 
-        for faims_val in faims_set:
+        for faims_val, data_for_analyse_tmp in faims_groups:
 
-            if len(faims_set) > 1:
-                logger.info('Spectra analysis for CV = %.3f', faims_val)
+            if len(faims_groups) > 1:
+                logger.info('Spectra analysis for CV = %s', faims_val)
 
-            data_for_analyse_tmp = []
-            for z in data_for_analyse:
-                if not faims_val or z['FAIMS compensation voltage'] == faims_val:
-                    data_for_analyse_tmp.append(z)
-                    RT_dict[data_cur_id] = float(z['scanList']['scan'][0]['scan start time'])
-                    data_cur_id += 1
-            chunk_length = len(data_for_analyse_tmp)
+            RT_dict = {
+                local_index: spectrum['rt_sec']
+                for local_index, spectrum in enumerate(data_for_analyse_tmp)
+            }
 
 
             hill_mass_accuracy = args['htol']
@@ -481,16 +525,16 @@ def process_file(args):
 
             #Process TOF
             if args['tof']:
-                data_for_analyse_tmp = utils.process_tof(data_for_analyse_tmp)
+                data_for_analyse_tmp = process_tof(data_for_analyse_tmp)
 
             #Process profile
             if args['profile']:
-                data_for_analyse_tmp = utils.process_profile(data_for_analyse_tmp)
+                data_for_analyse_tmp = process_profile(data_for_analyse_tmp)
 
             #Process ion mobility
 
             if all('ignore_ion_mobility' not in z for z in data_for_analyse_tmp):
-                utils.centroid_pasef_data(data_for_analyse_tmp, args, mz_step)
+                centroid_pasef_data(data_for_analyse_tmp, args, mz_step)
             else:
                 args['paseftol'] = 0
 
@@ -517,20 +561,20 @@ def process_file(args):
                 total_mass_diff = total_mass_diff[idx_minl]
 
 
-                true_md = np.array(total_mass_diff)
-
-                mass_left = -min(true_md)
-                mass_right = max(true_md)
-                mass_shift, mass_sigma, covvalue = utils.calibrate_mass(0.05, mass_left, mass_right, true_md)
-                if abs(mass_shift) >= max(mass_left, mass_right):
-                    mass_shift, mass_sigma, covvalue = utils.calibrate_mass(0.25, mass_left, mass_right, true_md)
-                if np.isinf(covvalue):
-                    mass_shift, mass_sigma, covvalue = utils.calibrate_mass(0.05, mass_left, mass_right, true_md)
-
-                print(mass_shift, mass_sigma)
-                args['htol'] = min(args['htol'], 3 * mass_sigma)
-
-                logger.info('Automatically optimized htol parameter: %.3f ppm', args['htol'])
+                calibration = fit_mass_calibration(total_mass_diff, bin_width=0.05)
+                args['hill_calibration'] = calibration.to_dict()
+                if calibration.status == 'applied':
+                    args['htol'] = min(args['htol'], 3 * calibration.sigma)
+                    logger.info(
+                        'Automatically optimized htol parameter: %.3f ppm',
+                        args['htol'],
+                    )
+                else:
+                    logger.warning(
+                        'Hill calibration not applied; keeping htol %.3f ppm: %s',
+                        args['htol'],
+                        calibration.reason,
+                    )
 
             hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp, args, mz_step, paseftol, md_correction_int=md_correction_int)
 
@@ -538,25 +582,26 @@ def process_file(args):
 
             logger.info('Detected number of hills before splitting: %d', len(set(hills_dict['hills_idx_array'])))
 
-            hills_dict = split_peaks_multi(hills_dict, data_for_analyse_tmp, args['hvf'], args)
+            hills_dict = split_peaks_multi(hills_dict, data_for_analyse_tmp, args)
             logger.info('Starting hills processing')
             hills_dict = process_hills(hills_dict, data_for_analyse_tmp, mz_step, paseftol, args)
+            next_hill_idx = assign_deterministic_hill_ids(
+                hills_dict, next_hill_idx
+            )
 
             logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array'])))
-            hills_features = None
-            if args['write_hills']:
-                hills_dict, hills_features = utils.process_hills_extra(
-                    hills_dict,
-                    RT_dict,
-                    faims_val,
-                    data_start_id,
-                    mz_step,
-                    paseftol,
-                    data_for_analyse_tmp=data_for_analyse_tmp,
-                )
-
             if stop_after_hills:
                 if args['write_hills']:
+                    hills_features = utils.iter_hills_extra(
+                        hills_dict,
+                        RT_dict,
+                        faims_val,
+                        data_start_id,
+                        mz_step,
+                        paseftol,
+                        data_for_analyse_tmp=data_for_analyse_tmp,
+                        include_point_lists=not args.get('no_hill_list', False),
+                    )
                     utils.write_output(hills_features, args, write_header, hills=True)
                     if not stop_after_logged:
                         logger.info('--stop_after_hills flag set, skipping feature detection after writing hills.')
@@ -566,7 +611,6 @@ def process_file(args):
                         logger.warning('--stop_after_hills flag set but hills output is disabled; skipping feature detection anyway.')
                         stop_after_logged = True
                 write_header = False
-                data_start_id += chunk_length
                 continue
 
             _, hill_to_feature_idx, next_feature_idx = process_features_iteration(
@@ -579,17 +623,23 @@ def process_file(args):
                 write_header,
                 args,
                 next_feature_idx=next_feature_idx,
+                data_for_analyse_tmp=data_for_analyse_tmp,
             )
             if args['write_hills']:
-                for hill_feature in hills_features:
-                    hill_feature['feature_idx'] = int(hill_to_feature_idx.get(hill_feature['hill_idx'], -1))
+                hills_features = utils.iter_hills_extra(
+                    hills_dict,
+                    RT_dict,
+                    faims_val,
+                    data_start_id,
+                    mz_step,
+                    paseftol,
+                    data_for_analyse_tmp=data_for_analyse_tmp,
+                    include_point_lists=not args.get('no_hill_list', False),
+                    feature_idx_by_hill=hill_to_feature_idx,
+                )
                 utils.write_output(hills_features, args, write_header, hills=True)
 
             write_header = False
-
-            data_start_id += chunk_length
-
-
 
     elif (
         input_file_path.lower().endswith('.hills.tsv')
@@ -607,40 +657,54 @@ def process_file(args):
             hills_features = pd.read_parquet(input_file_path, engine='pyarrow')
         else:
             hills_features = pd.DataFrame(utils.get_hills_features_from_hills_npz(input_file_path))
+        hills_features = normalize_hills_dataframe(
+            hills_features, args.get('input_rt_unit', 'seconds')
+        )
         RT_dict = False
         write_header = True
         data_start_id = 0
 
-        if np.any(hills_features['FAIMS']):
+        faims_values = [
+            None if pd.isna(value) else float(value)
+            for value in hills_features['FAIMS']
+        ]
+        has_faims = any(value is not None for value in faims_values)
+        if has_faims:
             paseftol = 0
-        
         else:
-            if np.any(hills_features['im']):
+            im_values = pd.to_numeric(hills_features['im'], errors='coerce')
+            if im_values.notna().any() and np.any(im_values.fillna(0).values):
                 paseftol = args['paseftol']
             else:
                 paseftol = 0
 
 
         if paseftol == 0:
-            faims_set = set(hills_features['FAIMS'])
+            faims_set = sorted(set(faims_values), key=faims_sort_key)
         else:
-            faims_set = set([0, ])
+            faims_set = [None]
 
-        if any(z for z in faims_set):
+        if len(faims_set) > 1 or faims_set[0] is not None:
             logger.info('Detected FAIMS values: %s', faims_set)
 
         for faims_val in faims_set:
 
             if len(faims_set) > 1:
-                logger.info('Spectra analysis for CV = %.3f', faims_val)
+                logger.info('Spectra analysis for CV = %s', faims_val)
 
             if paseftol == 0:
-                hills_features_local = hills_features[hills_features['FAIMS'] == faims_val]
+                if faims_val is None:
+                    hills_features_local = hills_features[hills_features['FAIMS'].isna()]
+                else:
+                    hills_features_local = hills_features[hills_features['FAIMS'] == faims_val]
             else:
                 hills_features_local = hills_features
 
             hill_mass_accuracy = args['htol']
             hills_dict, mz_step = utils.get_hills_dict_from_hills_features(hills_features_local, hill_mass_accuracy, paseftol)
+            next_hill_idx = assign_deterministic_hill_ids(
+                hills_dict, next_hill_idx
+            )
 
 
             logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array_unique'])))

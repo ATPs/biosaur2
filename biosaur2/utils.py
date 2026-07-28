@@ -1,17 +1,19 @@
 from pyteomics import mzml
+import ast
+from collections import defaultdict
+from contextlib import contextmanager
+import gzip
+import logging
+
 import numpy as np
 import pandas as pd
-from collections import defaultdict, Counter
-from contextlib import contextmanager
-from os import path
-import gzip
-import math
-import re
-from scipy.optimize import curve_fit
-import logging
+
+from .cutils import get_and_calc_apex_intensity_and_scan
+from .calibration import fit_mass_calibration
+from .spectra import extract_scan_number
+from .quantification import raw_area_sum
+
 logger = logging.getLogger(__name__)
-from .cutils import get_fast_dict, get_and_calc_apex_intensity_and_scan, centroid_pasef_scan
-import ast
 
 _SCAN_ID_MISMATCH_WARNED = False
 
@@ -36,109 +38,6 @@ HILLS_NPZ_FIXED_KEYS = (
     'FAIMS',
     'im',
 )
-HILLS_BASE_COLUMNS = (
-    'rtApex',
-    'intensityApex',
-    'intensitySum',
-    'nScans',
-    'mz',
-    'rtStart',
-    'rtEnd',
-    'FAIMS',
-    'im',
-    'scanApex',
-    'hill_idx',
-)
-HILLS_LIST_COLUMNS = (
-    'hills_scan_lists',
-    'hills_intensity_list',
-    'hills_mz_array',
-)
-FEATURE_BASE_COLUMNS = (
-    'massCalib',
-    'rtApex',
-    'intensityApex',
-    'intensitySum',
-    'charge',
-    'nIsotopes',
-    'nScans',
-    'mz',
-    'rtStart',
-    'rtEnd',
-    'FAIMS',
-    'im',
-)
-FEATURE_POST_MONO_COLUMNS = (
-    'scanApex',
-    'isoerror',
-    'isoerror2',
-)
-FEATURE_MONO_HILLS_COLUMNS = (
-    'mono_hills_scan_lists',
-    'mono_hills_intensity_list',
-)
-FEATURE_EXTRA_COLUMNS = (
-    'isotopes',
-    'intensity_array_for_cos_corr',
-    'monoisotope hill idx',
-    'monoisotope idx',
-)
-PARQUET_FLOAT_COLUMNS = (
-    'massCalib',
-    'rtApex',
-    'intensityApex',
-    'intensitySum',
-    'mz',
-    'rtStart',
-    'rtEnd',
-    'FAIMS',
-    'im',
-    'isoerror',
-    'isoerror2',
-)
-PARQUET_INT_COLUMNS = (
-    'charge',
-    'nIsotopes',
-    'nScans',
-    'hill_idx',
-    'feature_idx',
-    'scanApex',
-    'monoisotope hill idx',
-    'monoisotope idx',
-)
-PARQUET_INT_LIST_COLUMNS = (
-    'hills_scan_lists',
-    'mono_hills_scan_lists',
-)
-PARQUET_FLOAT_LIST_COLUMNS = (
-    'hills_intensity_list',
-    'hills_mz_array',
-    'mono_hills_intensity_list',
-)
-MS1_OUTPUT_COLUMNS = (
-    'scan_id',
-    'RT',
-    'total_intensity',
-)
-
-
-def _get_hills_float_name(args):
-    return args.get('hills_float', 'float32')
-
-
-def _get_hills_float_dtype(args):
-    float_name = _get_hills_float_name(args)
-    if float_name == 'float32':
-        return np.float32
-    if float_name == 'float64':
-        return np.float64
-    raise ValueError('Unsupported hills float type: %s' % (float_name, ))
-
-
-def _feature_idx_enabled(args):
-    return bool(args.get('write_hills')) and (not bool(args.get('stop_after_hills')))
-
-
 def _is_mzml_gzip_path(input_file_path):
     return str(input_file_path).lower().endswith('.mzml.gz')
 
@@ -164,35 +63,6 @@ def iter_all_spectra(input_file_path):
             yield spec
 
 
-def _get_output_file(args, hills=False, ms1=False):
-    input_mzml_path = args['file']
-    if hills and ms1:
-        raise ValueError('hills and ms1 output modes are mutually exclusive.')
-
-    if hills:
-        hills_ext = 'hills.tsv'
-        if args.get('hills_format', 'tsv') == 'parquet':
-            hills_ext = 'hills.parquet'
-        if args['o']:
-            return path.splitext(args['o'])[0] + path.extsep + hills_ext
-        return path.splitext(input_mzml_path)[0] + path.extsep + hills_ext
-
-    if ms1:
-        ms1_ext = 'ms1.tsv'
-        if args.get('ms1_format', 'tsv') == 'parquet':
-            ms1_ext = 'ms1.parquet'
-        if args['o']:
-            return path.splitext(args['o'])[0] + path.extsep + ms1_ext
-        return path.splitext(input_mzml_path)[0] + path.extsep + ms1_ext
-
-    if args['o']:
-        return args['o']
-    feature_ext = 'features.tsv'
-    if args.get('feature_format', 'tsv') == 'parquet':
-        feature_ext = 'features.parquet'
-    return path.splitext(input_mzml_path)[0] + path.extsep + feature_ext
-
-
 def _build_hills_dict(
     hills_idx_array_unique,
     hills_mz_median,
@@ -205,6 +75,7 @@ def _build_hills_dict(
     rt_apex,
     hill_mass_accuracy,
     paseftol,
+    hills_point_rt=None,
 ):
     hills_dict = dict()
     hills_dict['hills_idx_array_unique'] = np.asarray(hills_idx_array_unique)
@@ -223,6 +94,10 @@ def _build_hills_dict(
     hills_dict['hills_scan_lists'] = [list(map(int, slist)) for slist in hills_scan_lists]
     hills_dict['hills_scan_sets'] = [set(slist) for slist in hills_dict['hills_scan_lists']]
     hills_dict['hills_intensity_array'] = [list(map(float, ilist)) for ilist in hills_intensity_array]
+    if hills_point_rt is not None:
+        hills_dict['hills_point_rt_array'] = [
+            list(map(float, values)) for values in hills_point_rt
+        ]
 
     hills_dict['hills_mz_median_fast_dict'] = defaultdict(list)
     if paseftol > 0 and has_im:
@@ -261,138 +136,6 @@ def _parse_ragged_column(column):
     if isinstance(first_value, str):
         return column.apply(ast.literal_eval).values
     return column.values
-
-
-def _format_tsv_float(value):
-    if math.isnan(value) or math.isinf(value):
-        return str(value)
-    formatted = f'{value:.5f}'.rstrip('0').rstrip('.')
-    if formatted == '-0':
-        return '0'
-    return formatted
-
-
-def _format_tsv_cell(value):
-    if isinstance(value, np.generic):
-        return _format_tsv_cell(value.item())
-    if isinstance(value, np.ndarray):
-        return _format_tsv_cell(value.tolist())
-    if isinstance(value, float):
-        return _format_tsv_float(value)
-    if isinstance(value, (list, tuple)):
-        return '[' + ', '.join(_format_tsv_cell(v) for v in value) + ']'
-    return str(value)
-
-
-def _get_parquet_dtypes(args):
-    if args.get('use64'):
-        return np.int64, np.float64
-    return np.int32, np.float32
-
-
-def _cast_parquet_list(value, dtype):
-    if value is None or (isinstance(value, float) and math.isnan(value)):
-        return np.asarray([], dtype=dtype)
-    if isinstance(value, np.ndarray):
-        return np.asarray(value, dtype=dtype)
-    if isinstance(value, (list, tuple)):
-        return np.asarray(value, dtype=dtype)
-    return np.asarray([value], dtype=dtype)
-
-
-def _apply_parquet_types(df, args):
-    int_dtype, float_dtype = _get_parquet_dtypes(args)
-
-    for col in PARQUET_FLOAT_COLUMNS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='raise').astype(float_dtype)
-
-    for col in PARQUET_INT_COLUMNS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='raise').astype(int_dtype)
-
-    for col in PARQUET_INT_LIST_COLUMNS:
-        if col in df.columns:
-            df[col] = df[col].apply(lambda v: _cast_parquet_list(v, int_dtype))
-
-    for col in PARQUET_FLOAT_LIST_COLUMNS:
-        if col in df.columns:
-            df[col] = df[col].apply(lambda v: _cast_parquet_list(v, float_dtype))
-
-    return df
-
-
-def _prepare_parquet_dataframe(rows, columns, args):
-    df = pd.DataFrame(rows, columns=columns)
-    return _apply_parquet_types(df, args)
-
-
-def _write_parquet_dataframe(new_df, output_file, write_header, args):
-    if not write_header and path.exists(output_file):
-        try:
-            existing_df = pd.read_parquet(output_file, engine='pyarrow')
-        except ImportError as exc:
-            raise ImportError(
-                'Parquet support requires optional dependency pyarrow. Please install pyarrow.'
-            ) from exc
-        new_df = pd.concat((existing_df, new_df), ignore_index=True)
-
-    new_df = _apply_parquet_types(new_df, args)
-
-    try:
-        new_df.to_parquet(
-            output_file,
-            index=False,
-            compression='zstd',
-            compression_level=3,
-            engine='pyarrow',
-        )
-    except ImportError as exc:
-        raise ImportError(
-            'Parquet support requires optional dependency pyarrow. Please install pyarrow.'
-        ) from exc
-
-
-def _build_hills_npz_payload(hills_features, float_dtype, float_name):
-    row_count = len(hills_features)
-
-    point_offsets = np.zeros(row_count + 1, dtype=np.int64)
-    for idx_1, hill_feature in enumerate(hills_features):
-        point_offsets[idx_1+1] = point_offsets[idx_1] + len(hill_feature['hills_scan_lists'])
-
-    total_points = int(point_offsets[-1])
-    hills_scan_flat = np.empty(total_points, dtype=np.int32)
-    hills_intensity_flat = np.empty(total_points, dtype=float_dtype)
-
-    for idx_1, hill_feature in enumerate(hills_features):
-        idx_start = point_offsets[idx_1]
-        idx_end = point_offsets[idx_1+1]
-
-        tmp_scans = np.asarray(hill_feature['hills_scan_lists'], dtype=np.int32)
-        tmp_intensity = np.asarray(hill_feature['hills_intensity_list'], dtype=float_dtype)
-        if tmp_scans.size != tmp_intensity.size:
-            raise ValueError('Inconsistent hills list lengths for hill index %s' % (hill_feature.get('hill_idx'), ))
-
-        hills_scan_flat[idx_start:idx_end] = tmp_scans
-        hills_intensity_flat[idx_start:idx_end] = tmp_intensity
-
-    def as_float_array(field_name):
-        return np.asarray([hill_feature[field_name] for hill_feature in hills_features], dtype=float_dtype)
-
-    payload = {
-        'schema_version': np.array(HILLS_NPZ_SCHEMA_VERSION, dtype=np.int32),
-        'mz': as_float_array('mz'),
-        'rtApex': as_float_array('rtApex'),
-        'rtStart': as_float_array('rtStart'),
-        'rtEnd': as_float_array('rtEnd'),
-        'FAIMS': as_float_array('FAIMS'),
-        'im': as_float_array('im'),
-        'point_offsets': point_offsets,
-        'hills_scan_flat': hills_scan_flat,
-        'hills_intensity_flat': hills_intensity_flat,
-    }
-
-    return payload
 
 
 def _validate_hills_npz_payload(payload, source_path):
@@ -458,73 +201,10 @@ def _load_hills_npz_payload(npz_path):
     return payload
 
 
-def _merge_hills_npz_payload(existing_payload, new_payload):
-    merged_payload = {
-        'schema_version': existing_payload['schema_version'],
-    }
-
-    for key in HILLS_NPZ_FIXED_KEYS:
-        merged_payload[key] = np.concatenate((np.asarray(existing_payload[key]), np.asarray(new_payload[key])))
-
-    for optional_key in ('hill_idx', 'nScans', 'intensityApex', 'intensitySum'):
-        if optional_key in existing_payload and optional_key in new_payload:
-            merged_payload[optional_key] = np.concatenate(
-                (np.asarray(existing_payload[optional_key]), np.asarray(new_payload[optional_key]))
-            )
-
-    merged_payload['hills_scan_flat'] = np.concatenate(
-        (np.asarray(existing_payload['hills_scan_flat']), np.asarray(new_payload['hills_scan_flat']))
-    )
-    merged_payload['hills_intensity_flat'] = np.concatenate(
-        (np.asarray(existing_payload['hills_intensity_flat']), np.asarray(new_payload['hills_intensity_flat']))
-    )
-    if 'hills_mz_flat' in existing_payload and 'hills_mz_flat' in new_payload:
-        merged_payload['hills_mz_flat'] = np.concatenate(
-            (np.asarray(existing_payload['hills_mz_flat']), np.asarray(new_payload['hills_mz_flat']))
-        )
-
-    existing_offsets = np.asarray(existing_payload['point_offsets'])
-    new_offsets = np.asarray(new_payload['point_offsets'])
-    if new_offsets.size > 1:
-        shifted_new_offsets = new_offsets[1:] + existing_offsets[-1]
-        merged_payload['point_offsets'] = np.concatenate((existing_offsets, shifted_new_offsets))
-    else:
-        merged_payload['point_offsets'] = existing_offsets.copy()
-
-    return merged_payload
-
-
-def write_hills_npz(hills_features, output_file, write_header, args):
-    float_dtype = _get_hills_float_dtype(args)
-
-    new_payload = _build_hills_npz_payload(hills_features, float_dtype, _get_hills_float_name(args))
-    if not write_header and path.exists(output_file):
-        existing_payload = _load_hills_npz_payload(output_file)
-        payload = _merge_hills_npz_payload(existing_payload, new_payload)
-    else:
-        payload = new_payload
-
-    np.savez_compressed(output_file, **payload)
-
-
-def write_hills_parquet(hills_features, output_file, write_header, args, columns_for_output):
-    new_df = _prepare_parquet_dataframe(hills_features, columns_for_output, args)
-    _write_parquet_dataframe(new_df, output_file, write_header, args)
-
-
-def write_features_parquet(peptide_features, output_file, write_header, columns_for_output, args):
-    new_df = _prepare_parquet_dataframe(peptide_features, columns_for_output, args)
-    _write_parquet_dataframe(new_df, output_file, write_header, args)
-
-
 def _extract_ms1_scan_id(spec, fallback_idx):
     global _SCAN_ID_MISMATCH_WARNED
 
-    spec_id = str(spec.get('id', ''))
-    m = re.search(r'scan=(\d+)', spec_id)
-    scan_from_id = None
-    if m:
-        scan_from_id = int(m.group(1))
+    scan_from_id = extract_scan_number(spec)
 
     scan_from_index = None
     if 'index' in spec:
@@ -554,48 +234,11 @@ def _extract_ms1_scan_id(spec, fallback_idx):
     return int(fallback_idx) + 1
 
 
-def collect_ms1_rows(args):
-    rows = []
-    input_mzml_path = args['file']
-
-    for fallback_idx, spec in enumerate(iter_ms1_spectra(input_mzml_path)):
-        scan_info = spec['scanList']['scan'][0]
-        rt_seconds = float(scan_info['scan start time']) * 60.0
-        total_intensity = float(spec.get('total ion current', np.sum(spec.get('intensity array', []))))
-        rows.append(
-            {
-                'scan_id': _extract_ms1_scan_id(spec, fallback_idx),
-                'RT': rt_seconds,
-                'total_intensity': total_intensity,
-            }
-        )
-
-    return rows
-
-
 def write_ms1_output(ms1_rows, args):
-    output_file = _get_output_file(args, ms1=True)
-
-    if args.get('ms1_format', 'tsv') == 'parquet':
-        int_dtype, float_dtype = _get_parquet_dtypes(args)
-        df = pd.DataFrame(ms1_rows, columns=MS1_OUTPUT_COLUMNS)
-        if len(df):
-            df['scan_id'] = pd.to_numeric(df['scan_id'], errors='raise').astype(int_dtype)
-            df['RT'] = pd.to_numeric(df['RT'], errors='raise').astype(float_dtype)
-            df['total_intensity'] = pd.to_numeric(df['total_intensity'], errors='raise').astype(float_dtype)
-        df.to_parquet(
-            output_file,
-            index=False,
-            compression='zstd',
-            compression_level=3,
-            engine='pyarrow',
-        )
-        return
-
-    with open(output_file, 'w') as out_file:
-        out_file.write('\t'.join(MS1_OUTPUT_COLUMNS) + '\n')
-        for row in ms1_rows:
-            out_file.write('\t'.join([_format_tsv_cell(row[col]) for col in MS1_OUTPUT_COLUMNS]) + '\n')
+    manager = args.get('_output_manager')
+    if manager is None:
+        raise RuntimeError('Output manager is required.')
+    manager.append_ms1(ms1_rows)
 
 
 def get_hills_features_from_hills_npz(npz_path):
@@ -644,35 +287,11 @@ class MS1OnlyMzML(mzml.MzML):
      _use_index = False 
      _iterative = False
 
-def noisygaus(x, a, x0, sigma, b):
-    return a * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2)) + b
-
 def calibrate_mass(bwidth, mass_left, mass_right, true_md):
-
-    bbins = np.arange(-mass_left, mass_right, bwidth)
-    H1, b1 = np.histogram(true_md, bins=bbins)
-    b1 = b1 + bwidth
-    b1 = b1[:-1]
-
-    popt, pcov = curve_fit(noisygaus, b1, H1, p0=[1, np.median(true_md), 1, 1])
-    mass_shift, mass_sigma = popt[1], abs(popt[2])
-    return mass_shift, mass_sigma, pcov[0][0]
-
-def masklist(ar1, mask1):
-    return [a for a,b in zip(ar1, mask1) if b]
-
-def filter_hills(hills_dict, ready_set, hill_mass_accuracy, paseftol):
-    idx_to_keep = [hid not in ready_set for hid in hills_dict['hills_idx_array']]
-    hills_dict2 = dict()
-
-    hills_dict2['hills_idx_array'] = masklist(list(hills_dict['hills_idx_array']), idx_to_keep)
-    hills_dict2['orig_idx_array'] = masklist(list(hills_dict['orig_idx_array']), idx_to_keep)
-    hills_dict2['scan_idx_array'] = masklist(list(hills_dict['scan_idx_array']), idx_to_keep)
-    hills_dict2['mzs_array'] = masklist(list(hills_dict['mzs_array']), idx_to_keep)
-    hills_dict2['intensity_array'] = masklist(list(hills_dict['intensity_array']), idx_to_keep)
-    if 'im_array' in hills_dict:
-        hills_dict2['im_array'] = masklist(list(hills_dict['im_array']), idx_to_keep)
-    return hills_dict2
+    result = fit_mass_calibration(true_md, bin_width=bwidth)
+    if result.status != 'applied':
+        raise ValueError('Mass calibration was not applied: %s' % result.reason)
+    return result.shift, result.sigma, result.covariance
 
 def get_hills_dict_from_hills_features(hills_features, hill_mass_accuracy, paseftol):
     missing_cols = [col for col in ('hills_scan_lists', 'hills_intensity_list') if col not in hills_features.columns]
@@ -685,8 +304,42 @@ def get_hills_dict_from_hills_features(hills_features, hill_mass_accuracy, pasef
 
     hills_scan_lists = _parse_ragged_column(hills_features['hills_scan_lists'])
     hills_intensity_array = _parse_ragged_column(hills_features['hills_intensity_list'])
+    hills_point_rt = (
+        _parse_ragged_column(hills_features['hills_rt_list'])
+        if 'hills_rt_list' in hills_features
+        else None
+    )
+    hills_point_mz = (
+        _parse_ragged_column(hills_features['hills_mz_array'])
+        if 'hills_mz_array' in hills_features
+        else None
+    )
+    hills_scan_numbers = (
+        _parse_ragged_column(hills_features['hills_scan_number_list'])
+        if 'hills_scan_number_list' in hills_features
+        else None
+    )
+    for row_index, scans in enumerate(hills_scan_lists):
+        expected = len(scans)
+        arrays = [("intensity", hills_intensity_array[row_index])]
+        if hills_point_rt is not None:
+            arrays.append(("RT", hills_point_rt[row_index]))
+        if hills_point_mz is not None:
+            arrays.append(("m/z", hills_point_mz[row_index]))
+        if hills_scan_numbers is not None:
+            arrays.append(("scan-number", hills_scan_numbers[row_index]))
+        for label, values in arrays:
+            if len(values) != expected:
+                raise ValueError(
+                    "Hills row %d has %d scan indexes but %d %s values."
+                    % (row_index, expected, len(values), label)
+                )
 
-    hills_im_median = hills_features['im'].values if 'im' in hills_features else None
+    hills_im_median = None
+    if 'im' in hills_features:
+        im_values = pd.to_numeric(hills_features['im'], errors='coerce')
+        if im_values.notna().any():
+            hills_im_median = im_values.fillna(0).values
     hills_dict, mz_step = _build_hills_dict(
         hills_idx_array_unique=hills_features['hill_idx'].values,
         hills_mz_median=hills_features['mz'].values,
@@ -699,13 +352,26 @@ def get_hills_dict_from_hills_features(hills_features, hill_mass_accuracy, pasef
         rt_apex=hills_features['rtApex'].values,
         hill_mass_accuracy=hill_mass_accuracy,
         paseftol=paseftol,
+        hills_point_rt=hills_point_rt,
     )
+    if hills_point_mz is not None:
+        hills_dict['tmp_mz_array'] = [
+            [float(value) for value in values] for values in hills_point_mz
+        ]
+    if hills_scan_numbers is not None:
+        hills_dict['hills_scan_number_array'] = [
+            [None if value is None else int(value) for value in values]
+            for values in hills_scan_numbers
+        ]
     return hills_dict, mz_step
 
 
-def process_hills_extra(hills_dict, RT_dict, faims_val, data_start_id, mz_step, paseftol, data_for_analyse_tmp=None):
-
-    hills_features = []
+def iter_hills_extra(
+    hills_dict, RT_dict, faims_val, data_start_id, mz_step, paseftol,
+    data_for_analyse_tmp=None,
+    include_point_lists=True,
+    feature_idx_by_hill=None,
+):
     for idx_1 in range(len(hills_dict['hills_idx_array_unique'])):
         hill_feature = {}
         hills_dict, hill_intensity_apex_1, hill_scan_apex_1 = get_and_calc_apex_intensity_and_scan(hills_dict, idx_1)
@@ -716,24 +382,35 @@ def process_hills_extra(hills_dict, RT_dict, faims_val, data_start_id, mz_step, 
         hill_feature['intensitySum'] = sum(hills_dict['hills_intensity_array'][idx_1])
         hill_feature['rtStart'] = RT_dict[hills_dict['hills_scan_lists'][idx_1][0]+data_start_id]
         hill_feature['rtEnd'] = RT_dict[hills_dict['hills_scan_lists'][idx_1][-1]+data_start_id]
-        hill_feature['FAIMS'] = faims_val
+        hill_feature['FAIMS'] = None if faims_val is None else float(faims_val)
         if 'hills_im_median' in hills_dict:
-            hill_feature['im'] = hills_dict['hills_im_median'][idx_1]
+            hill_feature['im'] = float(hills_dict['hills_im_median'][idx_1])
         else:
-            hill_feature['im'] = 0
-        if data_for_analyse_tmp is not None and hill_scan_apex_1 < len(data_for_analyse_tmp):
-            hill_feature['scanApex'] = int(
-                data_for_analyse_tmp[hill_scan_apex_1].get('scan_id', hill_scan_apex_1 + data_start_id + 1)
-            )
-        else:
-            hill_feature['scanApex'] = int(hill_scan_apex_1 + data_start_id + 1)
+            hill_feature['im'] = None
         hill_feature['hill_idx'] = hills_dict['hills_idx_array_unique'][idx_1]
-        hill_feature['hills_scan_lists'] = [int(v) for v in hills_dict['hills_scan_lists'][idx_1]]
-        hill_feature['hills_intensity_list'] = [float(v) for v in hills_dict['hills_intensity_array'][idx_1]]
-        hill_feature['hills_mz_array'] = [float(v) for v in hills_dict['tmp_mz_array'][idx_1]]
-        hills_features.append(hill_feature)
-
-    return hills_dict, hills_features
+        if feature_idx_by_hill is not None:
+            hill_feature['feature_idx'] = int(
+                feature_idx_by_hill.get(hill_feature['hill_idx'], -1)
+            )
+        local_scans = [int(v) for v in hills_dict['hills_scan_lists'][idx_1]]
+        local_apex = int(hill_scan_apex_1)
+        sources = data_for_analyse_tmp
+        apex_source = sources[local_apex] if sources is not None else None
+        hill_feature['scanApex'] = (
+            apex_source.get('scan_number') if apex_source else None
+        )
+        if include_point_lists:
+            hill_feature['hills_scan_lists'] = local_scans
+            hill_feature['hills_intensity_list'] = [
+                float(v) for v in hills_dict['hills_intensity_array'][idx_1]
+            ]
+            hill_feature['hills_mz_array'] = [
+                float(v) for v in hills_dict['tmp_mz_array'][idx_1]
+            ]
+            hill_feature['hills_rt_list'] = [
+                float(RT_dict[scan + data_start_id]) for scan in local_scans
+            ]
+        yield hill_feature
 
 
 def calc_peptide_features(
@@ -745,6 +422,8 @@ def calc_peptide_features(
     data_start_id,
     isotopes_for_intensity,
     include_mono_hills=True,
+    quantification_args=None,
+    spectra=None,
 ):
 
     for pep_feature in peptide_features:
@@ -783,476 +462,50 @@ def calc_peptide_features(
             pep_feature['rtStart'] = hills_dict['rtStart'][pep_feature['monoisotope idx']]
             pep_feature['rtEnd'] = hills_dict['rtEnd'][pep_feature['monoisotope idx']]
 
+        mono_scans = [int(v) for v in hills_dict['hills_scan_lists'][pep_feature['monoisotope idx']]]
+        local_apex = int(hills_dict['hills_scan_apex'][pep_feature['monoisotope idx']])
+        apex_source = spectra[local_apex] if spectra is not None else None
+        stored_scan_numbers = hills_dict.get('hills_scan_number_array')
+        if stored_scan_numbers is not None:
+            local_numbers = stored_scan_numbers[pep_feature['monoisotope idx']]
+            apex_position = mono_scans.index(local_apex)
+        else:
+            local_numbers = None
+            apex_position = None
+        pep_feature['scanApex'] = (
+            apex_source.get('scan_number')
+            if apex_source
+            else (local_numbers[apex_position] if local_numbers else None)
+        )
+        pep_feature['FAIMS'] = None if faims_val is None else float(faims_val)
+        pep_feature['im'] = None
+        if 'hills_im_median' in hills_dict:
+            pep_feature['im'] = float(
+                hills_dict['hills_im_median'][pep_feature['monoisotope idx']]
+            )
+
         if include_mono_hills:
             pep_feature['mono_hills_scan_lists'] = [int(v) for v in hills_dict['hills_scan_lists'][pep_feature['monoisotope idx']]]
             pep_feature['mono_hills_intensity_list'] = [float(v) for v in hills_dict['hills_intensity_array'][pep_feature['monoisotope idx']]]
+
+        area_sum, approximate_area = raw_area_sum(
+            hills_dict,
+            pep_feature,
+            RT_dict if RT_dict is not False else None,
+            isotopes_for_intensity,
+        )
+        pep_feature['area_sum'] = area_sum
+        if approximate_area and quantification_args is not None:
+            quantification_args['_area_sum_approximate'] = True
 
     return peptide_features
 
 
 def write_output(peptide_features, args, write_header=True, hills=False):
-    output_file = _get_output_file(args, hills=hills)
-    add_feature_idx = _feature_idx_enabled(args)
-
+    manager = args.get('_output_manager')
+    if manager is None:
+        raise RuntimeError('Output manager is required.')
     if hills:
-
-        columns_for_output = list(HILLS_BASE_COLUMNS)
-        if not args.get('no_hill_list', False):
-            columns_for_output += list(HILLS_LIST_COLUMNS)
-        if add_feature_idx:
-            columns_for_output.append('feature_idx')
+        manager.append_hills(peptide_features)
     else:
-        columns_for_output = list(FEATURE_BASE_COLUMNS)
-        if not args.get('no_mono_hills', False):
-            columns_for_output += list(FEATURE_MONO_HILLS_COLUMNS)
-        columns_for_output += list(FEATURE_POST_MONO_COLUMNS)
-        if add_feature_idx:
-            columns_for_output.append('feature_idx')
-        if args['write_extra_details']:
-            columns_for_output += list(FEATURE_EXTRA_COLUMNS)
-
-    if hills and args.get('hills_format', 'tsv') == 'parquet':
-        write_hills_parquet(peptide_features, output_file, write_header, args, columns_for_output)
-        return
-
-    if (not hills) and args.get('feature_format', 'tsv') == 'parquet':
-        write_features_parquet(peptide_features, output_file, write_header, columns_for_output, args)
-        return
-
-    if write_header:
-
-        out_file = open(output_file, 'w')
-        out_file.write('\t'.join(columns_for_output) + '\n')
-        out_file.close()
-
-    out_file = open(output_file, 'a')
-    for pep_feature in peptide_features:
-        out_file.write('\t'.join([_format_tsv_cell(pep_feature[col]) for col in columns_for_output]) + '\n')
-
-    out_file.close()
-
-
-def centroid_pasef_data(data_for_analyse_tmp, args, mz_step):
-
-    cnt_ms1_scans = len(data_for_analyse_tmp)
-
-    ion_mobility_accuracy = args['paseftol']
-    hill_mz_accuracy = args['htol']
-    pasefmini = args['pasefmini']
-    pasefminlh = args['pasefminlh']
-    for spec_idx, z in enumerate(data_for_analyse_tmp):
-
-        logger.debug('PASEF scans analysis: %d/%d', spec_idx+1, cnt_ms1_scans)
-        logger.debug('number of m/z peaks in scan: %d', len(z['m/z array']))
-
-        if 'ignore_ion_mobility' not in z:
-
-            # mz_ar_new = []
-            # intensity_ar_new = []
-            # ion_mobility_ar_new = []
-
-            # mz_ar = z['m/z array']
-            # intensity_ar = z['intensity array']
-            # ion_mobility_ar = z['mean inverse reduced ion mobility array']
-
-            # ion_mobility_step = max(ion_mobility_ar) * ion_mobility_accuracy
-
-            # ion_mobility_ar_fast = (ion_mobility_ar/ion_mobility_step).astype(int)
-            # mz_ar_fast = (mz_ar/mz_step).astype(int)
-
-            # idx = np.argsort(mz_ar_fast)
-            # mz_ar_fast = mz_ar_fast[idx]
-            # ion_mobility_ar_fast = ion_mobility_ar_fast[idx]
-
-            # mz_ar = mz_ar[idx]
-            # intensity_ar = intensity_ar[idx]
-            # ion_mobility_ar = ion_mobility_ar[idx]
-
-            # max_peak_idx = len(mz_ar)
-
-            # banned_idx = set()
-
-            # peak_idx = 0
-            # while peak_idx < max_peak_idx:
-
-            #     if peak_idx not in banned_idx:
-
-            #         mass_accuracy_cur = mz_ar[peak_idx] * 1e-6 * hill_mz_accuracy
-
-            #         mz_val_int = mz_ar_fast[peak_idx]
-            #         ion_mob_val_int = ion_mobility_ar_fast[peak_idx]
-
-            #         tmp = [peak_idx, ]
-
-            #         peak_idx_2 = peak_idx + 1
-
-            #         while peak_idx_2 < max_peak_idx:
-
-
-            #             if peak_idx_2 not in banned_idx:
-
-            #                 mz_val_int_2 = mz_ar_fast[peak_idx_2]
-            #                 if mz_val_int_2 - mz_val_int > 1:
-            #                     break
-            #                 elif abs(mz_ar[peak_idx]-mz_ar[peak_idx_2]) <= mass_accuracy_cur:
-            #                     ion_mob_val_int_2 = ion_mobility_ar_fast[peak_idx_2]
-            #                     if abs(ion_mob_val_int - ion_mob_val_int_2) <= 1:
-            #                         if abs(ion_mobility_ar[peak_idx] - ion_mobility_ar[peak_idx_2]) <= ion_mobility_accuracy:
-            #                             tmp.append(peak_idx_2)
-            #                             peak_idx = peak_idx_2
-            #             peak_idx_2 += 1
-
-            #     all_intensity = [intensity_ar[p_id] for p_id in tmp]
-            #     i_val_new = sum(all_intensity)
-
-            #     if i_val_new >= pasefmini and len(all_intensity) >= pasefminlh:
-
-            #         all_mz = [mz_ar[p_id] for p_id in tmp]
-            #         all_ion_mob = [ion_mobility_ar[p_id] for p_id in tmp]
-
-            #         mz_val_new = np.average(all_mz, weights=all_intensity)
-            #         ion_mob_new = np.average(all_ion_mob, weights=all_intensity)
-
-            #         intensity_ar_new.append(i_val_new)
-            #         mz_ar_new.append(mz_val_new)
-            #         ion_mobility_ar_new.append(ion_mob_new)
-
-            #         banned_idx.update(tmp)
-
-            #     peak_idx += 1
-
-            mz_ar_new, intensity_ar_new, ion_mobility_ar_new = centroid_pasef_scan(z, mz_step, hill_mz_accuracy, ion_mobility_accuracy, pasefmini, pasefminlh)
-
-            data_for_analyse_tmp[spec_idx]['m/z array'] = np.array(mz_ar_new)
-            data_for_analyse_tmp[spec_idx]['intensity array'] = np.array(intensity_ar_new)
-            data_for_analyse_tmp[spec_idx]['mean inverse reduced ion mobility array'] = np.array(ion_mobility_ar_new)
-
-        logger.debug('number of m/z peaks in scan after centroiding: %d', len(data_for_analyse_tmp[spec_idx]['m/z array']))
-
-    data_for_analyse_tmp = [z for z in data_for_analyse_tmp if len(z['m/z array'] > 0)]
-    logger.info('Number of MS1 scans after combining ion mobility peaks: %d', len(data_for_analyse_tmp))
-
-    return data_for_analyse_tmp
-
-def process_profile(data_for_analyse_tmp):
-
-    data_for_analyse_tmp_out = []
-
-    for z in data_for_analyse_tmp:
-
-        best_mz = 0
-        best_int = 0
-        best_im = 0
-        prev_mz = False
-        prev_int = False
-
-        threshold = 0.05
-
-        ar1 = []
-        ar2 = []
-        ar3 = []
-        for mzv, intv, imv in zip(z['m/z array'], z['intensity array'], z['mean inverse reduced ion mobility array']):
-            if prev_mz is False:
-                best_mz = mzv
-                best_int = intv
-                best_im = imv
-            elif mzv - prev_mz > threshold:
-                ar1.append(best_mz)
-                ar2.append(best_int)
-                ar3.append(best_im)
-                best_mz = mzv
-                best_int = intv
-                best_im = imv
-            elif best_int > prev_int and intv > prev_int:
-                ar1.append(best_mz)
-                ar2.append(best_int)
-                ar3.append(best_im)
-                best_mz = mzv
-                best_int = intv
-                best_im = imv
-            elif intv > best_int:
-                best_mz = mzv
-                best_int = intv
-                best_im = imv
-            prev_mz = mzv
-            prev_int = intv
-
-        ar1.append(best_mz)
-        ar2.append(best_int)
-        ar3.append(best_im)
-
-        z['m/z array'] = np.array(ar1)
-        z['intensity array'] = np.array(ar2)
-        z['mean inverse reduced ion mobility array'] = np.array(ar3)
-
-        data_for_analyse_tmp_out.append(z)
-    return data_for_analyse_tmp_out
-
-
-
-def process_tof(data_for_analyse_tmp):
-
-            # print(len(z['m/z array']))
-    universal_dict = {}
-    cnt = 0
-
-
-    temp_i = defaultdict(list)
-    for z in data_for_analyse_tmp:
-        cnt += 1
-        fast_set = z['m/z array'] // 50
-
-        if cnt <= 25:
-
-
-
-            for l in set(fast_set):
-
-                if l not in universal_dict:
-
-                    idxt = fast_set == l
-                    true_i = np.log10(z['intensity array'])[idxt]
-                    temp_i[l].extend(true_i)
-
-                    if len(temp_i[l]) > 150:
-
-                        temp_i[l] = np.array(temp_i[l])
-                        i_left = temp_i[l].min()
-                        i_right = temp_i[l].max()
-
-                        i_shift, i_sigma, covvalue = calibrate_mass(0.05, i_left, i_right, temp_i[l])
-                        # median_val = 
-                        print(i_shift, i_sigma, covvalue)
-                        universal_dict[l] = 10**(i_shift + 2 * i_sigma)#10**(np.median(true_i[idxt]) * 2)
-            
-
-    cnt = 0
-
-    for z in data_for_analyse_tmp:
-
-        fast_set = z['m/z array'] // 50
-        while cnt <= 50:
-
-            cnt += 1
-
-            temp_i = []
-
-            for l in set(fast_set):
-                idxt = fast_set == l
-                true_i = np.log10(z['intensity array'])[idxt]
-                temp_i.extend(true_i)
-
-                if len(true_i) > 150:
-
-                    i_left = true_i.min()
-                    i_right = true_i.max()
-
-                    i_shift, i_sigma, covvalue = calibrate_mass(0.05, i_left, i_right, true_i)
-                    # median_val = 
-                    print(i_shift, i_sigma, covvalue)
-                    universal_dict[l] = 10**(i_shift + 3 * i_sigma)#10**(np.median(true_i[idxt]) * 2)
-            
-
-            
-        thresholds = [universal_dict.get(zz, 150) for zz in list(fast_set)]
-        idxt2 = z['intensity array'] <= thresholds
-        z['intensity array'][idxt2] = -1
-
-
-        idx = z['intensity array'] > 0
-        z['intensity array'] = z['intensity array'][idx]
-        z['m/z array'] = z['m/z array'][idx]
-        z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-
-
-        cnt += 1
-
-        data_for_analyse_tmp = [z for z in data_for_analyse_tmp if len(z['m/z array'])]
-
-    return data_for_analyse_tmp
-
-
-def process_mzml(args):
-
-    input_mzml_path = args['file']
-    min_intensity = args['mini']
-    min_mz = args['minmz']
-    max_mz = args['maxmz']
-
-    skipped = 0
-    data_for_analyse = []
-
-    cnt = 0
-    combine_every = args["combine_every"]
-    assert (
-        isinstance(combine_every, int) and combine_every > 0
-    ), "combine_every must be a positive integer"
-    if combine_every > 1:
-        logger.info("Combining every %s MS1 scans.", combine_every)
-    buffer = []  # temporary storage for z's to be merged
-
-    for fallback_idx, z in enumerate(iter_ms1_spectra(input_mzml_path)):
-        if z['ms level'] == 1:
-            z['scan_id'] = _extract_ms1_scan_id(z, fallback_idx)
-
-            if 'raw ion mobility array' in z:
-                z['mean inverse reduced ion mobility array'] = z['raw ion mobility array']
-
-            if 'mean inverse reduced ion mobility array' not in z:
-                z['ignore_ion_mobility'] = True
-                z['mean inverse reduced ion mobility array'] = np.zeros(len(z['m/z array']))
-
-            # intensity filter
-            idx = z['intensity array'] >= min_intensity
-            z['intensity array'] = z['intensity array'][idx]
-            z['m/z array'] = z['m/z array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            # min_mz filter
-            idx = z['m/z array'] >= min_mz
-            z['m/z array'] = z['m/z array'][idx]
-            z['intensity array'] = z['intensity array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            # max_mz filter
-            idx = z['m/z array'] <= max_mz
-            z['m/z array'] = z['m/z array'][idx]
-            z['intensity array'] = z['intensity array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            # sort by m/z
-            idx = np.argsort(z['m/z array'])
-            z['m/z array'] = z['m/z array'][idx]
-            z['intensity array'] = z['intensity array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            cnt += 1
-
-            if combine_every == 1:
-                # just append z directly
-                if len(z['m/z array']):
-                    data_for_analyse.append(z)
-                else:
-                    skipped += 1
-            else:
-                # store in buffer and only merge when reaching combine_every
-                buffer.append(z)
-                if len(buffer) == combine_every:
-                    merged = {
-                        "m/z array": np.concatenate([b["m/z array"] for b in buffer]),
-                        "intensity array": np.concatenate(
-                            [b["intensity array"] for b in buffer]
-                        ),
-                        "mean inverse reduced ion mobility array": np.concatenate(
-                            [
-                                b["mean inverse reduced ion mobility array"]
-                                for b in buffer
-                            ]
-                        ),
-                    }
-                    merged.update(
-                        {k: buffer[0][k] for k in buffer[0] if k not in merged}
-                    )
-
-                    if len(merged["m/z array"]):
-                        data_for_analyse.append(merged)
-                        if cnt % 5000 == 0 and logger.level == logging.DEBUG:
-                            logger.debug(
-                                "m/z array start and end for scan %s after merged: %s - %s",
-                                cnt,
-                                merged["m/z array"][0],
-                                merged["m/z array"][-1],
-                            )
-                    else:
-                        skipped += 1
-                    buffer = []
-
-    # handle leftover spectra if not divisible by combine_every
-    if buffer:
-        logger.info("Combining %s leftover MS1 scans..", len(buffer))
-        merged = {
-            "m/z array": np.concatenate([b["m/z array"] for b in buffer]),
-            "intensity array": np.concatenate([b["intensity array"] for b in buffer]),
-            "mean inverse reduced ion mobility array": np.concatenate(
-                [b["mean inverse reduced ion mobility array"] for b in buffer]
-            ),
-        }
-        merged.update({k: buffer[0][k] for k in buffer[0] if k not in merged})
-
-        if len(merged["m/z array"]):
-            data_for_analyse.append(merged)
-        else:
-            skipped += 1
-
-
-    logger.info('Number of MS1 scans: %d', len(data_for_analyse))
-    logger.info('Number of skipped MS1 scans: %d', skipped)
-
-    if len(data_for_analyse) == 0:
-        raise Exception('no MS1 scans in input file')
-
-    return data_for_analyse
-
-
-
-def process_mzml_dia(args):
-
-    input_mzml_path = args['file']
-    # min_intensity = args['mini']
-    # min_mz = args['minmz']
-    # max_mz = args['maxmz']
-    min_intensity = 0
-    min_mz = 1
-    max_mz = 1e6
-
-    skipped = 0
-    data_for_analyse = []
-
-    cnt = 0
-    ms1_scans = 0
-
-    for z in iter_all_spectra(input_mzml_path):
-        if z['ms level'] == 1:
-            ms1_scans += 1
-        elif z['ms level'] == 2:
-
-            if 'mean inverse reduced ion mobility array' not in z:
-                z['ignore_ion_mobility'] = True
-                z['mean inverse reduced ion mobility array'] = np.zeros(len(z['m/z array']))
-
-            idx = z['intensity array'] >= min_intensity
-            z['intensity array'] = z['intensity array'][idx]
-            z['m/z array'] = z['m/z array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            idx = z['m/z array'] >= min_mz
-            z['m/z array'] = z['m/z array'][idx]
-            z['intensity array'] = z['intensity array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            idx = z['m/z array'] <= max_mz
-            z['m/z array'] = z['m/z array'][idx]
-            z['intensity array'] = z['intensity array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            idx = np.argsort(z['m/z array'])
-            z['m/z array'] = z['m/z array'][idx]
-            z['intensity array'] = z['intensity array'][idx]
-            z['mean inverse reduced ion mobility array'] = z['mean inverse reduced ion mobility array'][idx]
-
-            cnt += 1
-
-            # if len(data_for_analyse) > 5000:
-            #     break
-
-            if len(z['m/z array']):
-                data_for_analyse.append(z)
-            else:
-                skipped += 1
-
-
-    logger.info('Number of MS2 scans: %d', len(data_for_analyse))
-    logger.info('Number of skipped MS2 scans: %d', skipped)
-
-    return data_for_analyse, ms1_scans, cnt
+        manager.append_features(peptide_features)
