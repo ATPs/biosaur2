@@ -83,6 +83,14 @@ MS2_COLUMNS = (
     "metadata_flags",
 )
 
+MS2_FEATURE_LINK_COLUMNS = (
+    "run_id", "ms2_event_id", "feature_id", "status", "seed_eligible",
+    "seed_used_in_selection", "selected_ion_isotope_offset",
+    "isolated_isotope_index", "mz_error_ppm", "rt_distance_sec",
+    "precursor_scan_distance", "seed_support", "reason_flags",
+)
+MS2_FEATURE_LINK_SCHEMA_VERSION = "1"
+
 MS2_SCHEMA_VERSION = "1"
 MS2_MISSING_PRECURSOR_MZ = 0x0001
 MS2_MISSING_CHARGE = 0x0002
@@ -231,6 +239,28 @@ def _ms2_schema():
     )
 
 
+def _ms2_feature_link_schema(use64=False):
+    category_type = pa.dictionary(pa.int8(), pa.string())
+    feature_id_type = pa.int64() if use64 else pa.int32()
+    return pa.schema(
+        [
+            pa.field("run_id", category_type, nullable=False),
+            pa.field("ms2_event_id", pa.int32(), nullable=False),
+            pa.field("feature_id", feature_id_type, nullable=True),
+            pa.field("status", category_type, nullable=False),
+            pa.field("seed_eligible", pa.bool_(), nullable=False),
+            pa.field("seed_used_in_selection", pa.bool_(), nullable=False),
+            pa.field("selected_ion_isotope_offset", pa.int8(), nullable=True),
+            pa.field("isolated_isotope_index", pa.int8(), nullable=True),
+            pa.field("mz_error_ppm", pa.float32(), nullable=True),
+            pa.field("rt_distance_sec", pa.float32(), nullable=True),
+            pa.field("precursor_scan_distance", pa.int16(), nullable=True),
+            pa.field("seed_support", pa.float32(), nullable=True),
+            pa.field("reason_flags", pa.uint16(), nullable=False),
+        ]
+    )
+
+
 def compact_schemas(
     use64=False,
     include_mono=True,
@@ -242,6 +272,7 @@ def compact_schemas(
         "hills": _hill_schema(use64, include_hill_lists),
         "ms1": _ms1_schema(use64),
         "ms2": _ms2_schema(),
+        "ms2_feature_links": _ms2_feature_link_schema(use64),
     }
 
 

@@ -28,6 +28,7 @@ class MzMLIngestion:
     spectra: list
     ms1_rows: list
     ms2_rows: list
+    ms1_metadata: dict
 
 
 def centroid_pasef_data(data, args, mz_step):
@@ -341,6 +342,7 @@ def ingest_mzml(args):
     ms2_count = 0
     preceding_ms1 = None
     ms1_by_native_id = {}
+    ms1_metadata = {}
 
     for spectrum_index, spectrum in enumerate(iterator):
         ms_level = spectrum.get("ms level")
@@ -369,6 +371,11 @@ def ingest_mzml(args):
             scan_info["scan start time"], args.get("input_rt_unit", "seconds")
         )
         scan_number = extract_scan_number(spectrum)
+        if collect_ms2:
+            ms1_metadata[fallback_index] = {
+                "rt_sec": rt_sec,
+                "faims_cv": faims_value(spectrum),
+            }
         if collect_ms1:
             ms1_rows.append(
                 {
@@ -425,7 +432,7 @@ def ingest_mzml(args):
     logger.info("Number of skipped MS1 scans: %d", skipped)
     if source_count == 0 or not data:
         raise ValueError("No usable MS1 scans remain after input filtering.")
-    return MzMLIngestion(data, ms1_rows, ms2_rows)
+    return MzMLIngestion(data, ms1_rows, ms2_rows, ms1_metadata)
 
 
 def process_mzml(args):

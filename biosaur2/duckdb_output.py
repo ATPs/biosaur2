@@ -16,6 +16,7 @@ from .legacy_output import (
     compact_hill,
     compact_ms1,
     compact_ms2,
+    compact_ms2_feature_link,
     compact_sort_key,
     row_batches,
 )
@@ -25,12 +26,14 @@ from .output import (
     build_provenance,
     input_stem,
     ms2_output_path,
+    ms2_feature_links_output_path,
     publish_staged_files,
 )
 from .schema import (
     MS1_COLUMNS,
     MS2_COLUMNS,
     MS2_SCHEMA_VERSION,
+    MS2_FEATURE_LINK_SCHEMA_VERSION,
     compact_schemas,
     feature_columns,
     hill_columns,
@@ -61,6 +64,7 @@ class DuckDBOutputManager:
         self.table_names = self._table_names()
         self.tsv_sinks = self._tsv_sinks()
         self.ms2_sink = self._ms2_sink()
+        self.ms2_feature_link_sink = self._ms2_feature_link_sink()
         self.final_paths = self._final_paths()
         self._preflight()
         self.staging_path = self._staging_path()
@@ -119,6 +123,14 @@ class DuckDBOutputManager:
             ("run_id", "precursor_resolution", "precursor_mz_source"),
         )
 
+    def _ms2_feature_link_sink(self):
+        if not self.args.get("ms2_seed"):
+            return None
+        return _CompactParquetSink(
+            ms2_feature_links_output_path(self.args),
+            self.schemas["ms2_feature_links"], self.args, ("run_id", "status"),
+        )
+
     def _tsv_sinks(self):
         if self.database_mode:
             return {}
@@ -175,6 +187,8 @@ class DuckDBOutputManager:
         ]
         if self.ms2_sink is not None:
             values.append(self.ms2_sink.final_path)
+        if self.ms2_feature_link_sink is not None:
+            values.append(self.ms2_feature_link_sink.final_path)
         if len(values) != len(set(values)):
             raise ValueError("DuckDB output paths collide")
         existing = [path for path in values if path.exists()]
@@ -273,6 +287,14 @@ class DuckDBOutputManager:
             if self.ms2_sink is not None:
                 self.ms2_sink.append(converted)
 
+    def append_ms2_feature_links(self, rows):
+        if self.ms2_feature_link_sink is None:
+            return
+        for batch in row_batches(rows):
+            self.ms2_feature_link_sink.append(
+                [compact_ms2_feature_link(row, self.args) for row in batch]
+            )
+
     def _order(self, table_name):
         if table_name == "features":
             mode = self.args.get("parquet_sort", "mz_rt")
@@ -361,6 +383,16 @@ class DuckDBOutputManager:
         if self.ms2_sink is not None:
             self.ms2_sink.add_provenance(self.provenance)
             self.ms2_sink.close()
+        if self.ms2_feature_link_sink is not None:
+            metadata = dict(self.provenance)
+            metadata.update(
+                {
+                    "ms2_feature_link_schema_version": MS2_FEATURE_LINK_SCHEMA_VERSION,
+                    "ms2_seed_summary": self.args.get("_ms2_seed_summary", {}),
+                }
+            )
+            self.ms2_feature_link_sink.add_provenance(metadata)
+            self.ms2_feature_link_sink.close()
         self.connection.close()
         self.connection = None
         for sink in self.tsv_sinks.values():
@@ -383,6 +415,8 @@ class DuckDBOutputManager:
         )
         if self.ms2_sink is not None:
             pairs.append((self.ms2_sink.temp_path, self.ms2_sink.final_path))
+        if self.ms2_feature_link_sink is not None:
+            pairs.append((self.ms2_feature_link_sink.temp_path, self.ms2_feature_link_sink.final_path))
         return pairs
 
     def finalize(self):
@@ -399,6 +433,8 @@ class DuckDBOutputManager:
             sink.abort()
         if self.ms2_sink is not None:
             self.ms2_sink.abort()
+        if self.ms2_feature_link_sink is not None:
+            self.ms2_feature_link_sink.abort()
 
 
 def uses_duckdb(args: Mapping[str, Any]) -> bool:

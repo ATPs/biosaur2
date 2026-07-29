@@ -59,6 +59,14 @@ def ms2_output_path(args: Mapping[str, Any]) -> Path:
     return directory / (stem + ".ms2.parquet")
 
 
+def ms2_feature_links_output_path(args: Mapping[str, Any]) -> Path:
+    """Return the fixed input-stem MS2 feature-link sidecar path."""
+
+    return ms2_output_path(args).with_name(
+        input_stem(str(args["file"])) + ".ms2_feature_links.parquet"
+    )
+
+
 def planned_output_paths(args: Mapping[str, Any]):
     """Resolve final outputs without creating writers or staging files."""
 
@@ -100,6 +108,8 @@ def planned_output_paths(args: Mapping[str, Any]):
             )
     if args.get("write_ms2"):
         paths.append(ms2_output_path(args))
+    if args.get("ms2_seed"):
+        paths.append(ms2_feature_links_output_path(args))
     return paths
 
 

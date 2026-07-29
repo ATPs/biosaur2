@@ -3,6 +3,7 @@ import argparse
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -53,6 +54,18 @@ def _positive_integer(value):
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def _parse_isotope_offsets(value):
+    try:
+        offsets = tuple(int(item.strip()) for item in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a comma-separated list of integers") from exc
+    if not offsets or len(offsets) != len(set(offsets)):
+        raise argparse.ArgumentTypeError("must be a nonempty list of distinct integers")
+    if any(offset < -128 or offset > 127 for offset in offsets):
+        raise argparse.ArgumentTypeError("offsets must fit in INT8")
+    return offsets
 
 
 def _option_was_supplied(*spellings):
@@ -290,6 +303,25 @@ Examples:
         action='store_true',
     )
     parser.add_argument(
+        '--ms2-seed', '--ms2_seed', dest='ms2_seed', action='store_true',
+        help='use eligible DDA MS2 precursor metadata as bounded ordering evidence',
+    )
+    parser.add_argument(
+        '--ms2-seed-ppm', '--ms2_seed_ppm', dest='ms2_seed_ppm', type=float,
+        default=10.0, help='selected-ion precursor tolerance for --ms2-seed',
+    )
+    parser.add_argument(
+        '--ms2-seed-rt-tolerance-sec', '--ms2_seed_rt_tolerance_sec',
+        dest='ms2_seed_rt_tolerance_sec', type=float, default=120.0,
+        help='candidate RT interval tolerance in seconds for --ms2-seed',
+    )
+    parser.add_argument(
+        '--ms2-seed-isotope-errors', '--ms2_seed_isotope_errors',
+        dest='ms2_seed_isotope_errors', type=_parse_isotope_offsets,
+        default=(-1, 0, 1, 2, 3),
+        help='comma-separated selected-ion isotope offsets evaluated jointly',
+    )
+    parser.add_argument(
         '--ms1_format', '--ms1-format',
         dest='ms1_format',
         help='MS1 summary output format used by --write_ms1',
@@ -355,6 +387,12 @@ Examples:
         parser.error('-combine_every greater than 1 is incompatible with area_sum output.')
     if args['iuse'] < -1:
         parser.error('-iuse must be -1 or a nonnegative integer.')
+    if not math.isfinite(args['ms2_seed_ppm']) or args['ms2_seed_ppm'] <= 0:
+        parser.error('--ms2-seed-ppm must be a finite positive number.')
+    if not math.isfinite(args['ms2_seed_rt_tolerance_sec']) or args['ms2_seed_rt_tolerance_sec'] < 0:
+        parser.error('--ms2-seed-rt-tolerance-sec must be a finite nonnegative number.')
+    if args['ms2_seed']:
+        args['write_ms2'] = True
     if args['parquet_compression'] not in {'zstd', 'brotli'} and _option_was_supplied(
         '--parquet-compression-level', '--parquet_compression_level'
     ):
@@ -363,7 +401,7 @@ Examples:
         (not args['stop_after_hills'] and args['feature_format'] == 'parquet')
         or ((args['write_hills'] or args['stop_after_hills']) and args['hills_format'] == 'parquet')
         or (args['write_ms1'] and args['ms1_format'] == 'parquet')
-        or args['write_ms2']
+        or args['write_ms2'] or args['ms2_seed']
     )
     if _option_was_supplied('--parquet-engine', '--parquet_engine') and (
         not parquet_requested and not args['duckdb_output']
@@ -383,6 +421,7 @@ Examples:
                 (args['write_hills'], '--write-hills'),
                 (args['write_ms1'], '--write-ms1'),
                 (args['write_ms2'], '--write-ms2'),
+                (args['ms2_seed'], '--ms2-seed'),
             )
             if enabled
         ]
@@ -395,6 +434,10 @@ Examples:
         args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
     ):
         parser.error('--write-ms2 is supported only for the normal mzML feature workflow.')
+    if args['ms2_seed'] and (
+        args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
+    ):
+        parser.error('--ms2-seed is supported only for the normal mzML feature workflow.')
     if args['run_workers'] > 1 and (
         args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
     ):
