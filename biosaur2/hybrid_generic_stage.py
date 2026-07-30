@@ -177,6 +177,10 @@ def _apply_standard_generic_results(state):
     generic_recovered_quant_rows = state["generic_recovered_quant_rows"]
     generic_recovered = state["generic_recovered"]
     generic_score_weights = state["generic_score_weights"]
+    local_competitions = state["local_competitions"]
+    local_ppm = state["local_ppm"]
+    local_status_counts = state["local_status_counts"]
+    q_value_max = state["q_value_max"]
     for competition in local_competitions:
         event_id = competition.event_id
         target = competition.target
