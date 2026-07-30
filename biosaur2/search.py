@@ -22,6 +22,54 @@ from .parallel import (
 )
 
 
+_LOG_LEVELS = {
+    'quiet': logging.ERROR,
+    'warning': logging.WARNING,
+    'info': logging.INFO,
+    'debug': logging.DEBUG,
+}
+
+
+def _add_log_level_argument(parser, show_legacy_debug=False):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        '--log-level',
+        choices=tuple(_LOG_LEVELS),
+        default='info',
+        help='logging verbosity: quiet keeps errors only; warning, info or debug',
+    )
+    group.add_argument(
+        '-debug',
+        dest='log_level',
+        action='store_const',
+        const='debug',
+        help=_advanced_help(show_legacy_debug, 'legacy alias for --log-level debug'),
+    )
+
+
+def _configure_logging(log_level, run_label=None):
+    level = _LOG_LEVELS[log_level]
+    run_label = run_label or os.environ.get('BIOSAUR2_LOG_RUN_ID')
+    if run_label:
+        safe_label = str(run_label).replace('\n', ' ').replace('\r', ' ').replace('%', '%%')
+        log_format = (
+            '%(levelname)9s: %(asctime)s [run='
+            + safe_label
+            + ' pid=%(process)d] %(message)s'
+        )
+    elif log_level == 'debug':
+        log_format = '%(levelname)9s: %(asctime)s [pid=%(process)d] %(message)s'
+    else:
+        log_format = '%(levelname)9s: %(asctime)s %(message)s'
+    logging.basicConfig(
+        format=log_format,
+        datefmt='[%H:%M:%S]',
+        level=level,
+        force=True,
+    )
+    logging.getLogger('matplotlib').setLevel(max(logging.WARNING, level))
+
+
 class _HelpFormatter(
     argparse.ArgumentDefaultsHelpFormatter,
     argparse.RawDescriptionHelpFormatter,
@@ -156,10 +204,25 @@ def _run_file_worker(run_args):
     started = time.monotonic()
     manager = None
     filename = run_args["file"]
+    _configure_logging(
+        run_args['log_level'],
+        os.environ.get('BIOSAUR2_LOG_RUN_ID') or input_stem(filename),
+    )
+    logger = logging.getLogger(__name__)
+    logger.debug(
+        'Run start: file=%s mode=%s format=%s workers=%d output=%s cache=%s',
+        filename,
+        run_args.get('feature_mode'),
+        run_args.get('format'),
+        run_args.get('nprocs'),
+        run_args.get('o'),
+        run_args.get('raw_ms1_cache_dir'),
+    )
     try:
         manager = _create_output_manager(run_args)
         if manager is not None:
             run_args["_output_manager"] = manager
+            logger.debug('Output manager: %s', type(manager).__name__)
         if run_args["dia2"]:
             main_dia2.process_file(run_args)
         else:
@@ -174,6 +237,7 @@ def _run_file_worker(run_args):
                 if key != "_output_manager"
             }
             main_dia.process_file(dia_args)
+        logger.debug('Run complete: file=%s runtime_sec=%.3f', filename, time.monotonic() - started)
         return {
             "file": filename,
             "status": "success",
@@ -182,6 +246,7 @@ def _run_file_worker(run_args):
             "traceback": None,
         }
     except BaseException as exc:
+        logger.debug('Run failed: file=%s error=%s', filename, exc, exc_info=True)
         if manager is not None:
             manager.abort()
         return {
@@ -275,6 +340,12 @@ def _execute_inputs(args, parser, logger):
             'Output already exists; use --overwrite: %s'
             % ', '.join(map(str, existing))
         )
+    logger.debug(
+        'Input planning: files=%s planned_outputs=%s overwrite=%s',
+        args['files'],
+        [str(path) for path in planned_paths],
+        args['overwrite'],
+    )
 
     effective_workers = effective_worker_budget(args['workers'])
     args['_effective_workers'] = effective_workers
@@ -285,6 +356,12 @@ def _execute_inputs(args, parser, logger):
         worker_slot_allocations(effective_workers, len(args['files']))
         if multiple_inputs and normal_parallel
         else [effective_workers]
+    )
+    logger.debug(
+        'Execution mode: multiple_inputs=%s normal_parallel=%s allocations=%s',
+        multiple_inputs,
+        normal_parallel,
+        allocations,
     )
     logger.info(
         'Effective worker budget: requested=%d effective=%d run_slots=%d allocations=%s',
@@ -459,7 +536,7 @@ Advanced output notes:
     parser.add_argument('-diadynrange', help=_advanced_help(show_all, 'experimental DIA dynamic-range limit'), default=1000, type=int)
     parser.add_argument('-min_ms2_peaks', help=_advanced_help(show_all, 'minimum fragment-peak count for an experimental MGF entry'), default=5, type=int)
     parser.add_argument('-mgf', help=_advanced_help(show_all, 'experimental DIA/DIA2 MGF output path'), default='')
-    parser.add_argument('-debug', help=_advanced_help(show_all, 'log debugging information'), action='store_true')
+    _add_log_level_argument(parser, show_legacy_debug=show_all)
     parser.add_argument('-tof', help=_advanced_help(show_all, 'enable experimental TOF processing'), action='store_true')
     parser.add_argument('-profile', help=_advanced_help(show_all, 'enable experimental profile processing'), action='store_true')
     parser.add_argument('-write_hills', '--write-hills', dest='write_hills', help=_advanced_help(show_all, 'write detected hills using --format'), action='store_true')
@@ -727,9 +804,7 @@ Advanced output notes:
     forced_write_hills = args['stop_after_hills'] and not args['write_hills']
     if forced_write_hills:
         args['write_hills'] = True
-    logging.basicConfig(format='%(levelname)9s: %(asctime)s %(message)s',
-            datefmt='[%H:%M:%S]', level=[logging.INFO, logging.DEBUG][args['debug']])
-    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    _configure_logging(args['log_level'])
     logger = logging.getLogger(__name__)
     if forced_write_hills:
         logger.info('--stop_after_hills requested; turning on --write_hills automatically.')

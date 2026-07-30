@@ -1,6 +1,6 @@
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pyarrow as pa
@@ -9,14 +9,51 @@ import pyarrow.parquet as pq
 from biosaur2 import project_cli
 from biosaur2.project import (
     _command_for_run,
-    _input_fingerprint,
     _project_worker,
+    _resume_option_signature,
+    _input_fingerprint,
     _read_successful_runs,
     _resume_option_signature,
     _scientific_command,
     _write_project_database,
     validate_project,
 )
+
+
+def test_project_worker_streams_output_and_preserves_tails(capsys):
+    result = _project_worker(
+        {
+            "run_id": "sample_01",
+            "paths": {},
+            "command": [
+                sys.executable,
+                "-c",
+                (
+                    "import os, sys; "
+                    "print('run=' + os.environ['BIOSAUR2_LOG_RUN_ID']); "
+                    "print('child-error', file=sys.stderr)"
+                ),
+            ],
+        }
+    )
+    captured = capsys.readouterr()
+    assert result["status"] == "success"
+    assert "run=sample_01" in captured.out
+    assert "child-error" in captured.err
+    assert "run=sample_01" in result["stdout_tail"]
+    assert "child-error" in result["stderr_tail"]
+
+
+def test_log_level_does_not_affect_project_resume_signature():
+    base = {
+        "mode": "hybrid",
+        "format": "parquet",
+        "workers": 4,
+        "resume": False,
+        "log_level": "info",
+    }
+    debug = dict(base, log_level="debug")
+    assert _resume_option_signature(base) == _resume_option_signature(debug)
 from biosaur2.schema import compact_schemas
 
 

@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 
@@ -33,6 +34,68 @@ def test_mode_selects_default_format(monkeypatch, tmp_path, extra, expected):
     )
     search_module.run()
     assert captured["format"] == expected
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ([], "info"),
+        (["--log-level", "quiet"], "quiet"),
+        (["--log-level", "warning"], "warning"),
+        (["--log-level", "debug"], "debug"),
+        (["-debug"], "debug"),
+    ],
+)
+def test_log_level_is_parsed_and_legacy_debug_is_accepted(
+    monkeypatch, tmp_path, extra, expected
+):
+    captured = {}
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    monkeypatch.setattr(
+        search_module,
+        "_execute_inputs",
+        lambda args, parser, logger: captured.update(args),
+    )
+    monkeypatch.setattr(sys, "argv", ["biosaur2", str(source), *extra])
+    search_module.run()
+    assert captured["log_level"] == expected
+
+
+def test_log_level_validation_and_debug_format(tmp_path):
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    result = _run(source, "--log-level", "loud")
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+
+    result = _run(source, "--log-level", "info", "-debug")
+    assert result.returncode != 0
+    assert "not allowed with argument" in result.stderr
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import logging; "
+                "from biosaur2.search import _configure_logging; "
+                "from biosaur2.main import _debug_stage_complete, _debug_stage_start; "
+                "_configure_logging('debug', 'sample'); "
+                "logging.getLogger(__name__).debug('probe'); "
+                "stage = _debug_stage_start('probe_stage'); "
+                "_debug_stage_complete('probe_stage', stage)"
+            ),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0
+    assert re.search(
+        r"DEBUG: \[\d{2}:\d{2}:\d{2}\] \[run=sample pid=\d+\] probe",
+        result.stderr,
+    )
+    assert "Stage complete: probe_stage runtime_sec=" in result.stderr
 
 
 def test_invalid_output_controls_fail_during_argument_validation(tmp_path):
@@ -105,6 +168,7 @@ def test_help_documents_everyday_output_contract():
         "features.tsv",
         "--format",
         "--workers",
+        "--log-level",
         "--cache-dir",
         "--keep-cache",
         "--continue-on-error",
@@ -253,6 +317,7 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     assert help_result.returncode == 0
     assert "--ms2-rt-tolerance-sec" in help_result.stdout
     assert "--workers" in help_result.stdout
+    assert "--log-level" in help_result.stdout
     assert "--cache-dir" in help_result.stdout
     assert "--keep-cache" in help_result.stdout
     assert "--max-charge" in help_result.stdout

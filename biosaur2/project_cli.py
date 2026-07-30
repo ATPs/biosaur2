@@ -10,9 +10,11 @@ from .cache_runtime import CacheWorkspace, default_cache_dir
 from .project_manifest import auto_pair_runs, write_manifest
 from .project import run_project, validate_project
 from .search import (
+    _add_log_level_argument,
     _advanced_help,
     _auto_or_positive_float,
     _comma_separated_integers,
+    _configure_logging,
     _positive_integer,
 )
 
@@ -48,11 +50,13 @@ def _manifest_parser(prog):
         help="fail if any mzML has no exact-stem PSM file",
     )
     parser.add_argument("--overwrite", action="store_true", help="atomically replace an existing manifest")
+    _add_log_level_argument(parser)
     return parser
 
 
 def _run_make_manifest(arguments, prog):
     args = _manifest_parser(prog).parse_args(arguments)
+    _configure_logging(args.log_level)
     report = auto_pair_runs(
         args.mzml_dir,
         args.psm_dir,
@@ -110,6 +114,7 @@ README.md and examples/hybrid_project_manifest.tsv.
         )
         parser.add_argument("--manifest", required=True, help="input project manifest TSV")
         parser.add_argument("--help-all", action="help", help="show everyday and advanced project options, then exit")
+        _add_log_level_argument(parser)
         parser.add_argument("--output-dir", required=True, help="root directory for per-run atomic outputs")
         parser.add_argument("--project-db", required=True, help="DuckDB path for run/stage status, resolved options, alignment and validation metadata")
         parser.add_argument(
@@ -183,6 +188,7 @@ README.md and examples/hybrid_project_manifest.tsv.
             help="initial same-run MS1 search distance around each MS2 event; not cross-run RT alignment",
         )
         args = parser.parse_args(arguments[1:])
+        _configure_logging(args.log_level)
         args.format = args.format or (
             "parquet" if args.mode == "hybrid" else "tsv"
         )
@@ -254,7 +260,9 @@ README.md and examples/hybrid_project_manifest.tsv.
             formatter_class=_HelpFormatter,
         )
         parser.add_argument("--project-db", required=True, help="completed project DuckDB path")
+        _add_log_level_argument(parser)
         args = parser.parse_args(arguments[1:])
+        _configure_logging(args.log_level)
         result = validate_project(args.project_db)
         logger.info("Validated %d project runs", result["run_count"])
         return 0

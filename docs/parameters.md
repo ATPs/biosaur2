@@ -12,6 +12,7 @@ scientific tolerance changes on representative data.
 | `--format` | legacy: `tsv`; hybrid: `parquet` | One format for features and every explicitly requested diagnostic table. `duckdb` stores all tables for one input in one database. |
 | `-o` | beside input | Output file/prefix for one input; output directory for several inputs. |
 | `--workers` | 4 | Total CPU budget shared dynamically across input files and their per-run work. |
+| `--log-level` | `info` | Console verbosity: `quiet` keeps errors only; `warning`, `info`, and `debug` add progressively more detail. Every log line includes a time. Debug records stage start/completion and `runtime_sec`. Project runs stream child-process logs live; those lines identify the run and process. |
 | `--cache-dir` | `.biosaur2_cache` | Root for raw, strict-stage, candidate and project caches. |
 | `--keep-cache` | false | Retain compatible caches; otherwise the job's cache namespace is cleaned at completion. |
 | `--overwrite` | false | Atomically replace existing complete outputs. |

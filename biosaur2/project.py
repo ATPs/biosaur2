@@ -5,10 +5,12 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 from pathlib import Path
 import resource
 import subprocess
 import sys
+import threading
 import time
 
 import pyarrow.parquet as pq
@@ -20,6 +22,7 @@ from .parallel import (
     effective_worker_budget,
     run_bounded_process_tasks,
     run_budgeted_process_tasks,
+    worker_slot_allocations,
 )
 from .project_manifest import read_manifest
 from .raw_ms1 import source_fingerprint
@@ -44,7 +47,7 @@ def _scientific_command(command):
     index = 0
     while index < len(command):
         option = command[index]
-        if option in {"--workers", "--cache-dir"}:
+        if option in {"--workers", "--cache-dir", "--log-level"}:
             index += 2
             continue
         if option == "--keep-cache":
@@ -64,6 +67,7 @@ def _resume_option_signature(options):
         "workers",
         "cache_dir",
         "keep_cache",
+        "log_level",
         "_cache_workspace",
     }
     return {
@@ -73,25 +77,66 @@ def _resume_option_signature(options):
     }
 
 
+def _tail_append(chunks, chunk, limit):
+    chunks.append(chunk)
+    retained = "".join(chunks)
+    if len(retained) > limit:
+        chunks[:] = [retained[-limit:]]
+
+
 def _project_worker(task):
     started = time.monotonic()
     command = task.get("execution_command", task["command"])
     usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
-    completed = subprocess.run(command, text=True, capture_output=True)
+    child_env = dict(os.environ)
+    child_env["BIOSAUR2_LOG_RUN_ID"] = task["run_id"]
+    completed = subprocess.Popen(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1,
+        env=child_env,
+    )
+    stdout_tail = []
+    stderr_tail = []
+
+    def forward(stream, destination, tail, limit):
+        try:
+            for line in iter(stream.readline, ""):
+                destination.write(line)
+                destination.flush()
+                _tail_append(tail, line, limit)
+        finally:
+            stream.close()
+
+    stdout_thread = threading.Thread(
+        target=forward,
+        args=(completed.stdout, sys.stdout, stdout_tail, 4000),
+    )
+    stderr_thread = threading.Thread(
+        target=forward,
+        args=(completed.stderr, sys.stderr, stderr_tail, 8000),
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    returncode = completed.wait()
+    stdout_thread.join()
+    stderr_thread.join()
     usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     return {
         "run_id": task["run_id"],
-        "status": "success" if completed.returncode == 0 else "failed",
+        "status": "success" if returncode == 0 else "failed",
         "runtime_sec": time.monotonic() - started,
         "cpu_user_sec": usage_after.ru_utime - usage_before.ru_utime,
         "cpu_system_sec": usage_after.ru_stime - usage_before.ru_stime,
         # Linux reports ru_maxrss in KiB. Project mode currently launches one
         # analysis subprocess per fresh worker, so this is that run's peak RSS.
         "peak_rss_kib": usage_after.ru_maxrss,
-        "returncode": completed.returncode,
-        "error": None if completed.returncode == 0 else completed.stderr[-8000:],
-        "stdout_tail": completed.stdout[-4000:],
-        "stderr_tail": completed.stderr[-4000:],
+        "returncode": returncode,
+        "error": None if returncode == 0 else "".join(stderr_tail),
+        "stdout_tail": "".join(stdout_tail),
+        "stderr_tail": "".join(stderr_tail),
         "paths": task["paths"],
         "command": command,
     }
@@ -158,6 +203,8 @@ def _command_for_run(run, paths, options):
         options["mode"],
         "--max-charge",
         str(options.get("max_charge", 7)),
+        "--log-level",
+        options.get("log_level", "info"),
     ]
     if options["overwrite"]:
         command.append("--overwrite")
@@ -726,6 +773,19 @@ def run_project(manifest, output_dir, project_db, **options):
     ).resolve()
     effective_workers = effective_worker_budget(int(options.get("workers", 4)))
     options["_effective_workers"] = effective_workers
+    logger.debug(
+        "Project start: manifest=%s output_dir=%s project_db=%s runs=%d mode=%s "
+        "format=%s requested_workers=%d effective_workers=%d resume=%s",
+        manifest,
+        output_dir,
+        database,
+        len(runs),
+        options.get("mode"),
+        options.get("format"),
+        options.get("workers"),
+        effective_workers,
+        options.get("resume"),
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     for run in runs:
         if not run.mzml_path.is_file():
@@ -742,6 +802,14 @@ def run_project(manifest, output_dir, project_db, **options):
         paths = _run_paths(run, output_dir, cache_workspace, options.get("format", "parquet"))
         Path(paths["run_dir"]).mkdir(parents=True, exist_ok=True)
         command = _command_for_run(run, paths, options)
+        logger.debug(
+            "Project run prepared: run_id=%s input=%s output=%s cache=%s command=%s",
+            run.run_id,
+            run.mzml_path,
+            paths["run_output"] or paths["features"],
+            paths["raw_ms1_cache"],
+            command,
+        )
         resume_record = successful.get(run.run_id)
         required_paths = [paths["run_output"] or paths["features"]]
         if options["mode"] == "hybrid":
@@ -755,6 +823,7 @@ def run_project(manifest, output_dir, project_db, **options):
             and all(Path(path).is_file() for path in required_paths)
         )
         if resume_valid:
+            logger.debug("Project run %s: resume signature and outputs match", run.run_id)
             skipped[index] = {
                 "run_id": run.run_id,
                 "status": "skipped_resume",
@@ -783,6 +852,13 @@ def run_project(manifest, output_dir, project_db, **options):
                 },
             )
         )
+
+    logger.debug(
+        "Project scheduling: pending_runs=%d resumed_runs=%d allocations=%s",
+        len(tasks),
+        len(skipped),
+        worker_slot_allocations(effective_workers, len(tasks)),
+    )
 
     def task_arguments():
         for _index, task in tasks:
@@ -816,6 +892,17 @@ def run_project(manifest, output_dir, project_db, **options):
                 "paths": task["paths"],
                 "command": task["command"],
             }
+        logger.debug(
+            "Project child complete: run_id=%s status=%s runtime_sec=%s returncode=%s "
+            "allocated_workers=%s stdout_tail_chars=%d stderr_tail_chars=%d",
+            value["run_id"],
+            value["status"],
+            value.get("runtime_sec"),
+            value.get("returncode"),
+            value.get("allocated_workers"),
+            len(value.get("stdout_tail", "")),
+            len(value.get("stderr_tail", "")),
+        )
         results[manifest_index] = value
     for index, run in enumerate(runs):
         if index not in results:
