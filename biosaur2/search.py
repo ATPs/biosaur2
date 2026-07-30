@@ -20,7 +20,22 @@ class _HelpFormatter(
     argparse.ArgumentDefaultsHelpFormatter,
     argparse.RawDescriptionHelpFormatter,
 ):
-    pass
+    def _get_help_string(self, action):
+        help_text = action.help or ''
+        if (
+            '%(default)' in help_text
+            or '(default:' in help_text
+            or action.default is argparse.SUPPRESS
+        ):
+            return help_text
+        if not action.option_strings and action.nargs not in ('?', '*'):
+            return help_text
+        default = action.default
+        if default == '':
+            default = 'empty'
+        elif default is None or default == []:
+            default = 'none'
+        return '%s (default: %s)' % (help_text, default)
 
 
 def _get_biosaur2_version():
@@ -203,8 +218,17 @@ def run():
 
         return run_build_manifest_alias(sys.argv[2:])
     parser = argparse.ArgumentParser(
-        description='Detect isotope features in centroided LC-MS1 mzML data.',
+        description=(
+            'Detect and quantify isotope features in centroided LC-MS1 mzML '
+            'data. Legacy detection is the default; use --feature-mode hybrid '
+            'for identification/MS2-guided residual feature detection.'
+        ),
         epilog='''
+Input notes:
+  mzML/mzML.gz input should contain centroided MS1 spectra. Hybrid mode also
+  reads DDA MS2 precursor metadata and optionally a same-run Percolator target
+  PSM table. Profile, DIA/DIA2, and reusable hills paths are experimental.
+
 Output contract:
   Plain invocation writes one compact features.tsv file. Every requested
   Parquet product uses DuckDB V2 with ZSTD level 6, including
@@ -228,10 +252,37 @@ Output contract:
   adds the original four nested diagnostic columns to the same feature file.
 
 Examples:
+  # Ordinary untargeted LC-MS1 feature detection (default legacy mode)
   biosaur2 input.mzML.gz
+
+  # Compact Parquet feature output for downstream analysis
   biosaur2 input.mzML.gz --feature-format parquet
+
+  # Hybrid DDA without PSMs: strict features plus generic MS2 evidence
+  biosaur2 input.mzML.gz --feature-mode hybrid --feature-format parquet
+
+  # Hybrid DDA with q-filtered same-run Percolator PSMs
+  biosaur2 input.mzML.gz --feature-mode hybrid \\
+    --psm-path input.percolator.target.psms.tsv \\
+    --psm-q-value-max 0.01 --fixed-mod C=UNIMOD:4 \\
+    --quant-method envelope_area --feature-format parquet
+
+  # Repeated hybrid tuning: raw cache is required by strict-stage cache
+  biosaur2 input.mzML.gz --feature-mode hybrid \\
+    --raw-ms1-cache-dir cache/input.raw \\
+    --hybrid-stage-cache-dir cache/input.strict \\
+    --hybrid-candidate-cache-dir cache/input.candidates \\
+    --feature-format parquet
+
+  # Smaller feature payload when point arrays are not needed
   biosaur2 input.mzML.gz --feature-format parquet --no-mono-hills
+
+  # Put requested ordinary products in one DuckDB database
   biosaur2 input.mzML.gz --duckdb-output output.biosaur2.duckdb
+
+Use `biosaur2 project --help` for manifest-driven multi-run processing.
+See README.md for input examples and option guidance, design.md for the
+algorithm, and updates/2026-07-30.md for validation results.
     ''',
         formatter_class=_HelpFormatter)
 
@@ -245,30 +296,30 @@ Examples:
         help='input files: mzML (.mzML/.mzML.gz) or hills (Experimental) (.hills.tsv/.hills.parquet/.hills.npz)',
         nargs='+',
     )
-    parser.add_argument('-mini', help='min intensity', default=1, type=float)
-    parser.add_argument('-minmz', help='min mz', default=350, type=float)
-    parser.add_argument('-maxmz', help='max mz', default=1500, type=float)
-    parser.add_argument('-pasefmini', help='min intensity after combining hills in PASEF analysis', default=100, type=float)
-    parser.add_argument('-htol', help='mass accuracy for hills in ppm', default=8, type=float)
-    parser.add_argument('-itol', help='mass accuracy for isotopes in ppm', default=8, type=float)
-    parser.add_argument('-ignore_iso_calib', help='Turn off accurate isotope error estimation', action='store_true')
-    parser.add_argument('-use_hill_calib', help='Experimental. Turn on accurate hills error estimation', action='store_true')
-    parser.add_argument('-paseftol', help='ion mobility accuracy for hills', default=0.05, type=float)
-    parser.add_argument('-nm', help='negative mode. 1-true, 0-false', default=0, type=int)
-    parser.add_argument('-o', help='path to output features file', default='')
+    parser.add_argument('-mini', help='minimum centroid intensity considered during hill detection', default=1, type=float)
+    parser.add_argument('-minmz', help='lower m/z boundary for MS1 feature detection', default=350, type=float)
+    parser.add_argument('-maxmz', help='upper m/z boundary for MS1 feature detection', default=1500, type=float)
+    parser.add_argument('-pasefmini', help='minimum intensity after combining PASEF/ion-mobility hills', default=100, type=float)
+    parser.add_argument('-htol', help='maximum point-to-hill m/z deviation in ppm', default=8, type=float)
+    parser.add_argument('-itol', help='maximum isotope-envelope mass deviation in ppm', default=8, type=float)
+    parser.add_argument('-ignore_iso_calib', help='disable run-specific isotope mass-error calibration and use configured tolerances', action='store_true')
+    parser.add_argument('-use_hill_calib', help='enable experimental run-specific hill mass-error calibration', action='store_true')
+    parser.add_argument('-paseftol', help='1/K0 ion-mobility tolerance used to connect PASEF hill points', default=0.05, type=float)
+    parser.add_argument('-nm', help='ionization polarity selector: 0=positive, 1=negative', default=0, type=int)
+    parser.add_argument('-o', help='single-input feature path; with multiple inputs this must be an output directory; empty writes beside the input', default='')
     parser.add_argument('-iuse', help='isotopes used for intensity and area_sum: -1=all assigned, 0=mono only, N=mono plus N isotopes', default=-1, type=int)
     parser.add_argument('-hvf', help='Threshold to split hills into multiple if local minimum intensity multiplied by hvf is less than both surrounding local maximums', default=1.3, type=float)
     parser.add_argument('-ivf', help='Threshold to split isotope pattern into multiple features if local minimum intensity multiplied by ivf is less right local maximum', default=5.0, type=float)
-    parser.add_argument('-minlh', help='minimum length for hill', default=2, type=int)
-    parser.add_argument('-pasefminlh', help='minimum length for pasef hill', default=1, type=int)
-    parser.add_argument('-cmin', help='min charge', default=1, type=int)
+    parser.add_argument('-minlh', help='minimum number of MS1 points in an ordinary hill', default=2, type=int)
+    parser.add_argument('-pasefminlh', help='minimum number of points in a PASEF hill', default=1, type=int)
+    parser.add_argument('-cmin', help='minimum feature/precursor charge hypothesis', default=1, type=int)
     parser.add_argument(
         '-cmax', '--max-charge', '--max_charge', dest='cmax',
-        help='maximum precursor/feature charge (default: 7)',
+        help='maximum feature/precursor charge hypothesis',
         default=7,
         type=int,
     )
-    parser.add_argument('-nprocs', help='number of processes', default=4, type=int)
+    parser.add_argument('-nprocs', help='internal worker-process count for one file', default=4, type=int)
     parser.add_argument(
         '--run-workers',
         help='bounded file-level worker count; each file uses one detection worker when greater than one',
@@ -282,11 +333,11 @@ Examples:
     )
     parser.add_argument('-dia',  help='create mgf file for DIA MS/MS. Experimental', action='store_true')
     parser.add_argument('-dia2',  help='create mgf file for DIA MS/MS with no look at MS1 spectra. Experimental', action='store_true')
-    parser.add_argument('-diahtol', help='mass accuracy for DIA hills in ppm', default=25, type=float)
-    parser.add_argument('-diaminlh', help='minimum length for dia hill', default=1, type=int)
-    parser.add_argument('-diadynrange', help='diadynrange', default=1000, type=int)
-    parser.add_argument('-min_ms2_peaks', help='min_ms2_peaks', default=5, type=int)
-    parser.add_argument('-mgf', help='path to output mgf file', default='')
+    parser.add_argument('-diahtol', help='experimental DIA hill mass tolerance in ppm', default=25, type=float)
+    parser.add_argument('-diaminlh', help='experimental minimum DIA hill length', default=1, type=int)
+    parser.add_argument('-diadynrange', help='experimental DIA dynamic-range limit', default=1000, type=int)
+    parser.add_argument('-min_ms2_peaks', help='minimum fragment-peak count for an experimental MGF entry', default=5, type=int)
+    parser.add_argument('-mgf', help='experimental DIA/DIA2 MGF output path; empty derives it from the input', default='')
     parser.add_argument('-debug', help='log debugging information', action='store_true')
     parser.add_argument('-tof', help='smart tof processing. Experimental', action='store_true')
     parser.add_argument('-profile', help='profile processing. Experimental', action='store_true')
@@ -317,30 +368,47 @@ Examples:
     )
     parser.add_argument(
         '--ms2-seed', '--ms2_seed', dest='ms2_seed', action='store_true',
-        help='use eligible DDA MS2 precursor metadata as bounded ordering evidence',
+        help='compatibility alias for --feature-mode weak-ms2; use eligible DDA precursor metadata as bounded ordering evidence',
     )
     parser.add_argument(
         '--feature-mode',
         choices=('legacy', 'weak-ms2', 'hybrid'),
         default='legacy',
-        help='feature evidence mode; --ms2-seed remains an alias for weak-ms2',
+        help='legacy=strict untargeted; weak-ms2=compatibility precursor seed; hybrid=direct/generic MS2 residual workflow',
     )
-    parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM table for hybrid mode')
-    parser.add_argument('--psm-q-value-max', type=float, default=0.01)
-    parser.add_argument('--psm-pep-max', type=float, default=None)
+    parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM TSV (optionally compressed); empty runs hybrid without direct PSM assays')
+    parser.add_argument('--psm-q-value-max', type=float, default=0.01, help='maximum Percolator PSM q-value accepted before direct-assay construction')
+    parser.add_argument('--psm-pep-max', type=float, default=None, help='optional maximum PSM posterior error probability; none disables the additional PEP filter')
     parser.add_argument('--fixed-mod', action='append', default=[], help='explicit hybrid fixed modification SITE=MOD; repeatable')
     parser.add_argument(
         '--quant-method',
         choices=('envelope_area', 'mono_area', 'envelope_apex'),
         default='envelope_area',
+        help='hybrid feature abundance: assigned envelope area, monoisotopic area, or common-scan envelope apex',
     )
     parser.add_argument(
-        '--feature-baseline', choices=('none', 'edge_linear'), default=None
+        '--feature-baseline', choices=('none', 'edge_linear'), default=None,
+        help=(
+            'hybrid quantification baseline preprocessing '
+            '(default: automatic; edge_linear in hybrid mode, none otherwise)'
+        ),
     )
-    parser.add_argument('--direct-id', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--external-id', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--generic-ms2-refine', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--generic-q-value-max', type=float, default=0.01)
+    parser.add_argument(
+        '--direct-id', action=argparse.BooleanOptionalAction, default=True,
+        help='enable/disable q-filtered same-run PSM assay association and local recovery in hybrid mode',
+    )
+    parser.add_argument(
+        '--external-id', action=argparse.BooleanOptionalAction, default=True,
+        help='project compatibility switch for aligned external assays; single-run commands have no donor runs',
+    )
+    parser.add_argument(
+        '--generic-ms2-refine', action=argparse.BooleanOptionalAction, default=True,
+        help='enable/disable unidentified-MS2 charge/C13 hypotheses, target-decoy association, and local recovery in hybrid mode',
+    )
+    parser.add_argument(
+        '--generic-q-value-max', type=float, default=0.01,
+        help='maximum extraction q-value for generic MS2 target/decoy families; independent of the PSM q-value',
+    )
     parser.add_argument(
         '--relaxed-ms2-feature',
         action=argparse.BooleanOptionalAction,
@@ -375,12 +443,12 @@ Examples:
     )
     parser.add_argument(
         '--ms2-seed-ppm', '--ms2_seed_ppm', dest='ms2_seed_ppm', type=float,
-        default=10.0, help='selected-ion precursor tolerance for --ms2-seed',
+        default=10.0, help='selected-ion precursor tolerance in ppm for weak/generic MS2 hypotheses',
     )
     parser.add_argument(
         '--ms2-seed-rt-tolerance-sec', '--ms2_seed_rt_tolerance_sec',
         dest='ms2_seed_rt_tolerance_sec', type=float, default=120.0,
-        help='candidate RT interval tolerance in seconds for --ms2-seed',
+        help='initial RT search tolerance in seconds around an MS2 event; calibrated retries may tighten it',
     )
     parser.add_argument(
         '--ms2-seed-isotope-errors', '--ms2_seed_isotope_errors',

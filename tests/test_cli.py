@@ -83,8 +83,30 @@ def test_help_documents_compact_output_contract():
         "--max-charge",
         "--relaxed-ms2-feature",
         "--hybrid-candidate-cache-dir",
+        "Input notes:",
+        "Hybrid DDA with q-filtered same-run Percolator PSMs",
+        "design.md",
+        "updates/2026-07-30.md",
     ):
         assert text in result.stdout
+
+
+def test_hybrid_help_explains_defaults_and_evidence_controls():
+    result = _run("--help")
+    assert result.returncode == 0
+    help_text = " ".join(result.stdout.split())
+    for text in (
+        "(default: legacy)",
+        "(default: 0.01)",
+        "(default: 120.0)",
+        "(default: 7)",
+        "(default: envelope_area)",
+        "(default: False)",
+        "same-run Percolator",
+        "target/decoy",
+        "no donor runs",
+    ):
+        assert text in help_text
 
 
 def test_ms2_and_file_parallelism_reject_unsupported_modes(tmp_path):
@@ -164,6 +186,13 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     assert "--allow-nested-parallelism" in help_result.stdout
     assert "--max-charge" in help_result.stdout
     assert "--relaxed-ms2-feature" in help_result.stdout
+    assert "(default: 120.0)" in help_result.stdout
+    assert "(default: 0.01)" in help_result.stdout
+    assert "(default: envelope_area)" in help_result.stdout
+    assert "input project manifest TSV (required)" in help_result.stdout
+    assert "recipient-run m/z tolerance" in help_result.stdout
+    assert "aligned external assays" in help_result.stdout
+    assert "README.md and examples/hybrid_project_manifest.tsv" in help_result.stdout
 
     result = _run(
         "project",
@@ -179,3 +208,19 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     )
     assert result.returncode != 0
     assert "finite nonnegative number" in result.stderr
+
+
+def test_project_manifest_help_documents_inputs_and_defaults():
+    result = _run("project", "make-manifest", "--help")
+    assert result.returncode == 0
+    for text in (
+        "directory containing .mzML or .mzML.gz files",
+        "directory containing PSM tables paired by exact",
+        "normalized stem (required)",
+        "built-in Percolator/PSM suffixes",
+        "(default: None)",
+        "output manifest TSV path (required)",
+        "atomically replace an existing manifest",
+        "(default:",
+    ):
+        assert text in result.stdout
