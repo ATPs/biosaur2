@@ -465,8 +465,18 @@ class ResidualMS1Ledger:
         """Return a RawMS1Store with the current residual intensity."""
 
         residual = np.asarray(self.store.intensity, dtype=np.float64).copy()
-        for point_index, amount in self._claimed.items():
-            residual[point_index] = max(0.0, residual[point_index] - amount)
+        if self._claimed:
+            point_indices = np.fromiter(
+                self._claimed, dtype=np.intp, count=len(self._claimed)
+            )
+            claimed = np.fromiter(
+                self._claimed.values(),
+                dtype=np.float64,
+                count=len(self._claimed),
+            )
+            residual[point_indices] = np.maximum(
+                0.0, residual[point_indices] - claimed
+            )
         return RawMS1Store(
             offsets=self.store.offsets,
             mz=self.store.mz,

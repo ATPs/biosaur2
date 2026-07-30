@@ -73,6 +73,20 @@ def test_residual_ledger_supports_conserved_intensity_split():
     )
 
 
+def test_materialized_residual_matches_sparse_claims_exactly():
+    ledger = ResidualMS1Ledger(_store())
+    trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
+    assert ledger.allocate_component(
+        "partial-component", (trace,), 0, [trace.intensity * 0.25]
+    ).accepted
+
+    materialized = ledger.materialize()
+    expected = ledger.store.intensity.copy()
+    for point_index, claimed in ledger._claimed.items():
+        expected[point_index] = max(0.0, expected[point_index] - claimed)
+    np.testing.assert_allclose(materialized.intensity, expected)
+
+
 def test_residual_overallocation_fails_atomically():
     ledger = ResidualMS1Ledger(_store())
     trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
