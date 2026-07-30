@@ -3,7 +3,7 @@
 from .hybrid_runtime import *
 
 
-def run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_feature_id, args):
+def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_feature_id, args):
     from collections import Counter, defaultdict
 
     hybrid_started = time.monotonic()
@@ -113,6 +113,54 @@ def run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_f
     recovered_quant_rows = []
     direct_status_counts = Counter()
     direct_retry_counts = Counter()
+    direct_local_started = time.monotonic()
+    state = {
+        "hybrid_started": hybrid_started,
+        "strict_records": strict_records,
+        "strict_index": strict_index,
+        "strict_hill_claims": strict_hill_claims,
+        "residual_ledger": residual_ledger,
+        "residual_allocation_status_counts": residual_allocation_status_counts,
+        "strict_ownership": strict_ownership,
+        "local_candidate_cache_telemetry": local_candidate_cache_telemetry,
+        "direct_processed_competitors": direct_processed_competitors,
+        "direct_processed_by_psm": direct_processed_by_psm,
+        "base_ppm": base_ppm,
+        "base_rt_tolerance": base_rt_tolerance,
+        "direct_calibration": direct_calibration,
+        "direct_match_results": direct_match_results,
+        "audit_by_event": audit_by_event,
+        "assay_rows": assay_rows,
+        "recovered": recovered,
+        "recovered_feature_rows": recovered_feature_rows,
+        "recovered_quant_rows": recovered_quant_rows,
+        "direct_retry_counts": direct_retry_counts,
+        "support": support,
+        "next_feature_id": next_feature_id,
+    }
+    return _recover_direct_assays(run_id, ingestion, assay_result, args, state)
+
+
+def _recover_direct_assays(run_id, ingestion, assay_result, args, state):
+    strict_index = state["strict_index"]
+    strict_hill_claims = state["strict_hill_claims"]
+    residual_ledger = state["residual_ledger"]
+    residual_allocation_status_counts = state["residual_allocation_status_counts"]
+    local_candidate_cache_telemetry = state["local_candidate_cache_telemetry"]
+    direct_processed_by_psm = state["direct_processed_by_psm"]
+    base_ppm = state["base_ppm"]
+    base_rt_tolerance = state["base_rt_tolerance"]
+    direct_calibration = state["direct_calibration"]
+    direct_match_results = state["direct_match_results"]
+    audit_by_event = state["audit_by_event"]
+    assay_rows = state["assay_rows"]
+    recovered = state["recovered"]
+    recovered_feature_rows = state["recovered_feature_rows"]
+    recovered_quant_rows = state["recovered_quant_rows"]
+    direct_retry_counts = state["direct_retry_counts"]
+    support = state["support"]
+    next_feature_id = state["next_feature_id"]
+    direct_status_counts = Counter()
     direct_local_started = time.monotonic()
     for assay_id, assay in enumerate(assay_result.assays, start=1):
         assay_rows.append(
@@ -381,7 +429,14 @@ def run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_f
         len(recovered),
         dict(sorted(direct_retry_counts.items())),
     )
+    state["next_feature_id"] = next_feature_id
+    return _quantify_direct_stage(run_id, args, state)
 
+
+def _quantify_direct_stage(run_id, args, state):
+    strict_records = state["strict_records"]
+    support = state["support"]
+    recovered_quant_rows = state["recovered_quant_rows"]
     strict_quant_rows = []
     logger.info("Hybrid quantifying %d strict features", len(strict_records))
     strict_quantification_started = time.monotonic()
@@ -419,28 +474,16 @@ def run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_f
             by_id[feature_id]["supporting_psm_count"] = len(assays)
             by_id[feature_id]["supporting_ms2_count"] = len({assay.ms2_event_id for assay in assays})
 
+    state.pop("direct_match_results", None)
+    return {**state, "strict_quant_rows": strict_quant_rows}
 
-    return {
-        "hybrid_started": hybrid_started,
-        "strict_records": strict_records,
-        "strict_index": strict_index,
-        "strict_hill_claims": strict_hill_claims,
-        "residual_ledger": residual_ledger,
-        "residual_allocation_status_counts": residual_allocation_status_counts,
-        "strict_ownership": strict_ownership,
-        "local_candidate_cache_telemetry": local_candidate_cache_telemetry,
-        "direct_processed_competitors": direct_processed_competitors,
-        "direct_processed_by_psm": direct_processed_by_psm,
-        "base_ppm": base_ppm,
-        "base_rt_tolerance": base_rt_tolerance,
-        "direct_calibration": direct_calibration,
-        "audit_by_event": audit_by_event,
-        "assay_rows": assay_rows,
-        "recovered": recovered,
-        "recovered_feature_rows": recovered_feature_rows,
-        "recovered_quant_rows": recovered_quant_rows,
-        "direct_retry_counts": direct_retry_counts,
-        "support": support,
-        "strict_quant_rows": strict_quant_rows,
-        "next_feature_id": next_feature_id,
-    }
+
+def run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_feature_id, args):
+    return _prepare_and_run_direct_stage(
+        run_id=run_id,
+        ingestion=ingestion,
+        assay_result=assay_result,
+        strict_contexts=strict_contexts,
+        next_feature_id=next_feature_id,
+        args=args,
+    )

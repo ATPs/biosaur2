@@ -422,18 +422,7 @@ def _execute_inputs(args, parser, logger):
         raise RuntimeError('%d input file(s) failed; see batch report for details.' % len(failed))
 
 
-def run():
-    if len(sys.argv) > 1 and sys.argv[1] == 'project':
-        from .project_cli import run_project_cli
-
-        return run_project_cli(sys.argv[2:])
-    if len(sys.argv) > 1 and sys.argv[1] == 'build-manifest':
-        from .project_cli import run_build_manifest_alias
-
-        return run_build_manifest_alias(sys.argv[2:])
-    show_all = '--help-all' in sys.argv[1:]
-    if show_all:
-        sys.argv = [value for value in sys.argv if value != '--help-all'] + ['--help']
+def _build_parser(show_all):
     help_epilog = '''
 Input notes:
   mzML/mzML.gz input should contain centroided MS1 spectra. Hybrid mode also
@@ -712,6 +701,10 @@ Advanced output notes:
     parser.add_argument('--parquet-row-group-size', type=_positive_integer, default=122880, help=_advanced_help(show_all, 'positive Parquet row-group size'))
     parser.add_argument('--parquet-sort', choices=['none', 'mz_rt', 'rt_mz'], default='mz_rt', help=_advanced_help(show_all, 'deterministic physical feature order'))
     parser.add_argument('--overwrite', action='store_true', help='atomically replace existing output targets')
+    return parser
+
+
+def _run_with_parser(parser):
     args = vars(parser.parse_args())
     args['format'] = args['format'] or (
         'parquet' if args['feature_mode'] == 'hybrid' else 'tsv'
@@ -830,6 +823,21 @@ Advanced output notes:
     finally:
         if cache_workspace is not None:
             cache_workspace.cleanup()
+
+
+def run():
+    if len(sys.argv) > 1 and sys.argv[1] == 'project':
+        from .project_cli import run_project_cli
+
+        return run_project_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == 'build-manifest':
+        from .project_cli import run_build_manifest_alias
+
+        return run_build_manifest_alias(sys.argv[2:])
+    show_all = '--help-all' in sys.argv[1:]
+    if show_all:
+        sys.argv = [value for value in sys.argv if value != '--help-all'] + ['--help']
+    return _run_with_parser(_build_parser(show_all))
 
 if __name__ == '__main__':
     run()

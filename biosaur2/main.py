@@ -352,17 +352,13 @@ def _final_feature_key(candidate, hills_dict, RT_dict, data_start_id):
         _candidate_hill_ids(candidate),
     )
 
-def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1, data_for_analyse_tmp=None, direct_assays=(), direct_events_by_id=None, direct_competitor_sink=None):
-    if not len(hills_dict.get('hills_idx_array_unique', ())):
-        utils.write_output([], args, write_header)
-        return set(), {}, next_feature_idx, []
-
+def _generate_initial_isotope_candidates(
+    hills_dict, faims_val, mz_step, paseftol, args
+):
     isotopes_mass_accuracy = args['itol']
-
     min_charge = args['cmin']
     max_charge = args['cmax']
     ivf = args['ivf']
-
     isotopes_list = list(range(10))
     averagine_mass = 111.1254
     averagine_C = 4.9384
@@ -433,11 +429,11 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
 
     for candidate in ready:
         candidate['FAIMS'] = faims_val
-
-
     logger.info('Number of potential isotope clusters: %d', len(ready))
+    return ready
 
 
+def _calibrate_and_filter_isotope_candidates(ready, faims_val, args):
     isotope_calibration_override = args.get(
         '_isotope_calibration_override'
     )
@@ -517,25 +513,18 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
     logger.info('Average mass std between monoisotopic and first 13C isotope: %.3f ppm', isotopes_mass_error_map[1][1])
 
     logger.debug(isotopes_mass_error_map)
-
     max_l = len(ready)
     cur_l = 0
-
     while cur_l < max_l:
         pep_feature = ready[cur_l]
-
         tmp = []
-
         for cand in pep_feature['isotopes']:
             map_val = isotopes_mass_error_map[cand['isotope_number']]
-
             if abs(cand['mass_diff_ppm'] - map_val[0]) <= 5 * map_val[1]:
                 tmp.append(cand)
             else:
                 break
-
         tmp_n_isotopes = len(tmp)
-
         if tmp_n_isotopes:
             all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
             all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
@@ -547,23 +536,27 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                 ready[cur_l]['isotopes'] = tmp
                 ready[cur_l]['nIsotopes'] = tmp_n_isotopes + 1
                 ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
-
-
             else:
                 del ready[cur_l]
                 max_l -= 1
                 cur_l -= 1
-
-
         else:
             del ready[cur_l]
             max_l -= 1
             cur_l -= 1
-
         cur_l += 1
-
     logger.info('Number of potential isotope clusters after smart mass accuracy for isotopes: %d', len(ready))
+    logger.info(
+        'Number of potential isotope clusters after smart mass accuracy for isotopes: %d',
+        len(ready),
+    )
+    return ready
 
+
+def _capture_direct_competitors(
+    ready, hills_dict, RT_dict, data_for_analyse_tmp, args, direct_assays,
+    direct_events_by_id, direct_competitor_sink,
+):
     captured_direct_competitors = ()
     if direct_competitor_sink is not None and direct_assays:
         captured_direct_competitors = (
@@ -584,14 +577,17 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                 top_k=6,
             )
         )
+    return captured_direct_competitors
 
+
+def _select_nonconflicting_isotope_candidates(
+    ready, hills_dict, RT_dict, data_start_id
+):
     max_l = len(ready)
     cur_l = 0
-
     func_for_sort = lambda candidate: _candidate_conflict_key(
         candidate, hills_dict
     )
-
     ready_final = []
     ready_set = set()
     if not ready:
@@ -618,20 +614,15 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                     del ready[cur_l]
                     max_l -= 1
                     cur_l -= 1
-
                 else:
                     tmp = []
-
                     for cand in pep_feature['isotopes']:
                         if cand['isotope_hill_idx'] not in ready_set:
                             tmp.append(cand)
                         else:
                             break
-
                     tmp_n_isotopes = len(tmp)
-
                     if tmp_n_isotopes:
-
                         all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
                         all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
                         all_exp_intensity = all_exp_intensity[:tmp_n_isotopes+1]
@@ -646,8 +637,6 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                             del ready[cur_l]
                             max_l -= 1
                             cur_l -= 1
-
-
                     else:
                         del ready[cur_l]
                         max_l -= 1
@@ -656,17 +645,20 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                 del ready[cur_l]
                 max_l -= 1
                 cur_l -= 1
-
             cur_l += 1
-
     logger.info('Number of detected isotope clusters: %d', len(ready_final))
-
     ready_final.sort(
         key=lambda candidate: _final_feature_key(
             candidate, hills_dict, RT_dict, data_start_id
         )
     )
+    logger.info('Number of detected isotope clusters: %d', len(ready_final))
+    return ready_set, ready_final
 
+
+def _record_losing_direct_competitors(
+    ready_final, captured_direct_competitors, direct_competitor_sink
+):
     if direct_competitor_sink is not None:
         accepted_candidate_keys = {
             _candidate_hill_ids(candidate) + (int(candidate['charge']),)
@@ -702,6 +694,11 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
             direct_competitor_sink.append(competitor)
             losing_per_psm[psm_id] = count + 1
 
+
+def _assign_feature_indices_and_write(
+    ready_final, hills_dict, faims_val, RT_dict, data_start_id, write_header,
+    args, next_feature_idx, data_for_analyse_tmp,
+):
     hill_to_feature_idx = {}
     for offset, pep_feature in enumerate(ready_final):
         feature_idx = next_feature_idx + offset
@@ -731,6 +728,32 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
         )
 
         utils.write_output(peptide_features, args, write_header)
+    return hill_to_feature_idx, next_feature_idx
+
+
+def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1, data_for_analyse_tmp=None, direct_assays=(), direct_events_by_id=None, direct_competitor_sink=None):
+    if not len(hills_dict.get('hills_idx_array_unique', ())):
+        utils.write_output([], args, write_header)
+        return set(), {}, next_feature_idx, []
+
+    ready = _generate_initial_isotope_candidates(
+        hills_dict, faims_val, mz_step, paseftol, args
+    )
+    ready = _calibrate_and_filter_isotope_candidates(ready, faims_val, args)
+    captured_direct_competitors = _capture_direct_competitors(
+        ready, hills_dict, RT_dict, data_for_analyse_tmp, args, direct_assays,
+        direct_events_by_id, direct_competitor_sink,
+    )
+    ready_set, ready_final = _select_nonconflicting_isotope_candidates(
+        ready, hills_dict, RT_dict, data_start_id
+    )
+    _record_losing_direct_competitors(
+        ready_final, captured_direct_competitors, direct_competitor_sink
+    )
+    hill_to_feature_idx, next_feature_idx = _assign_feature_indices_and_write(
+        ready_final, hills_dict, faims_val, RT_dict, data_start_id, write_header,
+        args, next_feature_idx, data_for_analyse_tmp,
+    )
 
     return ready_set, hill_to_feature_idx, next_feature_idx, ready_final
 
@@ -885,336 +908,301 @@ def process_file(args):
         md_correction_int = 1
 
     if input_file_path.lower().endswith('.mzml') or input_file_path.lower().endswith('.mzml.gz'):
-        write_header = True
-        strict_stage_payload = None
-        strict_stage_manifest = None
-        strict_stage_cache = args.get('hybrid_stage_cache_dir')
-        if strict_stage_cache and Path(strict_stage_cache).exists() and not Path(
-            strict_stage_cache
-        ).is_dir():
-            raise ValueError(
-                'strict stage cache path exists but is not a directory: %s'
-                % strict_stage_cache
-            )
-        if strict_stage_cache and Path(strict_stage_cache).is_dir():
-            logger.debug('Checking strict-stage cache: %s', strict_stage_cache)
-            strict_cache_started = _debug_stage_start(
-                'load_strict_stage_cache', path=strict_stage_cache
-            )
-            strict_stage_payload, strict_stage_manifest = load_strict_stage_cache(
-                strict_stage_cache, input_file_path, strict_stage_cache_args
-            )
-            raw_store = load_raw_ms1_cache(
-                args['raw_ms1_cache_dir'], input_file_path, mmap=True
-            )
-            _debug_stage_complete(
-                'load_strict_stage_cache',
-                strict_cache_started,
-                strict_feature_count=strict_stage_manifest['strict_feature_count'],
-            )
-            ingestion = MzMLIngestion(
-                [],
-                strict_stage_payload['ms1_rows'],
-                strict_stage_payload['ms2_rows'],
-                strict_stage_payload['ms1_metadata'],
-                raw_store,
-            )
-            logger.info(
-                'Reused strict-stage cache %s: %d strict features in %d contexts',
-                strict_stage_cache,
-                strict_stage_manifest['strict_feature_count'],
-                strict_stage_manifest['context_count'],
-            )
-            args['_strict_stage_cache'] = {
-                'status': 'reused',
-                'path': str(Path(strict_stage_cache).resolve()),
-                'payload_bytes': strict_stage_manifest['payload_bytes'],
-                'strict_feature_count': strict_stage_manifest[
-                    'strict_feature_count'
-                ],
-            }
-        else:
-            logger.debug('Ingesting mzML: raw_cache=%s', args.get('raw_ms1_cache_dir'))
-            ingestion_started = _debug_stage_start(
-                'ingest_mzml', raw_cache=args.get('raw_ms1_cache_dir')
-            )
-            ingestion = ingest_mzml(args)
-            _debug_stage_complete(
-                'ingest_mzml',
-                ingestion_started,
-                spectra=len(ingestion.spectra),
-                ms1_rows=len(ingestion.ms1_rows),
-                ms2_rows=len(ingestion.ms2_rows),
-            )
-        logger.debug(
-            'Ingestion complete: spectra=%d ms1_rows=%d ms2_rows=%d',
-            len(ingestion.spectra),
-            len(ingestion.ms1_rows),
-            len(ingestion.ms2_rows),
+        return _process_mzml_file(
+            args, input_file_path, strict_stage_cache_args, identification_result,
+            md_correction_int, process_started,
         )
-        if args.get('write_ms1', False):
-            utils.write_ms1_output(ingestion.ms1_rows, args)
-        if args.get('write_ms2', False):
-            utils.write_ms2_output(ingestion.ms2_rows, args)
-        data_for_analyse = ingestion.spectra
-        assay_result = AssayBuildResult((), (), {})
-        if args.get('feature_mode') == 'hybrid' and identification_result is not None:
-            direct_assay_started = _debug_stage_start(
-                'build_direct_assays', identification_count=len(identification_result.records)
-            )
-            mapping = map_identifications_to_ms2(
-                identification_result.records,
-                ingestion.ms2_rows,
-                run_id=input_stem(input_file_path),
-                max_unmapped_fraction=float(args.get('max_unmapped_psm_fraction', 0.05)),
-            )
-            assay_result = build_direct_assays(
-                mapping,
-                run_id=input_stem(input_file_path),
-                fixed_modifications=tuple(args.get('fixed_mod', ())),
-                precursor_ppm=float(args.get('direct_id_precursor_ppm', 5.0)),
-            )
-            args['_identification_mapping_summary'] = {
-                'mapped_count': mapping.mapped_count,
-                'unmapped_count': mapping.unmapped_count,
-                'status_counts': mapping.status_counts,
-            }
-            args['_direct_assay_summary'] = assay_result.status_counts
-            logger.debug(
-                'Direct-assay build complete: mapping=%s assays=%d audit_rows=%d statuses=%s',
-                args['_identification_mapping_summary'],
-                len(assay_result.assays),
-                len(assay_result.audit),
-                assay_result.status_counts,
-            )
-            _debug_stage_complete(
-                'build_direct_assays',
-                direct_assay_started,
-                assays=len(assay_result.assays),
-                audit_rows=len(assay_result.audit),
-            )
-        direct_events_by_id = {
-            int(event['ms2_event_id']): event
-            for event in ingestion.ms2_rows
+    if (
+        input_file_path.lower().endswith('.hills.tsv')
+        or input_file_path.lower().endswith('.hills.parquet')
+        or input_file_path.lower().endswith('.hills.npz')
+    ):
+        return _process_hills_file(
+            args, input_file_path, stop_after_hills, stop_after_logged,
+            next_feature_idx, next_hill_idx, process_started,
+        )
+
+
+def _prepare_mzml_processing(
+    args, input_file_path, strict_stage_cache_args, identification_result
+):
+    write_header = True
+    strict_stage_payload = None
+    strict_stage_manifest = None
+    strict_stage_cache = args.get('hybrid_stage_cache_dir')
+    if strict_stage_cache and Path(strict_stage_cache).exists() and not Path(
+        strict_stage_cache
+    ).is_dir():
+        raise ValueError(
+            'strict stage cache path exists but is not a directory: %s'
+            % strict_stage_cache
+        )
+    if strict_stage_cache and Path(strict_stage_cache).is_dir():
+        logger.debug('Checking strict-stage cache: %s', strict_stage_cache)
+        strict_cache_started = _debug_stage_start(
+            'load_strict_stage_cache', path=strict_stage_cache
+        )
+        strict_stage_payload, strict_stage_manifest = load_strict_stage_cache(
+            strict_stage_cache, input_file_path, strict_stage_cache_args
+        )
+        raw_store = load_raw_ms1_cache(
+            args['raw_ms1_cache_dir'], input_file_path, mmap=True
+        )
+        _debug_stage_complete(
+            'load_strict_stage_cache',
+            strict_cache_started,
+            strict_feature_count=strict_stage_manifest['strict_feature_count'],
+        )
+        ingestion = MzMLIngestion(
+            [],
+            strict_stage_payload['ms1_rows'],
+            strict_stage_payload['ms2_rows'],
+            strict_stage_payload['ms1_metadata'],
+            raw_store,
+        )
+        logger.info(
+            'Reused strict-stage cache %s: %d strict features in %d contexts',
+            strict_stage_cache,
+            strict_stage_manifest['strict_feature_count'],
+            strict_stage_manifest['context_count'],
+        )
+        args['_strict_stage_cache'] = {
+            'status': 'reused',
+            'path': str(Path(strict_stage_cache).resolve()),
+            'payload_bytes': strict_stage_manifest['payload_bytes'],
+            'strict_feature_count': strict_stage_manifest[
+                'strict_feature_count'
+            ],
+        }
+    else:
+        logger.debug('Ingesting mzML: raw_cache=%s', args.get('raw_ms1_cache_dir'))
+        ingestion_started = _debug_stage_start(
+            'ingest_mzml', raw_cache=args.get('raw_ms1_cache_dir')
+        )
+        ingestion = ingest_mzml(args)
+        _debug_stage_complete(
+            'ingest_mzml',
+            ingestion_started,
+            spectra=len(ingestion.spectra),
+            ms1_rows=len(ingestion.ms1_rows),
+            ms2_rows=len(ingestion.ms2_rows),
+        )
+    logger.debug(
+        'Ingestion complete: spectra=%d ms1_rows=%d ms2_rows=%d',
+        len(ingestion.spectra),
+        len(ingestion.ms1_rows),
+        len(ingestion.ms2_rows),
+    )
+    if args.get('write_ms1', False):
+        utils.write_ms1_output(ingestion.ms1_rows, args)
+    if args.get('write_ms2', False):
+        utils.write_ms2_output(ingestion.ms2_rows, args)
+    data_for_analyse = ingestion.spectra
+    assay_result = AssayBuildResult((), (), {})
+    if args.get('feature_mode') == 'hybrid' and identification_result is not None:
+        direct_assay_started = _debug_stage_start(
+            'build_direct_assays', identification_count=len(identification_result.records)
+        )
+        mapping = map_identifications_to_ms2(
+            identification_result.records,
+            ingestion.ms2_rows,
+            run_id=input_stem(input_file_path),
+            max_unmapped_fraction=float(args.get('max_unmapped_psm_fraction', 0.05)),
+        )
+        assay_result = build_direct_assays(
+            mapping,
+            run_id=input_stem(input_file_path),
+            fixed_modifications=tuple(args.get('fixed_mod', ())),
+            precursor_ppm=float(args.get('direct_id_precursor_ppm', 5.0)),
+        )
+        args['_identification_mapping_summary'] = {
+            'mapped_count': mapping.mapped_count,
+            'unmapped_count': mapping.unmapped_count,
+            'status_counts': mapping.status_counts,
+        }
+        args['_direct_assay_summary'] = assay_result.status_counts
+        logger.debug(
+            'Direct-assay build complete: mapping=%s assays=%d audit_rows=%d statuses=%s',
+            args['_identification_mapping_summary'],
+            len(assay_result.assays),
+            len(assay_result.audit),
+            assay_result.status_counts,
+        )
+        _debug_stage_complete(
+            'build_direct_assays',
+            direct_assay_started,
+            assays=len(assay_result.assays),
+            audit_rows=len(assay_result.audit),
+        )
+    direct_events_by_id = {
+        int(event['ms2_event_id']): event
+        for event in ingestion.ms2_rows
+    }
+
+    return ingestion, assay_result, direct_events_by_id, strict_stage_payload, strict_stage_cache
+
+
+def _run_cached_mzml_hybrid(
+    args, input_file_path, process_started, ingestion, assay_result,
+    strict_stage_payload,
+):
+    if strict_stage_payload is not None:
+        strict_contexts = list(strict_stage_payload['strict_contexts'])
+        manager = args.get('_output_manager')
+        if manager is None:
+            raise RuntimeError('Output manager is required.')
+        hybrid_started = _debug_stage_start(
+            'hybrid_postprocessing_from_cache', contexts=len(strict_contexts)
+        )
+        run_hybrid_postprocessing(
+            run_id=input_stem(input_file_path),
+            ingestion=ingestion,
+            assay_result=assay_result,
+            strict_contexts=strict_contexts,
+            manager=manager,
+            next_feature_id=int(
+                strict_stage_payload['next_feature_id']
+            ),
+            args=args,
+            final_strict_detector=_detect_final_residual_strict,
+        )
+        _debug_stage_complete(
+            'hybrid_postprocessing_from_cache', hybrid_started
+        )
+        _debug_stage_complete('process_file', process_started)
+        return
+
+
+
+def _process_mzml_faims_contexts(
+    args, ingestion, assay_result, direct_events_by_id, md_correction_int,
+    next_feature_idx, next_hill_idx, write_header, stop_after_hills,
+    stop_after_logged,
+):
+    data_for_analyse = ingestion.spectra
+    #Process faims
+
+    faims_groups = group_spectra_by_faims(data_for_analyse)
+    if len(faims_groups) > 1 or faims_groups[0][0] is not None:
+        logger.info('Detected FAIMS values: %s', [value for value, _ in faims_groups])
+
+    data_start_id = 0
+    strict_contexts = []
+
+    for faims_val, data_for_analyse_tmp in faims_groups:
+
+        context_started = _debug_stage_start(
+            'faims_context', faims=faims_val, spectra=len(data_for_analyse_tmp)
+        )
+
+        if len(faims_groups) > 1:
+            logger.info('Spectra analysis for CV = %s', faims_val)
+
+        RT_dict = {
+            local_index: spectrum['rt_sec']
+            for local_index, spectrum in enumerate(data_for_analyse_tmp)
         }
 
-        if strict_stage_payload is not None:
-            strict_contexts = list(strict_stage_payload['strict_contexts'])
-            manager = args.get('_output_manager')
-            if manager is None:
-                raise RuntimeError('Output manager is required.')
-            hybrid_started = _debug_stage_start(
-                'hybrid_postprocessing_from_cache', contexts=len(strict_contexts)
-            )
-            run_hybrid_postprocessing(
-                run_id=input_stem(input_file_path),
-                ingestion=ingestion,
-                assay_result=assay_result,
-                strict_contexts=strict_contexts,
-                manager=manager,
-                next_feature_id=int(
-                    strict_stage_payload['next_feature_id']
-                ),
-                args=args,
-                final_strict_detector=_detect_final_residual_strict,
-            )
-            _debug_stage_complete(
-                'hybrid_postprocessing_from_cache', hybrid_started
-            )
-            _debug_stage_complete('process_file', process_started)
-            return
 
-        #Process faims
+        hill_mass_accuracy = args['htol']
+        max_mz_value = 0
+        for z in data_for_analyse_tmp:
+            max_mz_value = max(max_mz_value, z['m/z array'].max())
 
-        faims_groups = group_spectra_by_faims(data_for_analyse)
-        if len(faims_groups) > 1 or faims_groups[0][0] is not None:
-            logger.info('Detected FAIMS values: %s', [value for value, _ in faims_groups])
+        mz_step = hill_mass_accuracy * 1e-6 * max_mz_value
+        logger.debug(
+            'Context start: faims=%s spectra=%d max_mz=%.6f mz_step=%.9f paseftol=%s',
+            faims_val,
+            len(data_for_analyse_tmp),
+            max_mz_value,
+            mz_step,
+            args['paseftol'],
+        )
 
-        data_start_id = 0
-        strict_contexts = []
+        #Process TOF
+        if args['tof']:
+            data_for_analyse_tmp = process_tof(data_for_analyse_tmp)
 
-        for faims_val, data_for_analyse_tmp in faims_groups:
+        #Process profile
+        if args['profile']:
+            data_for_analyse_tmp = process_profile(data_for_analyse_tmp)
 
-            context_started = _debug_stage_start(
-                'faims_context', faims=faims_val, spectra=len(data_for_analyse_tmp)
-            )
+        #Process ion mobility
 
-            if len(faims_groups) > 1:
-                logger.info('Spectra analysis for CV = %s', faims_val)
+        if all('ignore_ion_mobility' not in z for z in data_for_analyse_tmp):
+            centroid_pasef_data(data_for_analyse_tmp, args, mz_step)
+        else:
+            args['paseftol'] = 0
 
-            RT_dict = {
-                local_index: spectrum['rt_sec']
-                for local_index, spectrum in enumerate(data_for_analyse_tmp)
-            }
+        paseftol = args['paseftol']
 
+        if args['use_hill_calib']:
 
-            hill_mass_accuracy = args['htol']
-            max_mz_value = 0
-            for z in data_for_analyse_tmp:
-                max_mz_value = max(max_mz_value, z['m/z array'].max())
+            l_data = len(data_for_analyse_tmp)
 
-            mz_step = hill_mass_accuracy * 1e-6 * max_mz_value
-            logger.debug(
-                'Context start: faims=%s spectra=%d max_mz=%.6f mz_step=%.9f paseftol=%s',
-                faims_val,
-                len(data_for_analyse_tmp),
-                max_mz_value,
-                mz_step,
-                args['paseftol'],
-            )
+            if l_data <= 1000:
 
-            #Process TOF
-            if args['tof']:
-                data_for_analyse_tmp = process_tof(data_for_analyse_tmp)
-
-            #Process profile
-            if args['profile']:
-                data_for_analyse_tmp = process_profile(data_for_analyse_tmp)
-
-            #Process ion mobility
-
-            if all('ignore_ion_mobility' not in z for z in data_for_analyse_tmp):
-                centroid_pasef_data(data_for_analyse_tmp, args, mz_step)
+                hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp, args, mz_step, paseftol, md_correction_int=md_correction_int)
             else:
-                args['paseftol'] = 0
 
-            paseftol = args['paseftol']
+                hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp[int(l_data/2)-500:int(l_data/2)+500], args, mz_step, paseftol, md_correction_int=md_correction_int)
 
-            if args['use_hill_calib']:
-
-                l_data = len(data_for_analyse_tmp)
-
-                if l_data <= 1000:
-
-                    hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp, args, mz_step, paseftol, md_correction_int=md_correction_int)
-                else:
-
-                    hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp[int(l_data/2)-500:int(l_data/2)+500], args, mz_step, paseftol, md_correction_int=md_correction_int)
-
-                total_mass_diff = np.array(total_mass_diff)
-                counter_hills_idx = Counter(hills_dict['hills_idx_array'])
-                min_length_hill = args['minlh']
+            total_mass_diff = np.array(total_mass_diff)
+            counter_hills_idx = Counter(hills_dict['hills_idx_array'])
+            min_length_hill = args['minlh']
 
 
-                tmp_hill_length = np.array([counter_hills_idx[hill_idx] for hill_idx in hills_dict['hills_idx_array']])
-                idx_minl = tmp_hill_length >= min_length_hill
-                total_mass_diff = total_mass_diff[idx_minl]
+            tmp_hill_length = np.array([counter_hills_idx[hill_idx] for hill_idx in hills_dict['hills_idx_array']])
+            idx_minl = tmp_hill_length >= min_length_hill
+            total_mass_diff = total_mass_diff[idx_minl]
 
 
-                calibration = fit_mass_calibration(total_mass_diff, bin_width=0.05)
-                args['hill_calibration'] = calibration.to_dict()
-                if calibration.status == 'applied':
-                    args['htol'] = min(args['htol'], 3 * calibration.sigma)
-                    logger.info(
-                        'Automatically optimized htol parameter: %.3f ppm',
-                        args['htol'],
-                    )
-                else:
-                    logger.warning(
-                        'Hill calibration not applied; keeping htol %.3f ppm: %s',
-                        args['htol'],
-                        calibration.reason,
-                    )
-
-            hills_started = _debug_stage_start(
-                'detect_hills', faims=faims_val, spectra=len(data_for_analyse_tmp)
-            )
-            hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp, args, mz_step, paseftol, md_correction_int=md_correction_int)
-            _debug_stage_complete(
-                'detect_hills',
-                hills_started,
-                hill_count=len(set(hills_dict['hills_idx_array'])),
-            )
-
-
-
-            logger.info('Detected number of hills before splitting: %d', len(set(hills_dict['hills_idx_array'])))
-
-            hill_processing_started = _debug_stage_start(
-                'split_and_process_hills', faims=faims_val
-            )
-            hills_dict = split_peaks_multi(hills_dict, data_for_analyse_tmp, args)
-            logger.info('Starting hills processing')
-            hills_dict = process_hills(hills_dict, data_for_analyse_tmp, mz_step, paseftol, args)
-            next_hill_idx = assign_deterministic_hill_ids(
-                hills_dict, next_hill_idx
-            )
-            _debug_stage_complete(
-                'split_and_process_hills',
-                hill_processing_started,
-                hill_count=len(set(hills_dict['hills_idx_array'])),
-            )
-
-            logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array'])))
-            if stop_after_hills:
-                if args['write_hills']:
-                    hills_features = utils.iter_hills_extra(
-                        hills_dict,
-                        RT_dict,
-                        faims_val,
-                        data_start_id,
-                        mz_step,
-                        paseftol,
-                        data_for_analyse_tmp=data_for_analyse_tmp,
-                        include_point_lists=not args.get('no_hill_list', False),
-                    )
-                    utils.write_output(hills_features, args, write_header, hills=True)
-                    if not stop_after_logged:
-                        logger.info('--stop_after_hills flag set, skipping feature detection after writing hills.')
-                        stop_after_logged = True
-                else:
-                    if not stop_after_logged:
-                        logger.warning('--stop_after_hills flag set but hills output is disabled; skipping feature detection anyway.')
-                        stop_after_logged = True
-                write_header = False
-                _debug_stage_complete(
-                    'faims_context', context_started, faims=faims_val,
-                    stopped_after_hills=True,
+            calibration = fit_mass_calibration(total_mass_diff, bin_width=0.05)
+            args['hill_calibration'] = calibration.to_dict()
+            if calibration.status == 'applied':
+                args['htol'] = min(args['htol'], 3 * calibration.sigma)
+                logger.info(
+                    'Automatically optimized htol parameter: %.3f ppm',
+                    args['htol'],
                 )
-                continue
+            else:
+                logger.warning(
+                    'Hill calibration not applied; keeping htol %.3f ppm: %s',
+                    args['htol'],
+                    calibration.reason,
+                )
 
-            direct_competitors = []
-            feature_detection_started = _debug_stage_start(
-                'process_features', faims=faims_val, hill_count=len(set(hills_dict['hills_idx_array']))
-            )
-            _, hill_to_feature_idx, next_feature_idx, ready_final = process_features_iteration(
-                hills_dict,
-                faims_val,
-                mz_step,
-                paseftol,
-                RT_dict,
-                data_start_id,
-                write_header,
-                args,
-                next_feature_idx=next_feature_idx,
-                data_for_analyse_tmp=data_for_analyse_tmp,
-                direct_assays=assay_result.assays,
-                direct_events_by_id=direct_events_by_id,
-                direct_competitor_sink=direct_competitors,
-            )
-            logger.debug(
-                'Context feature detection complete: faims=%s strict_features=%d direct_competitors=%d next_feature_id=%d',
-                faims_val,
-                len(ready_final),
-                len(direct_competitors),
-                next_feature_idx,
-            )
-            _debug_stage_complete(
-                'process_features',
-                feature_detection_started,
-                strict_features=len(ready_final),
-                direct_competitors=len(direct_competitors),
-            )
-            if args.get('feature_mode') == 'hybrid':
-                strict_contexts.append({
-                    'hills': hills_dict,
-                    'rt_by_local': RT_dict,
-                    'spectra': data_for_analyse_tmp,
-                    'faims_cv': faims_val,
-                    'candidates': ready_final,
-                    'direct_competitors': tuple(direct_competitors),
-                    'paseftol': paseftol,
-                })
+        hills_started = _debug_stage_start(
+            'detect_hills', faims=faims_val, spectra=len(data_for_analyse_tmp)
+        )
+        hills_dict, total_mass_diff = detect_hills(data_for_analyse_tmp, args, mz_step, paseftol, md_correction_int=md_correction_int)
+        _debug_stage_complete(
+            'detect_hills',
+            hills_started,
+            hill_count=len(set(hills_dict['hills_idx_array'])),
+        )
+
+
+
+        logger.info('Detected number of hills before splitting: %d', len(set(hills_dict['hills_idx_array'])))
+
+        hill_processing_started = _debug_stage_start(
+            'split_and_process_hills', faims=faims_val
+        )
+        hills_dict = split_peaks_multi(hills_dict, data_for_analyse_tmp, args)
+        logger.info('Starting hills processing')
+        hills_dict = process_hills(hills_dict, data_for_analyse_tmp, mz_step, paseftol, args)
+        next_hill_idx = assign_deterministic_hill_ids(
+            hills_dict, next_hill_idx
+        )
+        _debug_stage_complete(
+            'split_and_process_hills',
+            hill_processing_started,
+            hill_count=len(set(hills_dict['hills_idx_array'])),
+        )
+
+        logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array'])))
+        if stop_after_hills:
             if args['write_hills']:
                 hills_features = utils.iter_hills_extra(
                     hills_dict,
@@ -1225,197 +1213,301 @@ def process_file(args):
                     paseftol,
                     data_for_analyse_tmp=data_for_analyse_tmp,
                     include_point_lists=not args.get('no_hill_list', False),
-                    feature_idx_by_hill=hill_to_feature_idx,
                 )
                 utils.write_output(hills_features, args, write_header, hills=True)
-
+                if not stop_after_logged:
+                    logger.info('--stop_after_hills flag set, skipping feature detection after writing hills.')
+                    stop_after_logged = True
+            else:
+                if not stop_after_logged:
+                    logger.warning('--stop_after_hills flag set but hills output is disabled; skipping feature detection anyway.')
+                    stop_after_logged = True
             write_header = False
             _debug_stage_complete(
-                'faims_context', context_started, faims=faims_val
+                'faims_context', context_started, faims=faims_val,
+                stopped_after_hills=True,
             )
+            continue
 
-        if (
-            args.get('feature_mode') == 'hybrid'
-            and not stop_after_hills
-            and strict_stage_cache
-            and not Path(strict_stage_cache).exists()
-        ):
-            strict_cache_started = _debug_stage_start(
-                'publish_strict_stage_cache', path=strict_stage_cache
-            )
-            cache_payload = build_strict_stage_payload(
-                ingestion,
-                strict_contexts,
-                next_feature_idx,
-                args,
-            )
-            cache_path = save_strict_stage_cache(
-                strict_stage_cache,
-                input_file_path,
-                strict_stage_cache_args,
-                cache_payload,
-            )
-            cache_manifest = json.loads(
-                (cache_path / 'manifest.json').read_text(encoding='utf-8')
-            )
-            logger.info(
-                'Published strict-stage cache: %s (%d features, %d bytes)',
-                cache_path,
-                cache_manifest['strict_feature_count'],
-                cache_manifest['payload_bytes'],
-            )
-            args['_strict_stage_cache'] = {
-                'status': 'created',
-                'path': str(cache_path),
-                'payload_bytes': cache_manifest['payload_bytes'],
-                'strict_feature_count': cache_manifest[
-                    'strict_feature_count'
-                ],
-            }
-            _debug_stage_complete(
-                'publish_strict_stage_cache',
-                strict_cache_started,
-                strict_feature_count=cache_manifest['strict_feature_count'],
-                payload_bytes=cache_manifest['payload_bytes'],
-            )
-
-        if args.get('feature_mode') == 'hybrid' and not stop_after_hills:
-            manager = args.get('_output_manager')
-            if manager is None:
-                raise RuntimeError('Output manager is required.')
-            logger.debug(
-                'Starting hybrid postprocessing: contexts=%d next_feature_id=%d candidate_cache=%s',
-                len(strict_contexts),
-                next_feature_idx,
-                args.get('hybrid_candidate_cache_dir'),
-            )
-            hybrid_started = _debug_stage_start(
-                'hybrid_postprocessing', contexts=len(strict_contexts)
-            )
-            next_feature_idx = run_hybrid_postprocessing(
-                run_id=input_stem(input_file_path),
-                ingestion=ingestion,
-                assay_result=assay_result,
-                strict_contexts=strict_contexts,
-                manager=manager,
-                next_feature_id=next_feature_idx,
-                args=args,
-                final_strict_detector=_detect_final_residual_strict,
-            )
-            _debug_stage_complete(
-                'hybrid_postprocessing', hybrid_started,
-                next_feature_id=next_feature_idx,
-            )
-        _debug_stage_complete('process_file', process_started)
-
-    elif (
-        input_file_path.lower().endswith('.hills.tsv')
-        or input_file_path.lower().endswith('.hills.parquet')
-        or input_file_path.lower().endswith('.hills.npz')
-    ):
-        hills_load_started = _debug_stage_start('load_hills_input', path=input_file_path)
-        if args.get('write_ms1', False):
-            logger.warning('--write_ms1 requires mzML input and is ignored for hills input: %s', input_file_path)
-        if stop_after_hills and not stop_after_logged:
-            logger.info('--stop_after_hills flag has no effect when reading hills input; proceeding with feature detection.')
-            stop_after_logged = True
-        if input_file_path.lower().endswith('.hills.tsv'):
-            hills_features = pd.read_table(input_file_path)
-        elif input_file_path.lower().endswith('.hills.parquet'):
-            hills_features = pd.read_parquet(input_file_path, engine='pyarrow')
-        else:
-            hills_features = pd.DataFrame(utils.get_hills_features_from_hills_npz(input_file_path))
-        hills_features = normalize_hills_dataframe(
-            hills_features, args.get('input_rt_unit', 'seconds')
+        direct_competitors = []
+        feature_detection_started = _debug_stage_start(
+            'process_features', faims=faims_val, hill_count=len(set(hills_dict['hills_idx_array']))
+        )
+        _, hill_to_feature_idx, next_feature_idx, ready_final = process_features_iteration(
+            hills_dict,
+            faims_val,
+            mz_step,
+            paseftol,
+            RT_dict,
+            data_start_id,
+            write_header,
+            args,
+            next_feature_idx=next_feature_idx,
+            data_for_analyse_tmp=data_for_analyse_tmp,
+            direct_assays=assay_result.assays,
+            direct_events_by_id=direct_events_by_id,
+            direct_competitor_sink=direct_competitors,
+        )
+        logger.debug(
+            'Context feature detection complete: faims=%s strict_features=%d direct_competitors=%d next_feature_id=%d',
+            faims_val,
+            len(ready_final),
+            len(direct_competitors),
+            next_feature_idx,
         )
         _debug_stage_complete(
-            'load_hills_input', hills_load_started, hill_rows=len(hills_features)
+            'process_features',
+            feature_detection_started,
+            strict_features=len(ready_final),
+            direct_competitors=len(direct_competitors),
         )
-        RT_dict = False
-        write_header = True
-        data_start_id = 0
-
-        faims_values = [
-            None if pd.isna(value) else float(value)
-            for value in hills_features['FAIMS']
-        ]
-        has_faims = any(value is not None for value in faims_values)
-        if has_faims:
-            paseftol = 0
-        else:
-            im_values = pd.to_numeric(hills_features['im'], errors='coerce')
-            if im_values.notna().any() and np.any(im_values.fillna(0).values):
-                paseftol = args['paseftol']
-            else:
-                paseftol = 0
-
-
-        if paseftol == 0:
-            faims_set = sorted(set(faims_values), key=faims_sort_key)
-        else:
-            faims_set = [None]
-
-        if len(faims_set) > 1 or faims_set[0] is not None:
-            logger.info('Detected FAIMS values: %s', faims_set)
-
-        for faims_val in faims_set:
-
-            context_started = _debug_stage_start(
-                'hills_faims_context', faims=faims_val
-            )
-
-            if len(faims_set) > 1:
-                logger.info('Spectra analysis for CV = %s', faims_val)
-
-            if paseftol == 0:
-                if faims_val is None:
-                    hills_features_local = hills_features[hills_features['FAIMS'].isna()]
-                else:
-                    hills_features_local = hills_features[hills_features['FAIMS'] == faims_val]
-            else:
-                hills_features_local = hills_features
-
-            hill_mass_accuracy = args['htol']
-            hill_conversion_started = _debug_stage_start(
-                'convert_hills_input', faims=faims_val,
-                hill_rows=len(hills_features_local),
-            )
-            hills_dict, mz_step = utils.get_hills_dict_from_hills_features(hills_features_local, hill_mass_accuracy, paseftol)
-            next_hill_idx = assign_deterministic_hill_ids(
-                hills_dict, next_hill_idx
-            )
-            _debug_stage_complete(
-                'convert_hills_input', hill_conversion_started,
-                hill_count=len(set(hills_dict['hills_idx_array_unique'])),
-            )
-
-
-            logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array_unique'])))
-
-            feature_detection_started = _debug_stage_start(
-                'process_features', faims=faims_val,
-                hill_count=len(set(hills_dict['hills_idx_array_unique'])),
-            )
-            _, _, next_feature_idx, ready_final = process_features_iteration(
+        if args.get('feature_mode') == 'hybrid':
+            strict_contexts.append({
+                'hills': hills_dict,
+                'rt_by_local': RT_dict,
+                'spectra': data_for_analyse_tmp,
+                'faims_cv': faims_val,
+                'candidates': ready_final,
+                'direct_competitors': tuple(direct_competitors),
+                'paseftol': paseftol,
+            })
+        if args['write_hills']:
+            hills_features = utils.iter_hills_extra(
                 hills_dict,
+                RT_dict,
                 faims_val,
+                data_start_id,
                 mz_step,
                 paseftol,
-                RT_dict,
-                data_start_id,
-                write_header,
-                args,
-                next_feature_idx=next_feature_idx,
+                data_for_analyse_tmp=data_for_analyse_tmp,
+                include_point_lists=not args.get('no_hill_list', False),
+                feature_idx_by_hill=hill_to_feature_idx,
             )
-            _debug_stage_complete(
-                'process_features',
-                feature_detection_started,
-                strict_features=len(ready_final),
-            )
+            utils.write_output(hills_features, args, write_header, hills=True)
+
+        write_header = False
+        _debug_stage_complete(
+            'faims_context', context_started, faims=faims_val
+        )
+
+    return strict_contexts, next_feature_idx, next_hill_idx, write_header, stop_after_logged
 
 
-            write_header = False
-            _debug_stage_complete(
-                'hills_faims_context', context_started, faims=faims_val
-            )
-        _debug_stage_complete('process_file', process_started)
+def _finalize_mzml_processing(
+    args, input_file_path, strict_stage_cache_args, strict_stage_cache,
+    ingestion, assay_result, strict_contexts, next_feature_idx, stop_after_hills,
+):
+    if (
+        args.get('feature_mode') == 'hybrid'
+        and not stop_after_hills
+        and strict_stage_cache
+        and not Path(strict_stage_cache).exists()
+    ):
+        strict_cache_started = _debug_stage_start(
+            'publish_strict_stage_cache', path=strict_stage_cache
+        )
+        cache_payload = build_strict_stage_payload(
+            ingestion,
+            strict_contexts,
+            next_feature_idx,
+            args,
+        )
+        cache_path = save_strict_stage_cache(
+            strict_stage_cache,
+            input_file_path,
+            strict_stage_cache_args,
+            cache_payload,
+        )
+        cache_manifest = json.loads(
+            (cache_path / 'manifest.json').read_text(encoding='utf-8')
+        )
+        logger.info(
+            'Published strict-stage cache: %s (%d features, %d bytes)',
+            cache_path,
+            cache_manifest['strict_feature_count'],
+            cache_manifest['payload_bytes'],
+        )
+        args['_strict_stage_cache'] = {
+            'status': 'created',
+            'path': str(cache_path),
+            'payload_bytes': cache_manifest['payload_bytes'],
+            'strict_feature_count': cache_manifest[
+                'strict_feature_count'
+            ],
+        }
+        _debug_stage_complete(
+            'publish_strict_stage_cache',
+            strict_cache_started,
+            strict_feature_count=cache_manifest['strict_feature_count'],
+            payload_bytes=cache_manifest['payload_bytes'],
+        )
+
+    if args.get('feature_mode') == 'hybrid' and not stop_after_hills:
+        manager = args.get('_output_manager')
+        if manager is None:
+            raise RuntimeError('Output manager is required.')
+        logger.debug(
+            'Starting hybrid postprocessing: contexts=%d next_feature_id=%d candidate_cache=%s',
+            len(strict_contexts),
+            next_feature_idx,
+            args.get('hybrid_candidate_cache_dir'),
+        )
+        hybrid_started = _debug_stage_start(
+            'hybrid_postprocessing', contexts=len(strict_contexts)
+        )
+        next_feature_idx = run_hybrid_postprocessing(
+            run_id=input_stem(input_file_path),
+            ingestion=ingestion,
+            assay_result=assay_result,
+            strict_contexts=strict_contexts,
+            manager=manager,
+            next_feature_id=next_feature_idx,
+            args=args,
+            final_strict_detector=_detect_final_residual_strict,
+        )
+        _debug_stage_complete(
+            'hybrid_postprocessing', hybrid_started,
+            next_feature_id=next_feature_idx,
+        )
+
+
+def _process_mzml_file(
+    args, input_file_path, strict_stage_cache_args, identification_result,
+    md_correction_int, process_started,
+):
+    (
+        ingestion, assay_result, direct_events_by_id, strict_stage_payload,
+        strict_stage_cache,
+    ) = _prepare_mzml_processing(
+        args, input_file_path, strict_stage_cache_args, identification_result
+    )
+    if strict_stage_payload is not None:
+        return _run_cached_mzml_hybrid(
+            args, input_file_path, process_started, ingestion, assay_result,
+            strict_stage_payload,
+        )
+    (
+        strict_contexts, next_feature_idx, _next_hill_idx, _write_header,
+        _stop_after_logged,
+    ) = _process_mzml_faims_contexts(
+        args, ingestion, assay_result, direct_events_by_id, md_correction_int,
+        1, 1, True, bool(args.get('stop_after_hills')), False,
+    )
+    _finalize_mzml_processing(
+        args, input_file_path, strict_stage_cache_args, strict_stage_cache,
+        ingestion, assay_result, strict_contexts, next_feature_idx,
+        bool(args.get('stop_after_hills')),
+    )
+    _debug_stage_complete('process_file', process_started)
+
+
+def _process_hills_file(
+    args, input_file_path, stop_after_hills, stop_after_logged,
+    next_feature_idx, next_hill_idx, process_started,
+):
+    hills_load_started = _debug_stage_start('load_hills_input', path=input_file_path)
+    if args.get('write_ms1', False):
+        logger.warning('--write_ms1 requires mzML input and is ignored for hills input: %s', input_file_path)
+    if stop_after_hills and not stop_after_logged:
+        logger.info('--stop_after_hills flag has no effect when reading hills input; proceeding with feature detection.')
+        stop_after_logged = True
+    if input_file_path.lower().endswith('.hills.tsv'):
+        hills_features = pd.read_table(input_file_path)
+    elif input_file_path.lower().endswith('.hills.parquet'):
+        hills_features = pd.read_parquet(input_file_path, engine='pyarrow')
+    else:
+        hills_features = pd.DataFrame(utils.get_hills_features_from_hills_npz(input_file_path))
+    hills_features = normalize_hills_dataframe(
+        hills_features, args.get('input_rt_unit', 'seconds')
+    )
+    _debug_stage_complete(
+        'load_hills_input', hills_load_started, hill_rows=len(hills_features)
+    )
+    RT_dict = False
+    write_header = True
+    data_start_id = 0
+
+    faims_values = [
+        None if pd.isna(value) else float(value)
+        for value in hills_features['FAIMS']
+    ]
+    has_faims = any(value is not None for value in faims_values)
+    if has_faims:
+        paseftol = 0
+    else:
+        im_values = pd.to_numeric(hills_features['im'], errors='coerce')
+        if im_values.notna().any() and np.any(im_values.fillna(0).values):
+            paseftol = args['paseftol']
+        else:
+            paseftol = 0
+
+
+    if paseftol == 0:
+        faims_set = sorted(set(faims_values), key=faims_sort_key)
+    else:
+        faims_set = [None]
+
+    if len(faims_set) > 1 or faims_set[0] is not None:
+        logger.info('Detected FAIMS values: %s', faims_set)
+
+    for faims_val in faims_set:
+
+        context_started = _debug_stage_start(
+            'hills_faims_context', faims=faims_val
+        )
+
+        if len(faims_set) > 1:
+            logger.info('Spectra analysis for CV = %s', faims_val)
+
+        if paseftol == 0:
+            if faims_val is None:
+                hills_features_local = hills_features[hills_features['FAIMS'].isna()]
+            else:
+                hills_features_local = hills_features[hills_features['FAIMS'] == faims_val]
+        else:
+            hills_features_local = hills_features
+
+        hill_mass_accuracy = args['htol']
+        hill_conversion_started = _debug_stage_start(
+            'convert_hills_input', faims=faims_val,
+            hill_rows=len(hills_features_local),
+        )
+        hills_dict, mz_step = utils.get_hills_dict_from_hills_features(hills_features_local, hill_mass_accuracy, paseftol)
+        next_hill_idx = assign_deterministic_hill_ids(
+            hills_dict, next_hill_idx
+        )
+        _debug_stage_complete(
+            'convert_hills_input', hill_conversion_started,
+            hill_count=len(set(hills_dict['hills_idx_array_unique'])),
+        )
+
+
+        logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array_unique'])))
+
+        feature_detection_started = _debug_stage_start(
+            'process_features', faims=faims_val,
+            hill_count=len(set(hills_dict['hills_idx_array_unique'])),
+        )
+        _, _, next_feature_idx, ready_final = process_features_iteration(
+            hills_dict,
+            faims_val,
+            mz_step,
+            paseftol,
+            RT_dict,
+            data_start_id,
+            write_header,
+            args,
+            next_feature_idx=next_feature_idx,
+        )
+        _debug_stage_complete(
+            'process_features',
+            feature_detection_started,
+            strict_features=len(ready_final),
+        )
+
+
+        write_header = False
+        _debug_stage_complete(
+            'hills_faims_context', context_started, faims=faims_val
+        )
+    _debug_stage_complete('process_file', process_started)

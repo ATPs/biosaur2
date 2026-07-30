@@ -3,7 +3,7 @@
 from .hybrid_runtime import *
 
 
-def run_final_residual_stage(
+def _run_final_residual_direct_recheck(
     *,
     run_id,
     ingestion,
@@ -275,6 +275,43 @@ def run_final_residual_stage(
     final_residual_summary[
         "direct_ms2_recheck"
     ] = final_residual_direct_recheck
+    return _run_final_residual_generic_recheck(
+        run_id=run_id,
+        ingestion=ingestion,
+        args=args,
+        final_residual_contexts=final_residual_contexts,
+        final_residual_records=final_residual_records,
+        final_residual_quant_rows=final_residual_quant_rows,
+        final_residual_summary=final_residual_summary,
+        audit_by_event=audit_by_event,
+        generic_summary=generic_summary,
+        generic_score_weights=generic_score_weights,
+        strict_quant_rows=strict_quant_rows,
+        recovered_quant_rows=recovered_quant_rows,
+        generic_recovered_quant_rows=generic_recovered_quant_rows,
+        next_feature_id=next_feature_id,
+        final_quant_rows=final_quant_rows,
+    )
+
+
+def _run_final_residual_generic_recheck(
+    *,
+    run_id,
+    ingestion,
+    args,
+    final_residual_contexts,
+    final_residual_records,
+    final_residual_quant_rows,
+    final_residual_summary,
+    audit_by_event,
+    generic_summary,
+    generic_score_weights,
+    strict_quant_rows,
+    recovered_quant_rows,
+    generic_recovered_quant_rows,
+    next_feature_id,
+    final_quant_rows,
+):
     final_residual_recheck = {
         "status": "not_run",
         "eligible_unlinked_event_count": 0,
@@ -350,3 +387,54 @@ def run_final_residual_stage(
         "final_quant_rows": final_quant_rows,
         "next_feature_id": next_feature_id,
     }
+
+
+def run_final_residual_stage(
+    *,
+    run_id,
+    ingestion,
+    assay_result,
+    strict_contexts,
+    args,
+    final_strict_detector,
+    strict_records,
+    strict_ownership,
+    residual_ledger,
+    residual_allocation_status_counts,
+    audit_by_event,
+    support,
+    base_ppm,
+    base_rt_tolerance,
+    recovered_feature_rows,
+    recovered_quant_rows,
+    generic_recovered_feature_rows,
+    generic_recovered_quant_rows,
+    generic_summary,
+    generic_score_weights,
+    strict_quant_rows,
+    next_feature_id,
+):
+    return _run_final_residual_direct_recheck(
+        run_id=run_id,
+        ingestion=ingestion,
+        assay_result=assay_result,
+        strict_contexts=strict_contexts,
+        args=args,
+        final_strict_detector=final_strict_detector,
+        strict_records=strict_records,
+        strict_ownership=strict_ownership,
+        residual_ledger=residual_ledger,
+        residual_allocation_status_counts=residual_allocation_status_counts,
+        audit_by_event=audit_by_event,
+        support=support,
+        base_ppm=base_ppm,
+        base_rt_tolerance=base_rt_tolerance,
+        recovered_feature_rows=recovered_feature_rows,
+        recovered_quant_rows=recovered_quant_rows,
+        generic_recovered_feature_rows=generic_recovered_feature_rows,
+        generic_recovered_quant_rows=generic_recovered_quant_rows,
+        generic_summary=generic_summary,
+        generic_score_weights=generic_score_weights,
+        strict_quant_rows=strict_quant_rows,
+        next_feature_id=next_feature_id,
+    )

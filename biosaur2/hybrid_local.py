@@ -209,6 +209,18 @@ def extract_local_feature(
         all_points,
     ) = eligible[0]
     component = refinement.components[component_index]
+    return _finalize_local_component(
+        assay, selected_peaks, traces, theoretical, refinement, component,
+        event_position, mono_points, all_points, min_mono_points, quant_method,
+        baseline, allow_two_point_exception, allow_partial_envelope,
+    )
+
+
+def _finalize_local_component(
+    assay, selected_peaks, traces, theoretical, refinement, component,
+    event_position, mono_points, all_points, min_mono_points, quant_method,
+    baseline, allow_two_point_exception, allow_partial_envelope,
+):
     start, end = component.start, component.end
     segment_rt = traces[0].rt_sec[start:end]
     segment_values = tuple(
