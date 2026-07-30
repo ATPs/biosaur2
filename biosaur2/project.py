@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 
 from .output import publish_staged_files, _temporary_neighbor
 from .cache_runtime import run_cache_paths
+from .hybrid_backend import configure_backend
 from .parallel import (
     WorkerFailure,
     effective_worker_budget,
@@ -209,6 +210,12 @@ def _command_for_run(run, paths, options):
     if options["overwrite"]:
         command.append("--overwrite")
     if options["mode"] == "hybrid":
+        command.extend(
+            (
+                "--hybrid-backend",
+                options.get("resolved_hybrid_backend", options.get("hybrid_backend", "auto")),
+            )
+        )
         if run.psm_path is not None:
             command.extend(("--psm-path", str(run.psm_path)))
         q_value = run.q_value_max if run.q_value_max is not None else options["psm_q_value_max"]
@@ -773,6 +780,10 @@ def run_project(manifest, output_dir, project_db, **options):
     ).resolve()
     effective_workers = effective_worker_budget(int(options.get("workers", 4)))
     options["_effective_workers"] = effective_workers
+    if options["mode"] == "hybrid":
+        options["resolved_hybrid_backend"] = configure_backend(
+            options.get("hybrid_backend", "auto")
+        )
     logger.debug(
         "Project start: manifest=%s output_dir=%s project_db=%s runs=%d mode=%s "
         "format=%s requested_workers=%d effective_workers=%d resume=%s",

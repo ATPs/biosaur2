@@ -127,6 +127,7 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
         "max_charge": 8,
         "relaxed_ms2_feature": True,
         "ms2_rt_tolerance_sec": 90.0,
+        "hybrid_backend": "cython",
     }
     command = _command_for_run(run, paths, options)
     position = command.index("--ms2-rt-tolerance-sec")
@@ -137,6 +138,7 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
     assert "--write-ms2" not in command
     assert command[command.index("--format") + 1] == "parquet"
     assert command[command.index("--generic-ms2-isotope-errors") + 1] == "0,1,2,3"
+    assert command[command.index("--hybrid-backend") + 1] == "cython"
     assert "--workers" not in command
     assert "--cache-dir" not in command
 
