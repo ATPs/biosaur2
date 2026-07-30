@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import csv
 from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
+import shutil
 from typing import Mapping, Optional, Sequence
 
 import pyarrow as pa
@@ -34,8 +36,10 @@ from .hybrid import (
     _recovered_feature_row,
     extract_local_feature,
 )
-from .output import _temporary_neighbor, publish_staged_files
+from .output import _format_tsv, _temporary_neighbor, publish_staged_files
+from .legacy_output import merge_hybrid_output_rows
 from .raw_ms1 import load_raw_ms1_cache
+from .schema import compact_schemas
 
 
 EXTERNAL_EVIDENCE_SCHEMA_VERSION = "1"
@@ -91,56 +95,123 @@ def exact_ion_key(canonical_peptidoform, charge, faims_cv) -> str:
     )
 
 
-def _read_rows(path, columns=None):
+def _read_rows(path, columns=None, table_name=None):
     source = Path(path)
     if not source.is_file():
         return []
+    if source.suffix.lower() == ".duckdb":
+        import duckdb
+
+        selection = "*" if columns is None else ", ".join(
+            '"%s"' % name.replace('"', '""') for name in columns
+        )
+        with duckdb.connect(str(source), read_only=True) as connection:
+            return connection.execute(
+                'SELECT %s FROM "%s"' % (selection, table_name)
+            ).fetch_arrow_table().to_pylist()
+    if source.suffix.lower() == ".tsv":
+        schema_name = (
+            "hybrid_features"
+            if table_name == "features"
+            else "merged_identifications"
+        )
+        schema = compact_schemas()[schema_name]
+        fields = {field.name: field for field in schema}
+        selected = set(columns) if columns is not None else None
+        with source.open("r", encoding="utf-8", newline="") as handle:
+            rows = []
+            for raw in csv.DictReader(handle, delimiter="\t"):
+                converted = {}
+                for name, value in raw.items():
+                    if selected is not None and name not in selected:
+                        continue
+                    converted[name] = _parse_tsv_value(value, fields[name].type)
+                rows.append(converted)
+            return rows
     return pq.read_table(
         source, columns=None if columns is None else list(columns)
     ).to_pylist()
 
 
+def _parse_tsv_value(value, data_type):
+    if value == "":
+        return None
+    if pa.types.is_dictionary(data_type):
+        data_type = data_type.value_type
+    if pa.types.is_list(data_type) or pa.types.is_struct(data_type):
+        return json.loads(value)
+    if pa.types.is_integer(data_type):
+        return int(value)
+    if pa.types.is_floating(data_type):
+        return float(value)
+    if pa.types.is_boolean(data_type):
+        return value.lower() in {"1", "true", "yes"}
+    return value
+
+
+def _read_table(path, table_name):
+    source = Path(path)
+    if source.suffix.lower() == ".duckdb":
+        import duckdb
+
+        with duckdb.connect(str(source), read_only=True) as connection:
+            return connection.execute(
+                'SELECT * FROM "%s"' % table_name
+            ).fetch_arrow_table()
+    if source.suffix.lower() == ".tsv":
+        schema_name = (
+            "hybrid_features"
+            if table_name == "features"
+            else "merged_identifications"
+        )
+        return pa.Table.from_pylist(
+            _read_rows(source, table_name=table_name),
+            schema=compact_schemas()[schema_name],
+        )
+    return pq.read_table(source)
+
+
 def read_external_observations(run, paths) -> tuple[ExternalObservation, ...]:
     """Read de-duplicated, directly observed quantitative peptide-ion anchors."""
 
-    assays = _read_rows(paths["assays"])
-    audit = _read_rows(
-        paths["audit"],
-        columns=("assay_id", "feature_id", "association_tier", "status"),
+    assays = _read_rows(
+        paths["identifications"], table_name="identifications"
     )
-    quant = _read_rows(
-        paths["feature_quant"],
-        columns=("feature_id", "rt_apex_sec", "quant_value"),
-    )
+    features = _read_rows(paths["features"], table_name="features")
     feature_rt = {
-        int(row["feature_id"]): float(row["rt_apex_sec"])
-        for row in quant
-        if row.get("feature_id") is not None
+        int(row["feature_idx"]): float(row["rt_apex_sec"])
+        for row in features
+        if row.get("feature_idx") is not None
         and row.get("rt_apex_sec") is not None
         and row.get("quant_value") is not None
         and float(row["quant_value"]) > 0
     }
-    feature_by_assay = {
-        int(row["assay_id"]): int(row["feature_id"])
-        for row in audit
-        if row.get("assay_id") is not None
-        and row.get("feature_id") is not None
-        and row.get("association_tier") == "direct_id"
-    }
+    feature_by_assay = {}
+    for row in features:
+        for event in row.get("ms2_events") or ():
+            if (
+                event.get("assay_id") is not None
+                and event.get("association_tier") == "direct_id"
+            ):
+                feature_by_assay[int(event["assay_id"])] = int(
+                    row["feature_idx"]
+                )
     selected = {}
     for row in assays:
+        if row.get("assay_id") is None:
+            continue
         assay_id = int(row["assay_id"])
         feature_id = feature_by_assay.get(assay_id)
-        if feature_id not in feature_rt or row.get("conflict_status") != "unique":
+        if feature_id not in feature_rt or row.get("assay_conflict_status") != "unique":
             continue
-        faims = row.get("faims_cv")
+        faims = row.get("assay_faims_cv")
         faims = None if faims is None else float(faims)
-        key = exact_ion_key(row["canonical_peptidoform"], row["charge"], faims)
+        key = exact_ion_key(row["canonical_peptidoform"], row["assay_charge"], faims)
         observation = ExternalObservation(
             run_id=run.run_id,
             ion_key=key,
             canonical_peptidoform=row["canonical_peptidoform"],
-            charge=int(row["charge"]),
+            charge=int(row["assay_charge"]),
             faims_cv=faims,
             rt_apex_sec=feature_rt[feature_id],
             q_value=float(row["q_value"]),
@@ -406,8 +477,8 @@ def _equivalent_features(candidate, features, ppm):
             continue
         if abs(float(row["mz"]) - target_mz) * 1e6 / target_mz > ppm:
             continue
-        if max(float(row["rtStart"]), candidate.rt_start_sec) > min(
-            float(row["rtEnd"]), candidate.rt_end_sec
+        if max(float(row["rtStart"]) * 60.0, candidate.rt_start_sec) > min(
+            float(row["rtEnd"]) * 60.0, candidate.rt_end_sec
         ):
             continue
         matches.append(row)
@@ -458,6 +529,20 @@ def _evidence_schema():
 def _write_like_existing(table, final_path, *, schema=None):
     temporary = _temporary_neighbor(Path(final_path))
     output = table if schema is None else table.cast(schema)
+    if Path(final_path).suffix.lower() == ".tsv":
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=output.schema.names,
+                delimiter="\t",
+                lineterminator="\n",
+            )
+            writer.writeheader()
+            for row in output.to_pylist():
+                writer.writerow(
+                    {name: _format_tsv(row.get(name)) for name in output.schema.names}
+                )
+        return temporary
     pq.write_table(
         output,
         temporary,
@@ -585,8 +670,7 @@ def run_external_recipient(task):
     competition = {
         item.seed_id: item for item in target_decoy_q_values(competitions)
     }
-    feature_table = pq.read_table(paths["features"])
-    quant_table = pq.read_table(paths["feature_quant"])
+    feature_table = _read_table(paths["features"], "features")
     feature_rows = feature_table.to_pylist()
     new_feature_rows = []
     new_quant_rows = []
@@ -715,21 +799,58 @@ def run_external_recipient(task):
     )
     staged = []
     evidence_table = pa.Table.from_pylist(evidence_rows, schema=evidence_schema)
-    staged.append(
-        (_write_like_existing(evidence_table, paths["external_evidence"]), Path(paths["external_evidence"]))
+    database_path = (
+        paths.get("run_output") if paths.get("format") == "duckdb" else None
     )
+    if not database_path:
+        staged.append(
+            (_write_like_existing(evidence_table, paths["external_evidence"]), Path(paths["external_evidence"]))
+        )
+    appended = None
     if new_feature_rows:
-        appended = pa.Table.from_pylist(new_feature_rows, schema=feature_table.schema)
+        merge_args = {
+            "no_mono_hills": "mono_hills_scan_lists" not in feature_table.schema.names,
+            "write_extra_details": "isotopes" in feature_table.schema.names,
+        }
+        merged_new, _ = merge_hybrid_output_rows(
+            new_feature_rows,
+            new_quant_rows,
+            (),
+            (),
+            (),
+            (),
+            merge_args,
+        )
+        appended = pa.Table.from_pylist(merged_new, schema=feature_table.schema)
         combined = pa.concat_tables([feature_table, appended])
-        staged.append(
-            (_write_like_existing(combined, paths["features"]), Path(paths["features"]))
-        )
-    if new_quant_rows:
-        appended = pa.Table.from_pylist(new_quant_rows, schema=quant_table.schema)
-        combined = pa.concat_tables([quant_table, appended])
-        staged.append(
-            (_write_like_existing(combined, paths["feature_quant"]), Path(paths["feature_quant"]))
-        )
+        if not database_path:
+            staged.append(
+                (_write_like_existing(combined, paths["features"]), Path(paths["features"]))
+            )
+    if database_path:
+        import duckdb
+
+        target = Path(database_path)
+        temporary = _temporary_neighbor(target)
+        shutil.copy2(target, temporary)
+        try:
+            with duckdb.connect(str(temporary)) as connection:
+                connection.register("_external_evidence", evidence_table)
+                connection.execute(
+                    "CREATE OR REPLACE TABLE external_id_evidence AS "
+                    "SELECT * FROM _external_evidence"
+                )
+                connection.unregister("_external_evidence")
+                if appended is not None:
+                    connection.register("_new_features", appended)
+                    connection.execute(
+                        "INSERT INTO features SELECT * FROM _new_features"
+                    )
+                    connection.unregister("_new_features")
+            staged.append((temporary, target))
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
     publish_staged_files(staged)
     return {"run_id": run.run_id, **summary}
 

@@ -16,16 +16,16 @@ def process_file(args):
 
     input_mzml_path = args['file']
     basename_mzml = path.basename(input_mzml_path)
-    feature_format = args.get('feature_format', 'tsv')
+    output_format = args.get('format', 'tsv')
 
     if args['o']:
         output_file = args['o']
     else:
         output_file = path.splitext(input_mzml_path)[0] + path.extsep + (
-            'features.parquet' if feature_format == 'parquet' else 'features.tsv'
+            'features.parquet' if output_format == 'parquet' else 'features.tsv'
         )
 
-    if feature_format == 'parquet':
+    if output_format == 'parquet':
         df1_features = pd.read_parquet(output_file, engine='pyarrow')
         df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(
             lambda x: x.tolist() if isinstance(x, np.ndarray) else list(x)

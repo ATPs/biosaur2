@@ -74,13 +74,14 @@ GENERIC_LOCAL_REFINEMENT_INPUT_STATUSES = frozenset(
 )
 
 
-def _append_final_strict_features(manager, strict_contexts, args):
-    """Emit strict rows only after hybrid targeted/conflict decisions finish."""
+def _final_strict_feature_rows(strict_contexts, args):
+    """Build strict rows only after hybrid targeted/conflict decisions finish."""
 
     from . import utils
 
+    result = []
     for context in strict_contexts:
-        rows = utils.calc_peptide_features(
+        result.extend(utils.calc_peptide_features(
             context["hills"],
             context["candidates"],
             args["nm"],
@@ -91,8 +92,8 @@ def _append_final_strict_features(manager, strict_contexts, args):
             include_mono_hills=not args.get("no_mono_hills", False),
             quantification_args=args,
             spectra=context["spectra"],
-        )
-        manager.append_features(rows)
+        ))
+    return result
 
 
 @dataclass(frozen=True)
@@ -1538,7 +1539,9 @@ def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
     """
 
     generic_args = dict(args)
-    generic_args["generic_ms2_isotope_errors"] = tuple(range(-3, 4))
+    generic_args["generic_ms2_isotope_errors"] = tuple(
+        args.get("generic_ms2_isotope_errors", (0, 1, 2, 3))
+    )
     # Hybrid generic association combines precursor localization with
     # chromatographic/isotope feature quality. Targets and paired decoys
     # traverse this identical path.
@@ -2906,7 +2909,12 @@ def run_hybrid_postprocessing(
             ]["status"]
             for event in local_events
         }
-        width_limit = generic_local_width_limit(strict_quant_rows)
+        configured_width = args.get("generic_local_max_width_sec", "auto")
+        width_limit = (
+            generic_local_width_limit(strict_quant_rows)
+            if configured_width == "auto"
+            else float(configured_width)
+        )
         local_ppm = float(args.get("generic_ms2_ppm", 10.0))
         local_rt_tolerance = float(
             args.get("ms2_rt_tolerance_sec", 120.0)
@@ -2930,6 +2938,16 @@ def run_hybrid_postprocessing(
             "width_limit_sec": width_limit,
             "ppm": local_ppm,
             "rt_tolerance_sec": local_rt_tolerance,
+            "isotope_count": int(args.get("generic_local_isotope_count", 5)),
+            "isotope_errors": tuple(
+                value
+                for value in args.get("generic_ms2_isotope_errors", (0, 1, 2, 3))
+                if int(value) >= 0
+            ),
+            "min_mono_points": int(args.get("generic_local_min_mono_points", 3)),
+            "min_channel_points": int(args.get("generic_local_min_channel_points", 3)),
+            "min_supported_channels": int(args.get("generic_local_min_supported_channels", 2)),
+            "min_cosine": float(args.get("generic_local_min_isotope_cosine", 0.90)),
         }
         target_local, decoy_local = _evaluate_cached_generic_pair_stage(
             source_path=args["file"],
@@ -3190,10 +3208,16 @@ def run_hybrid_postprocessing(
                 "width_limit_sec": width_limit,
                 "ppm": local_ppm,
                 "rt_tolerance_sec": local_rt_tolerance,
-                "min_mono_points": 2,
-                "min_channel_points": 2,
-                "min_supported_channels": 2,
-                "min_cosine": 0.95,
+                "isotope_count": int(args.get("generic_local_isotope_count", 5)),
+                "isotope_errors": tuple(
+                    value
+                    for value in args.get("generic_ms2_isotope_errors", (0, 1, 2, 3))
+                    if int(value) >= 0
+                ),
+                "min_mono_points": int(args.get("generic_relaxed_min_mono_points", 2)),
+                "min_channel_points": int(args.get("generic_relaxed_min_channel_points", 2)),
+                "min_supported_channels": int(args.get("generic_relaxed_min_supported_channels", 2)),
+                "min_cosine": float(args.get("generic_relaxed_min_isotope_cosine", 0.95)),
                 "relaxed": True,
             }
             raw_relaxed_target, raw_relaxed_decoy = (
@@ -3439,7 +3463,9 @@ def run_hybrid_postprocessing(
         )
         generic_summary["local"] = {
             "width_limit_sec": width_limit,
-            "isotope_errors": [0, 1, 2, 3],
+            "isotope_errors": list(
+                args.get("generic_ms2_isotope_errors", (0, 1, 2, 3))
+            ),
             "input_strict_status_counts": dict(
                 sorted(local_input_status_counts.items())
             ),
@@ -3913,21 +3939,15 @@ def run_hybrid_postprocessing(
         )
     final_residual_summary["ms2_recheck"] = final_residual_recheck
     _update_generic_quant_support(final_quant_rows, audit_by_event)
-    _append_final_strict_features(manager, strict_contexts, args)
+    final_feature_rows = _final_strict_feature_rows(strict_contexts, args)
     if final_residual_contexts:
-        _append_final_strict_features(
-            manager, final_residual_contexts, args
+        final_feature_rows.extend(
+            _final_strict_feature_rows(final_residual_contexts, args)
         )
     if recovered_feature_rows or generic_recovered_feature_rows:
-        manager.append_features(
+        final_feature_rows.extend(
             recovered_feature_rows + generic_recovered_feature_rows
         )
-    manager.append_hybrid_feature_quant(
-        final_quant_rows
-    )
-    manager.append_hybrid_ms2_audit(list(audit_by_event.values()))
-    manager.append_identifications(assay_result.audit)
-    manager.append_id_assays(assay_rows)
     args["_hybrid_summary"] = {
         "relaxed_ms2_feature_enabled": bool(
             args.get("relaxed_ms2_feature", False)
@@ -3990,4 +4010,12 @@ def run_hybrid_postprocessing(
         },
         "local_candidate_cache": local_candidate_cache_telemetry,
     }
+    manager.append_hybrid_results(
+        final_feature_rows,
+        final_quant_rows,
+        list(audit_by_event.values()),
+        ingestion.ms2_rows,
+        assay_result.audit,
+        assay_rows,
+    )
     return next_feature_id

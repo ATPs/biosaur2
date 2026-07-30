@@ -125,6 +125,7 @@ def evaluate_generic_local_candidate(
     ppm: float = 10.0,
     rt_tolerance_sec: float = 120.0,
     isotope_count: int = GENERIC_LOCAL_ISOTOPE_COUNT,
+    isotope_errors: Sequence[int] = GENERIC_LOCAL_ISOTOPE_ERRORS,
     min_mono_points: int = 3,
     min_channel_points: int = 3,
     min_supported_channels: int = 2,
@@ -154,8 +155,13 @@ def evaluate_generic_local_candidate(
                 event, "selected_outside_isolation_window", None
             )
 
+    isotope_errors = tuple(sorted({int(value) for value in isotope_errors if int(value) >= 0}))
+    if not isotope_errors:
+        return GenericLocalCandidate(event, "no_nonnegative_isotope_errors", None)
     relative_traces = {}
-    for relative in range(-3, isotope_count):
+    relative_min = min(-value for value in isotope_errors)
+    relative_max = max(isotope_count - value - 1 for value in isotope_errors)
+    for relative in range(relative_min, relative_max + 1):
         mz = selected + relative * C13_C12_MASS_DIFF / charge
         relative_traces[relative] = store.extract_trace(
             mz,
@@ -172,7 +178,7 @@ def evaluate_generic_local_candidate(
     )
     best = None
     failures = Counter()
-    for isotope_error in GENERIC_LOCAL_ISOTOPE_ERRORS:
+    for isotope_error in isotope_errors:
         relatives = tuple(range(-isotope_error, isotope_count - isotope_error))
         traces = tuple(relative_traces[value] for value in relatives)
         matrix = np.stack([trace.intensity for trace in traces])

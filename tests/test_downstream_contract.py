@@ -68,7 +68,7 @@ def test_duckdb_reads_an_actual_pyarrow_fallback_file(tmp_path):
     args = {
         "file": str(tmp_path / "sample.mzML"),
         "o": str(output),
-        "feature_format": "parquet",
+        "format": "parquet",
         "write_hills": False,
         "write_ms1": False,
         "stop_after_hills": False,

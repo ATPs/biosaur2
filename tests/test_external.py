@@ -63,10 +63,9 @@ def test_alignment_and_external_planning_stay_inside_group():
 
 def _write_empty_outputs(paths):
     schemas = compact_schemas()
-    pq.write_table(pa.Table.from_pylist([], schema=schemas["features"]), paths["features"])
     pq.write_table(
-        pa.Table.from_pylist([], schema=schemas["hybrid_feature_quant"]),
-        paths["feature_quant"],
+        pa.Table.from_pylist([], schema=schemas["hybrid_features"]),
+        paths["features"],
     )
 
 
@@ -101,7 +100,6 @@ def test_external_target_decoy_extraction_adds_one_feature_idempotently(tmp_path
 
     paths = {
         "features": str(tmp_path / "features.parquet"),
-        "feature_quant": str(tmp_path / "feature_quant.parquet"),
         "external_evidence": str(tmp_path / "external.parquet"),
         "raw_ms1_cache": str(cache),
     }
@@ -129,9 +127,9 @@ def test_external_target_decoy_extraction_adds_one_feature_idempotently(tmp_path
     first = run_external_recipient(task)
     assert first["new_external_feature_count"] == 1
     assert pq.ParquetFile(paths["features"]).metadata.num_rows == 1
-    assert pq.ParquetFile(paths["feature_quant"]).metadata.num_rows == 1
-    quant = pq.read_table(paths["feature_quant"]).to_pylist()
-    assert quant[0]["feature_origin"] == "aligned_external"
+    feature = pq.read_table(paths["features"]).to_pylist()[0]
+    assert feature["feature_origin"] == "aligned_external"
+    assert feature["quant_value"] > 0
     evidence = pq.read_table(paths["external_evidence"]).to_pylist()
     assert evidence[0]["status"] == "accepted_new_external_feature"
     assert evidence[0]["feature_id"] == 1
@@ -140,7 +138,6 @@ def test_external_target_decoy_extraction_adds_one_feature_idempotently(tmp_path
     second = run_external_recipient(task)
     assert second["new_external_feature_count"] == 0
     assert pq.ParquetFile(paths["features"]).metadata.num_rows == 1
-    assert pq.ParquetFile(paths["feature_quant"]).metadata.num_rows == 1
     evidence = pq.read_table(paths["external_evidence"]).to_pylist()
     assert evidence[0]["status"] == "accepted_matched_existing_feature"
     assert evidence[0]["feature_id"] == 1

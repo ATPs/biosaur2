@@ -35,50 +35,36 @@ def input_stem(path_value: str) -> str:
     return Path(name).stem
 
 
+def output_prefix(path_value: str) -> Path:
+    """Return the shared prefix for features and identifications outputs."""
+
+    path = Path(path_value)
+    if path.suffix.lower() in {".tsv", ".parquet"}:
+        path = path.with_suffix("")
+    if path.name.lower().endswith(".features"):
+        path = path.with_name(path.name[: -len(".features")])
+    return path
+
+
 def ms2_output_path(args: Mapping[str, Any]) -> Path:
     """Return the fixed input-stem MS2 sidecar path for one run."""
 
     stem = input_stem(str(args["file"]))
     explicit_directory = args.get("_ms2_output_directory")
     if explicit_directory:
-        return Path(explicit_directory) / (stem + ".ms2.parquet")
-    duckdb_output = args.get("duckdb_output")
-    if duckdb_output:
-        requested = Path(duckdb_output)
-        directory = requested.parent if requested.suffix.lower() == ".duckdb" else requested
-    else:
-        explicit = args.get("o")
-        if explicit:
-            path = Path(explicit)
-            if args.get("_multiple_inputs"):
-                directory = path
-            else:
-                directory = path.parent
+        extension = args.get("format", "parquet")
+        return Path(explicit_directory) / (stem + ".ms2." + extension)
+    explicit = args.get("o")
+    if explicit:
+        path = Path(explicit)
+        if args.get("_multiple_inputs"):
+            directory = path
         else:
-            directory = Path(args["file"]).parent
-    return directory / (stem + ".ms2.parquet")
-
-
-def hybrid_ms2_audit_output_path(args: Mapping[str, Any]) -> Path:
-    """Return the fixed input-stem hybrid MS2 audit sidecar path."""
-
-    return ms2_output_path(args).with_name(
-        input_stem(str(args["file"])) + ".ms2_feature_links.parquet"
-    )
-
-
-def hybrid_sidecar_path(args: Mapping[str, Any], kind: str) -> Path:
-    names = {
-        "hybrid_feature_quant": "feature_quant.parquet",
-        "identifications": "identifications.parquet",
-        "id_assays": "id_assays.parquet",
-    }
-    if kind == "hybrid_ms2_audit":
-        return hybrid_ms2_audit_output_path(args)
-    if kind not in names:
-        raise ValueError("unknown hybrid sidecar kind: %s" % kind)
-    base = ms2_output_path(args)
-    return base.with_name(input_stem(str(args["file"])) + "." + names[kind])
+            directory = path.parent
+    else:
+        directory = Path(args["file"]).parent
+    extension = args.get("format", "parquet")
+    return directory / (stem + ".ms2." + extension)
 
 
 def planned_output_paths(args: Mapping[str, Any]):
@@ -87,19 +73,14 @@ def planned_output_paths(args: Mapping[str, Any]):
     input_path = Path(args["file"])
     explicit = args.get("o")
     if explicit:
-        explicit_path = Path(explicit)
-        prefix = (
-            explicit_path.with_suffix("")
-            if explicit_path.suffix.lower() in {".tsv", ".parquet"}
-            else explicit_path
-        )
+        prefix = output_prefix(explicit)
     else:
         prefix = input_path.parent / input_stem(str(input_path))
 
     paths = []
-    duckdb_output = args.get("duckdb_output")
-    if duckdb_output:
-        requested = Path(duckdb_output)
+    database_mode = args.get("format") == "duckdb"
+    if database_mode:
+        requested = Path(explicit) if explicit else input_path.parent
         paths.append(
             requested
             if requested.suffix.lower() == ".duckdb"
@@ -107,31 +88,25 @@ def planned_output_paths(args: Mapping[str, Any]):
         )
     else:
         if not args.get("stop_after_hills"):
-            feature_format = args.get("feature_format", "tsv")
-            if explicit and str(explicit).lower().endswith("." + feature_format):
+            output_format = args.get("format", "tsv")
+            if explicit and str(explicit).lower().endswith("." + output_format):
                 paths.append(Path(explicit))
             else:
-                paths.append(Path("%s.features.%s" % (prefix, feature_format)))
+                paths.append(Path("%s.features.%s" % (prefix, output_format)))
         if args.get("write_hills"):
             paths.append(
-                Path("%s.hills.%s" % (prefix, args.get("hills_format", "tsv")))
+                Path("%s.hills.%s" % (prefix, args.get("format", "tsv")))
             )
         if args.get("write_ms1"):
             paths.append(
-                Path("%s.ms1.%s" % (prefix, args.get("ms1_format", "tsv")))
+                Path("%s.ms1.%s" % (prefix, args.get("format", "tsv")))
             )
-    if args.get("write_ms2"):
+        if args.get("feature_mode") == "hybrid" and not args.get("stop_after_hills"):
+            paths.append(
+                Path("%s.identifications.%s" % (prefix, args.get("format", "parquet")))
+            )
+    if args.get("write_ms2") and not database_mode:
         paths.append(ms2_output_path(args))
-    if args.get("feature_mode") == "hybrid":
-        paths.extend(
-            hybrid_sidecar_path(args, kind)
-            for kind in (
-                "hybrid_feature_quant",
-                "hybrid_ms2_audit",
-                "identifications",
-                "id_assays",
-            )
-        )
     return paths
 
 
@@ -139,8 +114,10 @@ def _format_tsv(value, decimals="roundtrip"):
     if value is None:
         return ""
     if isinstance(value, dict):
-        return str(value)
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
     if isinstance(value, (list, tuple)):
+        if any(isinstance(item, dict) for item in value):
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
         return "[" + ", ".join(
             "None" if item is None else _format_tsv(item, decimals=decimals)
             for item in value

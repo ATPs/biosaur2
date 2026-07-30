@@ -3,6 +3,8 @@ import sys
 
 import pytest
 
+import biosaur2.search as search_module
+
 
 def _run(*arguments):
     return subprocess.run(
@@ -12,12 +14,33 @@ def _run(*arguments):
     )
 
 
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [([], "tsv"), (["--feature-mode", "hybrid"], "parquet")],
+)
+def test_mode_selects_default_format(monkeypatch, tmp_path, extra, expected):
+    captured = {}
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        search_module,
+        "_execute_inputs",
+        lambda args, parser, logger: captured.update(args),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["biosaur2", str(source), *extra]
+    )
+    search_module.run()
+    assert captured["format"] == expected
+
+
 def test_invalid_output_controls_fail_during_argument_validation(tmp_path):
     source = tmp_path / "sample.mzML"
     source.write_bytes(b"")
     result = _run(
         source,
-        "--feature-format",
+        "--format",
         "parquet",
         "--parquet-compression",
         "snappy",
@@ -30,8 +53,7 @@ def test_invalid_output_controls_fail_during_argument_validation(tmp_path):
     result = _run(
         source,
         "--stop-after-hills",
-        "--feature-format",
-        "parquet",
+        "--format", "tsv",
         "--parquet-engine",
         "duckdb",
     )
@@ -56,6 +78,16 @@ def test_invalid_output_controls_fail_during_argument_validation(tmp_path):
         "--raw-ms1-cache-dir",
         "--hybrid-stage-cache-dir",
         "--hybrid-candidate-cache-dir",
+        "--feature-format",
+        "--feature_format",
+        "--hills-format",
+        "--hills_format",
+        "--ms1-format",
+        "--ms1_format",
+        "--duckdb-output",
+        "--duckdb_output",
+        "--parquet-temp-dir",
+        "--parquet_temp_dir",
     ],
 )
 def test_removed_output_options_are_rejected(tmp_path, removed_option):
@@ -66,39 +98,39 @@ def test_removed_output_options_are_rejected(tmp_path, removed_option):
     assert "unrecognized arguments" in result.stderr
 
 
-def test_help_documents_compact_output_contract():
+def test_help_documents_everyday_output_contract():
     result = _run("--help")
     assert result.returncode == 0
     for text in (
-        "one compact features.parquet file",
-        "DuckDB V2",
-        "float32",
-        "feature_idx",
-        "area_sum",
-        "minutes",
-        "half-away-from-zero",
-        "--write-extra-details",
+        "features.tsv",
+        "--format",
         "--workers",
         "--cache-dir",
         "--keep-cache",
         "--continue-on-error",
-        "--write-ms2",
         "--feature-mode",
         "--generic-ms2-ppm",
         "--ms2-rt-tolerance-sec",
         "--quant-method",
         "--max-charge",
-        "--relaxed-ms2-feature",
         "Input notes:",
-        "Hybrid DDA with q-filtered same-run Percolator PSMs",
-        "design.md",
-        "updates/2026-07-30.md",
+        "same-run Percolator target",
+        "<stem>.identifications.parquet",
+        "docs/",
     ):
         assert text in result.stdout
+    for advanced in (
+        "--write-ms2",
+        "--write-extra-details",
+        "--generic-ms2-isotope-errors",
+        "--generic-local-max-width-sec",
+        "--parquet-compression",
+    ):
+        assert advanced not in result.stdout
 
 
-def test_hybrid_help_explains_defaults_and_evidence_controls():
-    result = _run("--help")
+def test_help_all_explains_defaults_and_advanced_evidence_controls():
+    result = _run("--help-all")
     assert result.returncode == 0
     help_text = " ".join(result.stdout.split())
     for text in (
@@ -111,6 +143,10 @@ def test_hybrid_help_explains_defaults_and_evidence_controls():
         "same-run Percolator",
         "target/decoy",
         "no donor runs",
+        "0,1,2,3",
+        "99th percentile",
+        "clamped to 15-60 s",
+        "separate from --ms2-rt-tolerance-sec",
     ):
         assert text in help_text
 
@@ -121,6 +157,12 @@ def test_ms2_rejects_unsupported_modes(tmp_path):
     result = _run(hills, "--write-ms2")
     assert result.returncode != 0
     assert "--write-ms2 cannot be used with hills input" in result.stderr
+
+    mzml = tmp_path / "sample.mzML"
+    mzml.write_bytes(b"not read")
+    result = _run(mzml, "--feature-mode", "hybrid", "--write-ms2")
+    assert result.returncode != 0
+    assert "legacy-only diagnostic" in result.stderr
 
 
 
@@ -214,14 +256,19 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     assert "--cache-dir" in help_result.stdout
     assert "--keep-cache" in help_result.stdout
     assert "--max-charge" in help_result.stdout
-    assert "--relaxed-ms2-feature" in help_result.stdout
+    assert "--relaxed-ms2-feature" not in help_result.stdout
     assert "(default: 120.0)" in help_result.stdout
     assert "(default: 0.01)" in help_result.stdout
     assert "(default: all)" in help_result.stdout
     assert "input project manifest TSV (required)" in help_result.stdout
-    assert "recipient-run m/z tolerance" in help_result.stdout
     assert "aligned external assays" in help_result.stdout
     assert "README.md and examples/hybrid_project_manifest.tsv" in help_result.stdout
+
+    all_help = _run("project", "run", "--help-all")
+    assert all_help.returncode == 0
+    assert "--relaxed-ms2-feature" in all_help.stdout
+    assert "recipient-run m/z tolerance" in all_help.stdout
+    assert "explicit positive value disables adaptation" in all_help.stdout
 
     result = _run(
         "project",

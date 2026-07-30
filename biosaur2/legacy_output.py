@@ -14,8 +14,8 @@ from .output import (
     _temporary_neighbor,
     build_provenance,
     input_stem,
-    hybrid_sidecar_path,
     ms2_output_path,
+    output_prefix,
     publish_staged_files,
     round_intensity,
 )
@@ -28,10 +28,11 @@ from .schema import (
     MS1_COLUMNS,
     MS2_COLUMNS,
     MS2_SCHEMA_VERSION,
-    HYBRID_FEATURE_QUANT_COLUMNS,
     HYBRID_MS2_AUDIT_COLUMNS,
     IDENTIFICATION_COLUMNS,
-    ID_ASSAY_COLUMNS,
+    HYBRID_QUANT_OUTPUT_COLUMNS,
+    MERGED_IDENTIFICATION_COLUMNS,
+    hybrid_feature_columns,
 )
 
 
@@ -157,6 +158,93 @@ def compact_ms2(row: Mapping[str, Any], args: Mapping[str, Any]):
         "ion_mobility": row.get("ion_mobility"),
         "metadata_flags": row.get("metadata_flags", 0),
     }
+
+
+def merge_hybrid_output_rows(
+    feature_rows,
+    quant_rows,
+    audit_rows,
+    ms2_rows,
+    identification_rows,
+    assay_rows,
+    args,
+):
+    """Return the two public hybrid tables without changing their row grains."""
+
+    quant_by_feature = {
+        int(row["feature_id"]): row for row in quant_rows
+    }
+    event_by_id = {
+        int(row["ms2_event_id"]): compact_ms2(row, args) for row in ms2_rows
+    }
+    events_by_feature = {}
+    for audit in audit_rows:
+        feature_id = audit.get("feature_id")
+        if feature_id is None:
+            continue
+        event_id = int(audit["ms2_event_id"])
+        event = dict(event_by_id.get(event_id, {}))
+        event["ms2_event_id"] = event_id
+        event.update(
+            {
+                name: audit.get(name)
+                for name in HYBRID_MS2_AUDIT_COLUMNS
+                if name not in {"run_id", "ms2_event_id", "feature_id"}
+            }
+        )
+        events_by_feature.setdefault(int(feature_id), []).append(event)
+
+    merged_features = []
+    seen = set()
+    for raw in feature_rows:
+        feature = compact_feature(raw, args)
+        feature_id = int(feature["feature_idx"])
+        quant = quant_by_feature.get(feature_id)
+        if quant is None:
+            raise ValueError(
+                "Hybrid feature %d has no quantification row" % feature_id
+            )
+        seen.add(feature_id)
+        feature.update(
+            {name: quant.get(name) for name in HYBRID_QUANT_OUTPUT_COLUMNS}
+        )
+        feature["ms2_events"] = sorted(
+            events_by_feature.get(feature_id, ()),
+            key=lambda row: int(row["ms2_event_id"]),
+        )
+        merged_features.append(feature)
+    unexpected = sorted(set(quant_by_feature) - seen)
+    if unexpected:
+        raise ValueError(
+            "Hybrid quantification rows reference missing features: %s"
+            % ", ".join(map(str, unexpected[:10]))
+        )
+
+    assays = {
+        (str(row["psm_id"]), int(row["ms2_event_id"])): row
+        for row in assay_rows
+    }
+    merged_identifications = []
+    for row in identification_rows:
+        merged = {name: row.get(name) for name in IDENTIFICATION_COLUMNS}
+        event_id = row.get("ms2_event_id")
+        assay = (
+            None
+            if event_id is None
+            else assays.get((str(row["psm_id"]), int(event_id)))
+        )
+        merged.update(
+            {
+                "assay_id": None if assay is None else assay.get("assay_id"),
+                "assay_charge": None if assay is None else assay.get("charge"),
+                "assay_rt_sec": None if assay is None else assay.get("rt_sec"),
+                "assay_faims_cv": None if assay is None else assay.get("faims_cv"),
+                "monoisotopic_mz": None if assay is None else assay.get("monoisotopic_mz"),
+                "assay_conflict_status": None if assay is None else assay.get("conflict_status"),
+            }
+        )
+        merged_identifications.append(merged)
+    return merged_features, merged_identifications
 
 
 def compact_sort_key(row, kind, mode="mz_rt"):
@@ -289,18 +377,17 @@ class CompactOutputManager:
     def _prefix(self):
         explicit = self.args.get("o")
         if explicit:
-            path = Path(explicit)
-            if path.suffix in {".tsv", ".parquet"}:
-                return path.with_suffix("")
-            return path
+            return output_prefix(explicit)
         input_path = Path(self.args["file"])
         return input_path.parent / input_stem(str(input_path))
 
     def _target(self, kind, output_format):
+        if kind == "hybrid_features":
+            kind = "features"
+        elif kind == "merged_identifications":
+            kind = "identifications"
         if kind == "ms2":
             return ms2_output_path(self.args)
-        if kind in {"hybrid_feature_quant", "hybrid_ms2_audit", "identifications", "id_assays"}:
-            return hybrid_sidecar_path(self.args, kind)
         explicit = self.args.get("o")
         if kind == "features" and explicit and str(explicit).endswith(
             "." + output_format
@@ -318,7 +405,7 @@ class CompactOutputManager:
                 decimals=self.args.get("tsv_float_decimals", "roundtrip"),
             )
         dictionary_columns = ()
-        if kind in {"ms2", "hybrid_feature_quant", "hybrid_ms2_audit", "identifications", "id_assays"}:
+        if kind == "ms2":
             dictionary_columns = (
                 "run_id",
                 *( ("precursor_resolution", "precursor_mz_source") if kind == "ms2" else () ),
@@ -329,33 +416,43 @@ class CompactOutputManager:
 
     def _build_sinks(self):
         if not self.args.get("stop_after_hills"):
-            columns = feature_columns(
-                not self.args.get("no_mono_hills"),
-                bool(self.args.get("write_extra_details")),
+            hybrid = self.args.get("feature_mode") == "hybrid"
+            columns = (
+                hybrid_feature_columns(
+                    not self.args.get("no_mono_hills"),
+                    bool(self.args.get("write_extra_details")),
+                )
+                if hybrid
+                else feature_columns(
+                    not self.args.get("no_mono_hills"),
+                    bool(self.args.get("write_extra_details")),
+                )
             )
             self.sinks["features"] = self._sink(
-                "features", self.args.get("feature_format", "tsv"), columns
+                "hybrid_features" if hybrid else "features",
+                self.args.get("format", "tsv"),
+                columns,
             )
         if self.args.get("write_hills"):
             self.sinks["hills"] = self._sink(
                 "hills",
-                self.args.get("hills_format", "tsv"),
+                self.args.get("format", "tsv"),
                 hill_columns(not self.args.get("no_hill_list")),
             )
         if self.args.get("write_ms1"):
             self.sinks["ms1"] = self._sink(
-                "ms1", self.args.get("ms1_format", "tsv"), MS1_COLUMNS
+                "ms1", self.args.get("format", "tsv"), MS1_COLUMNS
             )
         if self.args.get("write_ms2"):
-            self.sinks["ms2"] = self._sink("ms2", "parquet", MS2_COLUMNS)
+            self.sinks["ms2"] = self._sink(
+                "ms2", self.args.get("format", "tsv"), MS2_COLUMNS
+            )
         if self.args.get("feature_mode") == "hybrid":
-            for kind, columns in (
-                ("hybrid_feature_quant", HYBRID_FEATURE_QUANT_COLUMNS),
-                ("hybrid_ms2_audit", HYBRID_MS2_AUDIT_COLUMNS),
-                ("identifications", IDENTIFICATION_COLUMNS),
-                ("id_assays", ID_ASSAY_COLUMNS),
-            ):
-                self.sinks[kind] = self._sink(kind, "parquet", columns)
+            self.sinks["identifications"] = self._sink(
+                "merged_identifications",
+                self.args.get("format", "parquet"),
+                MERGED_IDENTIFICATION_COLUMNS,
+            )
 
     def _preflight(self):
         targets = [sink.final_path for sink in self.sinks.values()]
@@ -379,6 +476,39 @@ class CompactOutputManager:
         )
         self.sinks["features"].append(converted)
 
+    def append_hybrid_results(
+        self,
+        feature_rows,
+        quant_rows,
+        audit_rows,
+        ms2_rows,
+        identification_rows,
+        assay_rows,
+    ):
+        features, identifications = merge_hybrid_output_rows(
+            feature_rows,
+            quant_rows,
+            audit_rows,
+            ms2_rows,
+            identification_rows,
+            assay_rows,
+            self.args,
+        )
+        features.sort(
+            key=lambda row: compact_sort_key(
+                row, "features", self.args.get("parquet_sort", "mz_rt")
+            )
+        )
+        identifications.sort(
+            key=lambda row: (
+                row.get("ms2_event_id") is None,
+                row.get("ms2_event_id") or -1,
+                row["psm_id"],
+            )
+        )
+        self.sinks["features"].append(features)
+        self.sinks["identifications"].append(identifications)
+
     def append_hills(self, rows):
         if "hills" not in self.sinks:
             return
@@ -401,35 +531,6 @@ class CompactOutputManager:
             converted = [compact_ms2(row, self.args) for row in batch]
             converted.sort(key=lambda row: compact_sort_key(row, "ms2"))
             self.sinks["ms2"].append(converted)
-
-    def _append_hybrid(self, kind, rows):
-        if kind not in self.sinks:
-            return
-        converted = [
-            {name: row.get(name) for name in self.schemas[kind].names}
-            for row in rows
-        ]
-        if kind == "hybrid_ms2_audit":
-            converted.sort(key=lambda row: row["ms2_event_id"])
-        elif kind == "hybrid_feature_quant":
-            converted.sort(key=lambda row: row["feature_id"])
-        elif kind == "id_assays":
-            converted.sort(key=lambda row: row["assay_id"])
-        else:
-            converted.sort(key=lambda row: (row.get("ms2_event_id") is None, row.get("ms2_event_id") or -1, row["psm_id"]))
-        self.sinks[kind].append(converted)
-
-    def append_hybrid_feature_quant(self, rows):
-        self._append_hybrid("hybrid_feature_quant", rows)
-
-    def append_hybrid_ms2_audit(self, rows):
-        self._append_hybrid("hybrid_ms2_audit", rows)
-
-    def append_identifications(self, rows):
-        self._append_hybrid("identifications", rows)
-
-    def append_id_assays(self, rows):
-        self._append_hybrid("id_assays", rows)
 
     def stage(self):
         if self._staged:
@@ -459,11 +560,8 @@ class CompactOutputManager:
                             ),
                         }
                     )
-                elif name in {
-                    "hybrid_feature_quant",
-                    "hybrid_ms2_audit",
-                    "identifications",
-                    "id_assays",
+                elif self.args.get("feature_mode") == "hybrid" and name in {
+                    "features", "identifications"
                 }:
                     provenance.update(
                         {

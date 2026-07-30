@@ -5,7 +5,7 @@ import pytest
 import biosaur2.output as output_module
 import biosaur2.search as search_module
 from biosaur2.legacy_output import CompactOutputManager, compact_ms1
-from biosaur2.output import round_intensity
+from biosaur2.output import planned_output_paths, round_intensity
 from biosaur2.schema import feature_columns
 
 
@@ -13,9 +13,7 @@ def _args(tmp_path, **updates):
     values = {
         "file": str(tmp_path / "sample.mzML.gz"),
         "o": str(tmp_path / "sample.features.tsv"),
-        "feature_format": "tsv",
-        "hills_format": "tsv",
-        "ms1_format": "tsv",
+        "format": "tsv",
         "write_hills": False,
         "write_ms1": False,
         "stop_after_hills": False,
@@ -56,6 +54,26 @@ def _feature(feature_idx=1, mz=500.0):
         "feature_idx": feature_idx,
         "area_sum": 42.25,
     }
+
+
+def test_planned_hybrid_and_duckdb_paths_are_per_input(tmp_path):
+    source = tmp_path / "sample.mzML.gz"
+    output = tmp_path / "results"
+    hybrid = {
+        "file": str(source),
+        "o": str(output / "sample.features.parquet"),
+        "format": "parquet",
+        "feature_mode": "hybrid",
+    }
+    assert planned_output_paths(hybrid) == [
+        output / "sample.features.parquet",
+        output / "sample.identifications.parquet",
+    ]
+
+    database = {**hybrid, "o": str(output), "format": "duckdb"}
+    assert planned_output_paths(database) == [
+        output / "sample.biosaur2.duckdb"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -111,7 +129,7 @@ def test_empty_compact_outputs_keep_explicit_schema(tmp_path):
     parquet_args = _args(
         tmp_path,
         o=str(tmp_path / "empty.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
     )
     parquet_manager = CompactOutputManager(parquet_args)
     parquet_manager.finalize()
@@ -128,7 +146,7 @@ def test_parquet_is_one_feature_file_without_sidecars(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "compact.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
     )
     manager = CompactOutputManager(args)
     manager.append_features([_feature()])
@@ -147,7 +165,7 @@ def test_pyarrow_provenance_is_final_and_omits_input_hash(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "provenance.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
     )
     input_path = tmp_path / "sample.mzML.gz"
     input_path.write_bytes(b"input")
@@ -168,11 +186,11 @@ def test_pyarrow_provenance_is_final_and_omits_input_hash(tmp_path):
     assert metadata[b"biosaur2_area_sum_rt"] == b"approximated_from_hill_anchors"
 
 
-def test_hybrid_summary_is_persisted_in_sidecar_metadata(tmp_path):
+def test_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "hybrid.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
         feature_mode="hybrid",
     )
     (tmp_path / "sample.mzML.gz").write_bytes(b"input")
@@ -183,19 +201,20 @@ def test_hybrid_summary_is_persisted_in_sidecar_metadata(tmp_path):
     }
     manager.finalize()
     metadata = pq.ParquetFile(
-        tmp_path / "sample.ms2_feature_links.parquet"
+        tmp_path / "hybrid.features.parquet"
     ).metadata.metadata
-    assert metadata[b"biosaur2_hybrid_schema_version"] == b"4"
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"5"
     assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
         "_hybrid_summary"
     ]
+    assert (tmp_path / "hybrid.identifications.parquet").is_file()
 
 
 def test_write_extra_details_stays_in_same_feature_file(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "details.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
         write_extra_details=True,
     )
     feature = _feature()
@@ -230,11 +249,10 @@ def test_default_nested_arrays_and_hill_point_rt_are_typed(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "nested.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
         no_mono_hills=False,
         no_hill_list=False,
         write_hills=True,
-        hills_format="parquet",
     )
     feature = _feature()
     feature["mono_hills_scan_lists"] = [1, 2]
@@ -263,9 +281,7 @@ def test_default_nested_arrays_and_hill_point_rt_are_typed(tmp_path):
     )
     manager.finalize()
     feature_row = pq.read_table(tmp_path / "nested.features.parquet").to_pylist()[0]
-    hill_row = pq.read_table(
-        tmp_path / "nested.features.hills.parquet"
-    ).to_pylist()[0]
+    hill_row = pq.read_table(tmp_path / "nested.hills.parquet").to_pylist()[0]
     assert feature_row["mono_hills_scan_lists"] == [1, 2]
     assert feature_row["mono_hills_intensity_list"] == [3.0, 4.0]
     assert hill_row["hills_rt_list"] == [60.0, 120.0]
@@ -275,7 +291,7 @@ def test_narrow_integer_overflow_is_an_output_error(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "overflow.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
     )
     feature = _feature()
     feature["charge"] = 128
@@ -291,7 +307,7 @@ def test_default_duckdb_selection_warns_and_falls_back_to_pyarrow(
     args = _args(
         tmp_path,
         o=str(tmp_path / "fallback.features.parquet"),
-        feature_format="parquet",
+        format="parquet",
         parquet_engine="duckdb",
     )
 
@@ -306,27 +322,6 @@ def test_default_duckdb_selection_warns_and_falls_back_to_pyarrow(
     manager.append_features([_feature()])
     manager.finalize()
     assert (tmp_path / "fallback.features.parquet").exists()
-
-
-def test_auxiliary_parquet_also_warns_and_falls_back_to_pyarrow(
-    tmp_path, monkeypatch, caplog
-):
-    args = _args(
-        tmp_path,
-        feature_format="tsv",
-        write_hills=True,
-        hills_format="parquet",
-        parquet_engine="duckdb",
-    )
-
-    def unavailable(_args):
-        raise ImportError("simulated missing DuckDB")
-
-    monkeypatch.setattr(search_module, "DuckDBOutputManager", unavailable)
-    manager = search_module._create_output_manager(args)
-    assert isinstance(manager, CompactOutputManager)
-    assert args["parquet_engine"] == "pyarrow"
-    assert "falling back to PyArrow" in caplog.text
 
 
 def test_failed_overwrite_restores_existing_final(tmp_path, monkeypatch):

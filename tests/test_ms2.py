@@ -3,6 +3,7 @@ import gzip
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from biosaur2 import preprocessing, utils
 from biosaur2.legacy_output import CompactOutputManager
@@ -165,15 +166,16 @@ def test_plain_and_gzip_mzml_are_logically_equivalent(tmp_path):
     assert plain_rows == gzip_rows
 
 
-def test_ms2_schema_and_atomic_sidecar(tmp_path):
+@pytest.mark.parametrize("output_format", ["tsv", "parquet"])
+def test_ms2_schema_and_atomic_sidecar_uses_unified_format(
+    tmp_path, output_format
+):
     source = tmp_path / "sample.mzML.gz"
     source.write_bytes(b"input")
     args = {
         "file": str(source),
-        "o": str(tmp_path / "custom.features.tsv"),
-        "feature_format": "tsv",
-        "hills_format": "tsv",
-        "ms1_format": "tsv",
+        "o": str(tmp_path / ("custom.features." + output_format)),
+        "format": output_format,
         "write_hills": False,
         "write_ms1": False,
         "write_ms2": True,
@@ -204,9 +206,14 @@ def test_ms2_schema_and_atomic_sidecar(tmp_path):
             }
         ]
     )
-    target = tmp_path / "sample.ms2.parquet"
+    target = tmp_path / ("sample.ms2." + output_format)
     assert not target.exists()
     manager.finalize()
+    if output_format == "tsv":
+        lines = target.read_text(encoding="utf-8").splitlines()
+        assert lines[0].startswith("run_id\tms2_event_id\tms2_index")
+        assert lines[1].startswith("sample\t0\t0")
+        return
     schema = pq.read_schema(target)
     assert schema == compact_schemas()["ms2"].with_metadata(schema.metadata)
     assert schema.field("selected_ion_mz").type == pa.float64()

@@ -1,15 +1,13 @@
 import pyarrow.parquet as pq
 
-from biosaur2.legacy_output import CompactOutputManager
+from biosaur2.legacy_output import CompactOutputManager, merge_hybrid_output_rows
 
 
 def _args(tmp_path, **updates):
     values = {
         "file": str(tmp_path / "sample.mzML"),
         "o": str(tmp_path / "legacy.tsv"),
-        "feature_format": "tsv",
-        "hills_format": "tsv",
-        "ms1_format": "tsv",
+        "format": "tsv",
         "write_hills": False,
         "write_ms1": False,
         "stop_after_hills": False,
@@ -62,7 +60,7 @@ def test_empty_legacy_parquet_has_typed_schema(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "legacy.parquet"),
-        feature_format="parquet",
+        format="parquet",
     )
     manager = CompactOutputManager(args)
     manager.finalize()
@@ -71,3 +69,54 @@ def test_empty_legacy_parquet_has_typed_schema(tmp_path):
     assert schema.field("nScans").type.bit_width == 16
     assert schema.field("mz").type.bit_width == 32
     assert b"biosaur2_schema_version" in schema.metadata
+
+
+def test_hybrid_merge_embeds_only_feature_linked_ms2_and_merges_assay():
+    features, identifications = merge_hybrid_output_rows(
+        [
+            {"feature_idx": 1, "rtApex": 60.0},
+            {"feature_idx": 2, "rtApex": 120.0},
+        ],
+        [
+            {"feature_id": 1, "quant_value": 10.0},
+            {"feature_id": 2, "quant_value": 20.0},
+        ],
+        [
+            {"ms2_event_id": 10, "feature_id": 1, "status": "linked"},
+            {"ms2_event_id": 11, "feature_id": 1, "status": "linked"},
+            {"ms2_event_id": 12, "feature_id": None, "status": "unresolved"},
+        ],
+        [
+            {"run_id": "run", "ms2_event_id": 10, "metadata_flags": 0},
+            {"run_id": "run", "ms2_event_id": 11, "metadata_flags": 0},
+            {"run_id": "run", "ms2_event_id": 12, "metadata_flags": 0},
+        ],
+        [
+            {
+                "run_id": "run",
+                "psm_id": "psm-1",
+                "ms2_event_id": 12,
+                "mapping_status": "mapped",
+                "q_value": 0.001,
+            }
+        ],
+        [
+            {
+                "psm_id": "psm-1",
+                "ms2_event_id": 12,
+                "assay_id": 7,
+                "charge": 2,
+                "conflict_status": "unique",
+            }
+        ],
+        {"no_mono_hills": True, "write_extra_details": False},
+    )
+
+    assert [len(row["ms2_events"]) for row in features] == [2, 0]
+    assert {event["ms2_event_id"] for event in features[0]["ms2_events"]} == {
+        10,
+        11,
+    }
+    assert identifications[0]["ms2_event_id"] == 12
+    assert identifications[0]["assay_id"] == 7
+    assert identifications[0]["assay_charge"] == 2

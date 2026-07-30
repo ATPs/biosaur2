@@ -259,8 +259,12 @@ abundance.
 ### Stage 7: generic residual local recovery
 
 Unresolved generic events are evaluated against raw and residual isotope traces.
-The algorithm uses a run-derived width limit and a bounded local search. Local
-refinement may propose:
+With `--generic-local-max-width-sec auto`, the run-derived limit is q99 of
+strict-feature `(rt_end_sec - rt_start_sec)`, clamped to 15-60 seconds, with a
+30-second fallback when no strict widths exist. An explicit positive value
+disables this adaptation. The limit rejects broad candidate components; it is
+not the before/after search window controlled by `--ms2-rt-tolerance-sec`.
+Local refinement may propose:
 
 - `split`: common RT segmentation across isotope traces;
 - `merge`: combine compatible adjacent trace fragments;
@@ -426,21 +430,27 @@ process pools are not resized.
 
 ## Output contract
 
-Hybrid mode publishes a single de-duplicated population and sidecars:
+Hybrid mode publishes a single de-duplicated population in two primary tables:
 
 | Output | Contract |
 |---|---|
-| `<stem>.features.parquet` | One row per accepted MS1 feature. |
-| `<stem>.feature_quant.parquet` | Exactly one positive quantitative row per accepted feature ID, including all three named abundance columns. |
-| `<stem>.ms2.parquet` | One normalized precursor metadata row per MS2 event. |
-| `<stem>.ms2_feature_links.parquet` | Exactly one audit/association row per MS2 event, including null outcomes. |
-| `<stem>.identifications.parquet` | PSM parsing, mapping and assay status. |
-| `<stem>.id_assays.parquet` | Accepted exact direct-assay definitions and confidence fields. |
+| `<stem>.features.parquet` | One row per accepted MS1 feature, including its quantification fields and a typed list of zero or more linked MS2 event/audit structs. |
+| `<stem>.identifications.parquet` | One accepted parsed PSM row with nullable direct-assay fields merged into the same row. PSM-bearing events may remain even when no feature was obtained. |
+| `<stem>.external_id_evidence.parquet` | Project-only donor-assay attempts in a recipient run, including accepted and rejected target/decoy outcomes. |
+| `<stem>.biosaur2.duckdb` | Per-input alternative containing the same run tables; project processing adds external evidence to that run's database. |
 | `project.duckdb` | Run status, paths, resolved options, stage/cache summaries, alignment and validation metadata. |
 
-Feature IDs are positive and unique. Feature and quantification ID sets must be
-equal. A quantitative MS2 link must reference an existing positive-quant feature.
-Project validation checks these contracts before considering a run successful.
+Feature IDs are positive and unique. Every feature has exactly one merged
+quantitative record. Every persisted `ms2_events` member references its parent
+positive-quant feature. Internal audit finalization still classifies every MS2
+event, but an event with neither a feature nor a PSM is retained only in
+summary counts, not as a public row. Project validation checks the published
+contracts before considering a run successful.
+
+One public `--format {tsv,parquet,duckdb}` controls all requested outputs.
+Legacy defaults to TSV and Hybrid defaults to Parquet. `--write-ms2` is a
+legacy-only normalized-precursor diagnostic because Hybrid stores linked
+events with features and PSM-bearing events with identifications.
 
 ## Important defaults
 
@@ -450,12 +460,18 @@ Project validation checks these contracts before considering a run successful.
 | PSM q-value maximum | 0.01 | Direct-assay input control. |
 | targeted MS2 RT tolerance | 120 s | Initial bounded local search window; run calibration may tighten retries. |
 | maximum charge | 7 | Charge hypotheses/features up to z=7. |
-| quantification | `envelope_area` | Final assigned envelope area. |
+| output format | legacy: `tsv`; hybrid: `parquet` | One format control for all run tables. |
+| quantification | `all` | Report envelope area, mono area and envelope apex; envelope area is `quant_value`. |
 | project baseline | `edge_linear` | Optional baseline preprocessing. |
 | generic extraction q-value maximum | 0.01 | Separate target/decoy family; configurable. |
+| generic selected-isotope errors | `0,1,2,3` | Test a selected peak interpreted as M through M+3. |
+| generic local isotope channels | 5 | Channels evaluated for a generic envelope. |
+| generic local point minima | mono 3; channel 3; supported channels 2 | Standard local-recovery support. |
+| generic local isotope cosine | 0.90 | Standard observed/averagine envelope agreement. |
+| generic local maximum width | `auto` | Strict-feature width q99 clamped to 15-60 s; fallback 30 s. |
+| relaxed local minima/cosine | mono 2; channel 2; channels 2; cosine 0.95 | Guarded retry defaults. |
 | relaxed MS2 feature | false | Conservative MS2-only retry is disabled by default. |
-| run workers | 1 | One file worker unless explicitly increased. |
-| internal workers | 4 | Per-file worker budget unless explicitly increased. |
+| workers | 4 | One total CPU budget dynamically shared across files, targeting about four workers per active file. |
 
 ## Module responsibilities
 

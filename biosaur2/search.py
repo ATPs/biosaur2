@@ -77,6 +77,42 @@ def _positive_integer(value):
     return parsed
 
 
+def _comma_separated_integers(value):
+    try:
+        parsed = tuple(int(item.strip()) for item in value.split(','))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            'must be a comma-separated integer list, for example 0,1,2,3'
+        ) from exc
+    if not parsed:
+        raise argparse.ArgumentTypeError('must contain at least one integer')
+    if len(parsed) != len(set(parsed)):
+        raise argparse.ArgumentTypeError('must not contain duplicate values')
+    if any(item < -8 or item > 8 for item in parsed):
+        raise argparse.ArgumentTypeError('values must be between -8 and 8')
+    return tuple(sorted(parsed))
+
+
+def _auto_or_positive_float(value):
+    if value == 'auto':
+        return value
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be 'auto' or a positive number of seconds"
+        ) from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            "must be 'auto' or a finite positive number of seconds"
+        )
+    return parsed
+
+
+def _advanced_help(show_all, text):
+    return text if show_all else argparse.SUPPRESS
+
+
 def _option_was_supplied(*spellings):
     return any(value in sys.argv[1:] for value in spellings)
 
@@ -94,12 +130,12 @@ def _is_mzml_input(filename):
 def _create_output_manager(run_args):
     if run_args.get('dia2'):
         return None
-    if run_args.get('duckdb_output'):
+    if run_args.get('format') == 'duckdb':
         try:
             return DuckDBOutputManager(run_args)
         except ImportError as exc:
             raise ImportError(
-                '--duckdb-output requires DuckDB; install duckdb or biosaur2[duckdb].'
+                '--format duckdb requires DuckDB; install duckdb or biosaur2[duckdb].'
             ) from exc
     if uses_duckdb(run_args):
         try:
@@ -164,14 +200,13 @@ def _run_args_for_file(args, filename, multiple_inputs, allocated_workers=None):
         if key not in {"files", "continue_on_error"}
     }
     run_args["file"] = filename
-    if multiple_inputs and run_args["o"]:
-        extension = "parquet" if run_args.get("feature_format") == "parquet" else "tsv"
+    if multiple_inputs and run_args["o"] and run_args.get("format") != "duckdb":
+        extension = run_args["format"]
         output_directory = Path(run_args["o"])
         run_args["o"] = str(
             output_directory / ("%s.features.%s" % (input_stem(filename), extension))
         )
-        if not run_args.get("duckdb_output"):
-            run_args["_ms2_output_directory"] = str(output_directory)
+        run_args["_ms2_output_directory"] = str(output_directory)
     run_args["_multiple_inputs"] = multiple_inputs
     workers = args["workers"] if allocated_workers is None else allocated_workers
     run_args["nprocs"] = workers
@@ -222,21 +257,11 @@ def _log_batch_report(logger, files, results):
 def _execute_inputs(args, parser, logger):
     multiple_inputs = len(args['files']) > 1
     if multiple_inputs:
-        stems = [input_stem(filename) for filename in args['files']]
-        if len(stems) != len(set(stems)):
-            parser.error('Multiple inputs resolve to duplicate output stems.')
         if args['o']:
             output_directory = Path(args['o'])
             if output_directory.exists() and not output_directory.is_dir():
                 parser.error('-o must be a directory when multiple inputs are supplied.')
             output_directory.mkdir(parents=True, exist_ok=True)
-        if args['duckdb_output']:
-            duckdb_directory = Path(args['duckdb_output'])
-            if duckdb_directory.suffix.lower() == '.duckdb':
-                parser.error('--duckdb-output must be a directory for multiple inputs.')
-            if duckdb_directory.exists() and not duckdb_directory.is_dir():
-                parser.error('--duckdb-output must be a directory for multiple inputs.')
-            duckdb_directory.mkdir(parents=True, exist_ok=True)
 
     planned_paths = []
     for filename in args['files']:
@@ -329,71 +354,50 @@ def run():
         from .project_cli import run_build_manifest_alias
 
         return run_build_manifest_alias(sys.argv[2:])
+    show_all = '--help-all' in sys.argv[1:]
+    if show_all:
+        sys.argv = [value for value in sys.argv if value != '--help-all'] + ['--help']
+    help_epilog = '''
+Input notes:
+  mzML/mzML.gz input should contain centroided MS1 spectra. Hybrid mode also
+  reads DDA MS2 precursor metadata and can use a same-run Percolator target
+  PSM table.
+
+Outputs:
+  Legacy mode defaults to <stem>.features.tsv. Hybrid mode defaults to two
+  Parquet files: <stem>.features.parquet contains feature coordinates,
+  quantification and linked MS2 events; <stem>.identifications.parquet contains
+  accepted PSM fields and direct-assay fields. --format duckdb stores the same
+  tables in one <stem>.biosaur2.duckdb database per input.
+
+Examples:
+  biosaur2 input.mzML.gz
+  biosaur2 input.mzML.gz --format parquet
+  biosaur2 input.mzML.gz --feature-mode hybrid
+  biosaur2 input.mzML.gz --feature-mode hybrid \\
+    --psm-path input.percolator.target.psms.tsv \\
+    --psm-q-value-max 0.01 --fixed-mod C=UNIMOD:4 --quant-method all
+  biosaur2 input.mzML.gz --feature-mode hybrid \\
+    --cache-dir .biosaur2_cache --keep-cache
+
+See README.md for a short introduction and docs/ for inputs, parameters,
+outputs, quantification and multi-run project workflows.
+    '''
+    if show_all:
+        help_epilog += '''
+
+Advanced output notes:
+  Feature rtStart, rtApex and rtEnd are minutes; Hybrid rt_*_sec and MS2 RT are
+  seconds. Parquet defaults to DuckDB V2, ZSTD level 6 and compact numeric
+  types. Diagnostic hills, MS1, MS2 and extra feature columns are opt-in.
+        '''
     parser = argparse.ArgumentParser(
         description=(
             'Detect and quantify isotope features in centroided LC-MS1 mzML '
             'data. Legacy detection is the default; use --feature-mode hybrid '
             'for identification/MS2-guided residual feature detection.'
         ),
-        epilog='''
-Input notes:
-  mzML/mzML.gz input should contain centroided MS1 spectra. Hybrid mode also
-  reads DDA MS2 precursor metadata and optionally a same-run Percolator target
-  PSM table. Profile, DIA/DIA2, and reusable hills paths are experimental.
-
-Output contract:
-  Plain invocation writes one compact features.tsv file. Every requested
-  Parquet product uses DuckDB V2 with ZSTD level 6, including
-  hills/MS1 Parquet when features remain TSV. If DuckDB is unavailable
-  Biosaur2 warns and falls back to optimized PyArrow. No feature sidecars or
-  manifest are produced; feature Parquet is one compact features.parquet file.
-
-  Feature/hill rtStart, rtApex, and rtEnd are in minutes. MS1 RT is in seconds;
-  area_sum is raw trapezoidal intensity * seconds across the -iuse isotope
-  subset. Missing FAIMS, im, native scanApex, errors, and area_sum are null.
-
-  Default Parquet storage uses float32, int8 charge/nIsotopes, int16 nScans,
-  and int32 scan/feature_idx/list IDs. --64 widens structured numeric storage.
-  Intensities are rounded half-away-from-zero to 0 decimals only at output.
-
-  Default feature columns:
-    massCalib rtApex intensityApex intensitySum charge nIsotopes nScans mz
-    rtStart rtEnd FAIMS im mono_hills_scan_lists mono_hills_intensity_list
-    scanApex isoerror isoerror2 feature_idx area_sum
-  --no-mono-hills removes the two mono_hills arrays. --write-extra-details
-  adds the original four nested diagnostic columns to the same feature file.
-
-Examples:
-  # Ordinary untargeted LC-MS1 feature detection (default legacy mode)
-  biosaur2 input.mzML.gz
-
-  # Compact Parquet feature output for downstream analysis
-  biosaur2 input.mzML.gz --feature-format parquet
-
-  # Hybrid DDA without PSMs: strict features plus generic MS2 evidence
-  biosaur2 input.mzML.gz --feature-mode hybrid --feature-format parquet
-
-  # Hybrid DDA with q-filtered same-run Percolator PSMs
-  biosaur2 input.mzML.gz --feature-mode hybrid \\
-    --psm-path input.percolator.target.psms.tsv \\
-    --psm-q-value-max 0.01 --fixed-mod C=UNIMOD:4 \\
-    --quant-method all --feature-format parquet
-
-  # Keep all cache layers so a later compatible command can reuse them
-  biosaur2 input.mzML.gz --feature-mode hybrid \\
-    --cache-dir .biosaur2_cache --keep-cache \\
-    --feature-format parquet
-
-  # Smaller feature payload when point arrays are not needed
-  biosaur2 input.mzML.gz --feature-format parquet --no-mono-hills
-
-  # Put requested ordinary products in one DuckDB database
-  biosaur2 input.mzML.gz --duckdb-output output.biosaur2.duckdb
-
-Use `biosaur2 project --help` for manifest-driven multi-run processing.
-See README.md for input examples and option guidance, design.md for the
-algorithm, and updates/2026-07-30.md for validation results.
-    ''',
+        epilog=help_epilog,
         formatter_class=_HelpFormatter)
 
     parser.add_argument(
@@ -402,27 +406,32 @@ algorithm, and updates/2026-07-30.md for validation results.
         version='%(prog)s {}'.format(_get_biosaur2_version()),
     )
     parser.add_argument(
+        '--help-all',
+        action='help',
+        help='show everyday and advanced options, then exit',
+    )
+    parser.add_argument(
         'files',
         help='input files: mzML (.mzML/.mzML.gz) or hills (Experimental) (.hills.tsv/.hills.parquet/.hills.npz)',
         nargs='+',
     )
-    parser.add_argument('-mini', help='minimum centroid intensity considered during hill detection', default=1, type=float)
-    parser.add_argument('-minmz', help='lower m/z boundary for MS1 feature detection', default=350, type=float)
-    parser.add_argument('-maxmz', help='upper m/z boundary for MS1 feature detection', default=1500, type=float)
-    parser.add_argument('-pasefmini', help='minimum intensity after combining PASEF/ion-mobility hills', default=100, type=float)
-    parser.add_argument('-htol', help='maximum point-to-hill m/z deviation in ppm', default=8, type=float)
-    parser.add_argument('-itol', help='maximum isotope-envelope mass deviation in ppm', default=8, type=float)
-    parser.add_argument('-ignore_iso_calib', help='disable run-specific isotope mass-error calibration and use configured tolerances', action='store_true')
-    parser.add_argument('-use_hill_calib', help='enable experimental run-specific hill mass-error calibration', action='store_true')
-    parser.add_argument('-paseftol', help='1/K0 ion-mobility tolerance used to connect PASEF hill points', default=0.05, type=float)
-    parser.add_argument('-nm', help='ionization polarity selector: 0=positive, 1=negative', default=0, type=int)
+    parser.add_argument('-mini', help=_advanced_help(show_all, 'minimum centroid intensity considered during hill detection'), default=1, type=float)
+    parser.add_argument('-minmz', help=_advanced_help(show_all, 'lower m/z boundary for MS1 feature detection'), default=350, type=float)
+    parser.add_argument('-maxmz', help=_advanced_help(show_all, 'upper m/z boundary for MS1 feature detection'), default=1500, type=float)
+    parser.add_argument('-pasefmini', help=_advanced_help(show_all, 'minimum intensity after combining PASEF/ion-mobility hills'), default=100, type=float)
+    parser.add_argument('-htol', help=_advanced_help(show_all, 'maximum point-to-hill m/z deviation in ppm'), default=8, type=float)
+    parser.add_argument('-itol', help=_advanced_help(show_all, 'maximum isotope-envelope mass deviation in ppm'), default=8, type=float)
+    parser.add_argument('-ignore_iso_calib', help=_advanced_help(show_all, 'disable run-specific isotope mass-error calibration and use configured tolerances'), action='store_true')
+    parser.add_argument('-use_hill_calib', help=_advanced_help(show_all, 'enable experimental run-specific hill mass-error calibration'), action='store_true')
+    parser.add_argument('-paseftol', help=_advanced_help(show_all, '1/K0 ion-mobility tolerance used to connect PASEF hill points'), default=0.05, type=float)
+    parser.add_argument('-nm', help=_advanced_help(show_all, 'ionization polarity selector: 0=positive, 1=negative'), default=0, type=int)
     parser.add_argument('-o', help='single-input feature path; with multiple inputs this must be an output directory; empty writes beside the input', default='')
-    parser.add_argument('-iuse', help='isotopes used for intensity and area_sum: -1=all assigned, 0=mono only, N=mono plus N isotopes', default=-1, type=int)
-    parser.add_argument('-hvf', help='Threshold to split hills into multiple if local minimum intensity multiplied by hvf is less than both surrounding local maximums', default=1.3, type=float)
-    parser.add_argument('-ivf', help='Threshold to split isotope pattern into multiple features if local minimum intensity multiplied by ivf is less right local maximum', default=5.0, type=float)
-    parser.add_argument('-minlh', help='minimum number of MS1 points in an ordinary hill', default=2, type=int)
-    parser.add_argument('-pasefminlh', help='minimum number of points in a PASEF hill', default=1, type=int)
-    parser.add_argument('-cmin', help='minimum feature/precursor charge hypothesis', default=1, type=int)
+    parser.add_argument('-iuse', help=_advanced_help(show_all, 'isotopes used for intensity and area_sum: -1=all assigned, 0=mono only, N=mono plus N isotopes'), default=-1, type=int)
+    parser.add_argument('-hvf', help=_advanced_help(show_all, 'hill splitting ratio at an internal local minimum'), default=1.3, type=float)
+    parser.add_argument('-ivf', help=_advanced_help(show_all, 'isotope-pattern splitting ratio at an internal local minimum'), default=5.0, type=float)
+    parser.add_argument('-minlh', help=_advanced_help(show_all, 'minimum number of MS1 points in an ordinary hill'), default=2, type=int)
+    parser.add_argument('-pasefminlh', help=_advanced_help(show_all, 'minimum number of points in a PASEF hill'), default=1, type=int)
+    parser.add_argument('-cmin', help=_advanced_help(show_all, 'minimum feature/precursor charge hypothesis'), default=1, type=int)
     parser.add_argument(
         '-cmax', '--max-charge', '--max_charge', dest='cmax',
         help='maximum feature/precursor charge hypothesis',
@@ -443,39 +452,32 @@ algorithm, and updates/2026-07-30.md for validation results.
         help='continue scheduling independent input files after a failed file',
         action='store_true',
     )
-    parser.add_argument('-dia',  help='create mgf file for DIA MS/MS. Experimental', action='store_true')
-    parser.add_argument('-dia2',  help='create mgf file for DIA MS/MS with no look at MS1 spectra. Experimental', action='store_true')
-    parser.add_argument('-diahtol', help='experimental DIA hill mass tolerance in ppm', default=25, type=float)
-    parser.add_argument('-diaminlh', help='experimental minimum DIA hill length', default=1, type=int)
-    parser.add_argument('-diadynrange', help='experimental DIA dynamic-range limit', default=1000, type=int)
-    parser.add_argument('-min_ms2_peaks', help='minimum fragment-peak count for an experimental MGF entry', default=5, type=int)
-    parser.add_argument('-mgf', help='experimental DIA/DIA2 MGF output path; empty derives it from the input', default='')
-    parser.add_argument('-debug', help='log debugging information', action='store_true')
-    parser.add_argument('-tof', help='smart tof processing. Experimental', action='store_true')
-    parser.add_argument('-profile', help='profile processing. Experimental', action='store_true')
-    parser.add_argument('-write_hills', '--write-hills', dest='write_hills', help='write detected hills output file (format is controlled by --hills-format)', action='store_true')
-    parser.add_argument(
-        '--hills_format', '--hills-format',
-        dest='hills_format',
-        help='hills output format used by -write_hills',
-        default='tsv',
-        choices=['tsv', 'parquet'],
-    )
+    parser.add_argument('-dia',  help=_advanced_help(show_all, 'create MGF for experimental DIA processing'), action='store_true')
+    parser.add_argument('-dia2',  help=_advanced_help(show_all, 'create MGF for experimental DIA processing without MS1'), action='store_true')
+    parser.add_argument('-diahtol', help=_advanced_help(show_all, 'experimental DIA hill mass tolerance in ppm'), default=25, type=float)
+    parser.add_argument('-diaminlh', help=_advanced_help(show_all, 'experimental minimum DIA hill length'), default=1, type=int)
+    parser.add_argument('-diadynrange', help=_advanced_help(show_all, 'experimental DIA dynamic-range limit'), default=1000, type=int)
+    parser.add_argument('-min_ms2_peaks', help=_advanced_help(show_all, 'minimum fragment-peak count for an experimental MGF entry'), default=5, type=int)
+    parser.add_argument('-mgf', help=_advanced_help(show_all, 'experimental DIA/DIA2 MGF output path'), default='')
+    parser.add_argument('-debug', help=_advanced_help(show_all, 'log debugging information'), action='store_true')
+    parser.add_argument('-tof', help=_advanced_help(show_all, 'enable experimental TOF processing'), action='store_true')
+    parser.add_argument('-profile', help=_advanced_help(show_all, 'enable experimental profile processing'), action='store_true')
+    parser.add_argument('-write_hills', '--write-hills', dest='write_hills', help=_advanced_help(show_all, 'write detected hills using --format'), action='store_true')
     parser.add_argument(
         '--no_hill_list', '--no-hill-list',
         dest='no_hill_list',
-        help='for -write_hills output, omit all point arrays including scan, intensity, m/z, and RT (output cannot be reused for feature detection)',
+        help=_advanced_help(show_all, 'for --write-hills, omit point arrays; the result cannot be reused for feature detection'),
         action='store_true',
     )
     parser.add_argument(
         '--write_ms1', '--write-ms1',
         dest='write_ms1',
-        help='write MS1 summary output (scan_id, RT in seconds, total_intensity)',
+        help=_advanced_help(show_all, 'write MS1 scan_id, RT seconds and total intensity using --format'),
         action='store_true',
     )
     parser.add_argument(
         '--write-ms2',
-        help='write compact precursor-only <input-stem>.ms2.parquet sidecar',
+        help=_advanced_help(show_all, 'legacy-only diagnostic export of every normalized precursor event using --format'),
         action='store_true',
     )
     parser.add_argument(
@@ -486,8 +488,8 @@ algorithm, and updates/2026-07-30.md for validation results.
     )
     parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM TSV (optionally compressed); empty runs hybrid without direct PSM assays')
     parser.add_argument('--psm-q-value-max', type=float, default=0.01, help='maximum Percolator PSM q-value accepted before direct-assay construction')
-    parser.add_argument('--psm-pep-max', type=float, default=None, help='optional maximum PSM posterior error probability; none disables the additional PEP filter')
-    parser.add_argument('--fixed-mod', action='append', default=[], help='explicit hybrid fixed modification SITE=MOD; repeatable')
+    parser.add_argument('--psm-pep-max', type=float, default=None, help=_advanced_help(show_all, 'optional maximum PSM posterior error probability; none disables the additional PEP filter'))
+    parser.add_argument('--fixed-mod', action='append', default=[], help='repeatable fixed modification SITE=MOD, for example C=UNIMOD:4 or peptide_n_term=UNIMOD:1')
     parser.add_argument(
         '--quant-method',
         choices=('all', 'envelope_area', 'mono_area', 'envelope_apex'),
@@ -496,18 +498,18 @@ algorithm, and updates/2026-07-30.md for validation results.
     )
     parser.add_argument(
         '--feature-baseline', choices=('none', 'edge_linear'), default=None,
-        help=(
+        help=_advanced_help(show_all, (
             'hybrid quantification baseline preprocessing '
             '(default: automatic; edge_linear in hybrid mode, none otherwise)'
-        ),
+        )),
     )
     parser.add_argument(
         '--direct-id', action=argparse.BooleanOptionalAction, default=True,
-        help='enable/disable q-filtered same-run PSM assay association and local recovery in hybrid mode',
+        help=_advanced_help(show_all, 'enable/disable q-filtered same-run PSM assay association and local recovery in hybrid mode'),
     )
     parser.add_argument(
         '--external-id', action=argparse.BooleanOptionalAction, default=True,
-        help='project compatibility switch for aligned external assays; single-run commands have no donor runs',
+        help=_advanced_help(show_all, 'project compatibility switch for aligned external assays; single-run commands have no donor runs'),
     )
     parser.add_argument(
         '--generic-ms2-refine', action=argparse.BooleanOptionalAction, default=True,
@@ -525,11 +527,11 @@ algorithm, and updates/2026-07-30.md for validation results.
         '--relaxed-ms2-feature',
         action=argparse.BooleanOptionalAction,
         default=False,
-        help=(
+        help=_advanced_help(show_all, (
             'retry otherwise unresolved MS2 once with conservative multi-scan '
             'criteria; direct retries require same-run PSM q-value < 0.01 and '
             'generic retries retain paired target-decoy control'
-        ),
+        )),
     )
     parser.add_argument(
         '--cache-dir',
@@ -547,6 +549,39 @@ algorithm, and updates/2026-07-30.md for validation results.
         help='selected-ion precursor tolerance in ppm for generic MS2 hypotheses',
     )
     parser.add_argument(
+        '--generic-ms2-isotope-errors',
+        type=_comma_separated_integers,
+        default=(0, 1, 2, 3),
+        help=_advanced_help(
+            show_all,
+            'candidate selected-isotope indices. For error N, mono m/z is '
+            'selected-ion m/z - N*1.003354835/charge. Default 0,1,2,3 tests M '
+            'through M+3; negative values infer a mono peak above the selected '
+            'peak and should be used only for validated unusual metadata',
+        ),
+    )
+    parser.add_argument('--generic-local-isotope-count', type=_positive_integer, default=5, help=_advanced_help(show_all, 'number of isotope channels evaluated for each generic local envelope'))
+    parser.add_argument('--generic-local-min-mono-points', type=_positive_integer, default=3, help=_advanced_help(show_all, 'minimum nonzero MS1 scans required in the monoisotopic channel for standard generic local recovery'))
+    parser.add_argument('--generic-local-min-channel-points', type=_positive_integer, default=3, help=_advanced_help(show_all, 'minimum nonzero MS1 scans required for an isotope channel to count as supported in standard generic local recovery'))
+    parser.add_argument('--generic-local-min-supported-channels', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum isotope channels meeting --generic-local-min-channel-points in standard generic local recovery'))
+    parser.add_argument('--generic-local-min-isotope-cosine', type=float, default=0.90, help=_advanced_help(show_all, 'minimum cosine similarity between the observed integrated envelope and the averagine envelope in standard generic local recovery'))
+    parser.add_argument(
+        '--generic-local-max-width-sec',
+        type=_auto_or_positive_float,
+        default='auto',
+        help=_advanced_help(
+            show_all,
+            "maximum recovered component width in seconds. 'auto' uses the "
+            '99th percentile of strict-feature widths, clamped to 15-60 s; '
+            'if no strict widths exist it uses 30 s. This rejects overly broad '
+            'components and is separate from --ms2-rt-tolerance-sec',
+        ),
+    )
+    parser.add_argument('--generic-relaxed-min-mono-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum monoisotopic MS1 points for the optional relaxed generic retry'))
+    parser.add_argument('--generic-relaxed-min-channel-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum points for a supported isotope channel in the optional relaxed generic retry'))
+    parser.add_argument('--generic-relaxed-min-supported-channels', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum supported isotope channels in the optional relaxed generic retry'))
+    parser.add_argument('--generic-relaxed-min-isotope-cosine', type=float, default=0.95, help=_advanced_help(show_all, 'minimum averagine cosine in the optional relaxed retry; its higher default offsets the two-point allowance'))
+    parser.add_argument(
         '--ms2-rt-tolerance-sec', dest='ms2_rt_tolerance_sec',
         type=float, default=120.0,
         help=(
@@ -555,62 +590,55 @@ algorithm, and updates/2026-07-30.md for validation results.
         ),
     )
     parser.add_argument(
-        '--ms1_format', '--ms1-format',
-        dest='ms1_format',
-        help='MS1 summary output format used by --write_ms1',
-        default='tsv',
-        choices=['tsv', 'parquet'],
-    )
-    parser.add_argument(
-        '--feature_format', '--feature-format',
-        dest='feature_format',
-        help='feature output format; parquet writes one compact features.parquet file',
-        default='tsv',
-        choices=['tsv', 'parquet'],
+        '--format',
+        choices=('tsv', 'parquet', 'duckdb'),
+        default=None,
+        help='output format (default: automatic: tsv in legacy mode, parquet in hybrid mode)',
     )
     parser.add_argument(
         '--no-mono-hills',
-        help='do not include mono_hills_scan_lists and mono_hills_intensity_list in feature output',
+        help=_advanced_help(show_all, 'omit monoisotopic hill point arrays from feature output'),
         action='store_true',
     )
     parser.add_argument(
         '--64',
         dest='use64',
-        help='store Parquet/DuckDB numeric payloads as 64-bit instead of compact float32 and narrow integers',
+        help=_advanced_help(show_all, 'store Parquet/DuckDB numeric payloads as 64-bit instead of compact types'),
         action='store_true',
     )
-    parser.add_argument('--stop_after_hills', '--stop-after-hills', dest='stop_after_hills', help='stop processing after writing hills output', action='store_true')
+    parser.add_argument('--stop_after_hills', '--stop-after-hills', dest='stop_after_hills', help=_advanced_help(show_all, 'stop processing after writing hills output'), action='store_true')
     parser.add_argument(
         '-write_extra_details', '--write-extra-details',
         dest='write_extra_details',
-        help=(
+        help=_advanced_help(show_all, (
             'write additional per-feature diagnostic columns to feature output '
             '(including isotope candidate details such as isotopes, '
             'intensity_array_for_cos_corr, monoisotope hill/index IDs). '
             'This option is intended for debugging/inspection and increases output size.'
-        ),
+        )),
         action='store_true',
     )
-    parser.add_argument('-md_correction', help='EXPERIMENTAL. Can be Orbi, Icr or Tof. Sqrt, Linear or Uniform mass error normalization, respectively.', default='Orbi', choices=['Orbi', 'Icr', 'Tof'])
+    parser.add_argument('-md_correction', help=_advanced_help(show_all, 'experimental mass-error model: Orbi, Icr or Tof'), default='Orbi', choices=['Orbi', 'Icr', 'Tof'])
     parser.add_argument(
         "-combine_every",
         "--combine-every",
         dest="combine_every",
-        help="combine every n ms1 scans, useful for e.g. gas phase fractionation data",
+        help=_advanced_help(show_all, "combine every N MS1 scans for experimental fractionation data"),
         default=1,
         type=int,
     )
-    parser.add_argument('--input-rt-unit', '--input_rt_unit', dest='input_rt_unit', choices=['seconds', 'minutes'], default='seconds', help='fallback unit for metadata-free mzML/hills RT; mzML metadata takes precedence')
-    parser.add_argument('--tsv-float-decimals', '--tsv_float_decimals', dest='tsv_float_decimals', type=_nonnegative_or('roundtrip'), default='roundtrip', help='TSV float text: shortest round-trip representation or a nonnegative decimal count')
-    parser.add_argument('--parquet-engine', '--parquet_engine', dest='parquet_engine', choices=['pyarrow', 'duckdb'], default='duckdb', help='Parquet writer; DuckDB V2 is preferred, with a visible PyArrow fallback when DuckDB is unavailable')
-    parser.add_argument('--parquet-compression', '--parquet_compression', dest='parquet_compression', choices=['zstd', 'snappy', 'lz4', 'brotli', 'uncompressed'], default='zstd', help='Parquet compression codec')
-    parser.add_argument('--parquet-compression-level', '--parquet_compression_level', dest='parquet_compression_level', type=int, default=6, help='zstd/brotli compression level')
-    parser.add_argument('--parquet-row-group-size', '--parquet_row_group_size', dest='parquet_row_group_size', type=_positive_integer, default=122880, help='positive Parquet row-group size')
-    parser.add_argument('--parquet-sort', '--parquet_sort', dest='parquet_sort', choices=['none', 'mz_rt', 'rt_mz'], default='mz_rt', help='deterministic physical feature order')
-    parser.add_argument('--parquet-temp-dir', '--parquet_temp_dir', dest='parquet_temp_dir', default='', help='DuckDB staging workspace; final files remain staged beside their targets')
-    parser.add_argument('--duckdb-output', '--duckdb_output', dest='duckdb_output', default='', help='write one compact .duckdb database instead of ordinary feature output')
+    parser.add_argument('--input-rt-unit', '--input_rt_unit', dest='input_rt_unit', choices=['seconds', 'minutes'], default='seconds', help=_advanced_help(show_all, 'fallback unit for metadata-free mzML/hills RT; mzML metadata takes precedence'))
+    parser.add_argument('--tsv-float-decimals', '--tsv_float_decimals', dest='tsv_float_decimals', type=_nonnegative_or('roundtrip'), default='roundtrip', help=_advanced_help(show_all, 'TSV float text: shortest round-trip representation or a decimal count'))
+    parser.add_argument('--parquet-engine', choices=['pyarrow', 'duckdb'], default='duckdb', help=_advanced_help(show_all, 'Parquet writer; DuckDB V2 is preferred, with a visible PyArrow fallback when DuckDB is unavailable'))
+    parser.add_argument('--parquet-compression', choices=['zstd', 'snappy', 'lz4', 'brotli', 'uncompressed'], default='zstd', help=_advanced_help(show_all, 'Parquet compression codec'))
+    parser.add_argument('--parquet-compression-level', type=int, default=6, help=_advanced_help(show_all, 'zstd/brotli compression level'))
+    parser.add_argument('--parquet-row-group-size', type=_positive_integer, default=122880, help=_advanced_help(show_all, 'positive Parquet row-group size'))
+    parser.add_argument('--parquet-sort', choices=['none', 'mz_rt', 'rt_mz'], default='mz_rt', help=_advanced_help(show_all, 'deterministic physical feature order'))
     parser.add_argument('--overwrite', action='store_true', help='atomically replace existing output targets')
     args = vars(parser.parse_args())
+    args['format'] = args['format'] or (
+        'parquet' if args['feature_mode'] == 'hybrid' else 'tsv'
+    )
     if args['cmin'] < 1 or args['cmax'] < args['cmin']:
         parser.error('-cmin must be positive and -cmax/--max-charge must be at least -cmin.')
     if args['combine_every'] < 1:
@@ -632,26 +660,42 @@ algorithm, and updates/2026-07-30.md for validation results.
     if not math.isfinite(args['generic_q_value_max']) or not 0 <= args['generic_q_value_max'] <= 1:
         parser.error('--generic-q-value-max must be finite and in [0, 1].')
     if args['feature_mode'] == 'hybrid':
-        args['write_ms2'] = True
+        if args['write_ms2']:
+            parser.error('--write-ms2 is a legacy-only diagnostic option.')
         args['feature_baseline'] = args['feature_baseline'] or 'edge_linear'
     else:
         args['feature_baseline'] = args['feature_baseline'] or 'none'
+    if args['generic_local_isotope_count'] > 10:
+        parser.error('--generic-local-isotope-count must be at most 10.')
+    for name in (
+        'generic_local_min_isotope_cosine',
+        'generic_relaxed_min_isotope_cosine',
+    ):
+        if not math.isfinite(args[name]) or not 0 <= args[name] <= 1:
+            parser.error('--%s must be finite and in [0, 1].' % name.replace('_', '-'))
+    if args['generic_local_min_supported_channels'] > args['generic_local_isotope_count']:
+        parser.error('--generic-local-min-supported-channels cannot exceed --generic-local-isotope-count.')
+    if args['generic_relaxed_min_supported_channels'] > args['generic_local_isotope_count']:
+        parser.error('--generic-relaxed-min-supported-channels cannot exceed --generic-local-isotope-count.')
     if args['parquet_compression'] not in {'zstd', 'brotli'} and _option_was_supplied(
         '--parquet-compression-level', '--parquet_compression_level'
     ):
         parser.error('--parquet-compression-level is supported only by zstd and brotli.')
     parquet_requested = (
-        (not args['stop_after_hills'] and args['feature_format'] == 'parquet')
-        or ((args['write_hills'] or args['stop_after_hills']) and args['hills_format'] == 'parquet')
-        or (args['write_ms1'] and args['ms1_format'] == 'parquet')
-        or args['write_ms2']
+        args['format'] in {'parquet', 'duckdb'}
+        and (
+            not args['stop_after_hills']
+            or args['write_hills']
+            or args['write_ms1']
+            or args['write_ms2']
+        )
     )
     if _option_was_supplied('--parquet-engine', '--parquet_engine') and (
-        not parquet_requested and not args['duckdb_output']
+        not parquet_requested and args['format'] != 'duckdb'
     ):
         parser.error('--parquet-engine requires at least one Parquet output.')
-    if (args['dia'] or args['dia2']) and args['duckdb_output']:
-        parser.error('DIA modes do not support --duckdb-output.')
+    if (args['dia'] or args['dia2']) and args['format'] == 'duckdb':
+        parser.error('DIA modes do not support --format duckdb.')
     if args['no_mono_hills'] and args['dia']:
         parser.error('--no-mono-hills cannot be used with -dia because DIA processing requires mono_hills_* columns.')
     if args['feature_mode'] == 'hybrid' and (

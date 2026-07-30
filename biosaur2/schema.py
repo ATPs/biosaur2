@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyarrow as pa
 
 
-SCHEMA_VERSION = "3.0"
+SCHEMA_VERSION = "4.0"
 
 FEATURE_BASE_COLUMNS = (
     "massCalib",
@@ -83,7 +83,7 @@ MS2_COLUMNS = (
     "metadata_flags",
 )
 
-HYBRID_SCHEMA_VERSION = "4"
+HYBRID_SCHEMA_VERSION = "5"
 
 HYBRID_FEATURE_QUANT_COLUMNS = (
     "run_id", "feature_id", "feature_origin", "confidence_tier",
@@ -107,12 +107,15 @@ IDENTIFICATION_COLUMNS = (
     "score", "rank", "peptide_raw", "canonical_peptidoform", "formula_status",
     "assay_status", "selected_isotope_index", "selected_mz_error_ppm",
 )
-ID_ASSAY_COLUMNS = (
-    "run_id", "assay_id", "ms2_event_id", "psm_id", "canonical_peptidoform",
-    "charge", "rt_sec", "faims_cv", "monoisotopic_mz",
-    "selected_isotope_index", "selected_mz_error_ppm", "q_value", "pep",
-    "conflict_status",
+HYBRID_QUANT_OUTPUT_COLUMNS = tuple(
+    name for name in HYBRID_FEATURE_QUANT_COLUMNS
+    if name not in {"run_id", "feature_id"}
 )
+MERGED_ASSAY_COLUMNS = (
+    "assay_id", "assay_charge", "assay_rt_sec", "assay_faims_cv",
+    "monoisotopic_mz", "assay_conflict_status",
+)
+MERGED_IDENTIFICATION_COLUMNS = IDENTIFICATION_COLUMNS + MERGED_ASSAY_COLUMNS
 
 MS2_SCHEMA_VERSION = "1"
 MS2_MISSING_PRECURSOR_MZ = 0x0001
@@ -192,6 +195,36 @@ def _feature_schema(use64=False, include_mono=True, extra_details=False):
     return pa.schema(
         pa.field(name, fields[name], nullable=True)
         for name in feature_columns(include_mono, extra_details)
+    )
+
+
+def hybrid_feature_columns(include_mono=True, extra_details=False):
+    return (
+        feature_columns(include_mono, extra_details)
+        + HYBRID_QUANT_OUTPUT_COLUMNS
+        + ("ms2_events",)
+    )
+
+
+def _hybrid_feature_schema(use64=False, include_mono=True, extra_details=False):
+    base = _feature_schema(use64, include_mono, extra_details)
+    quant = _hybrid_feature_quant_schema(use64)
+    quant_fields = [quant.field(name) for name in HYBRID_QUANT_OUTPUT_COLUMNS]
+    ms2 = _ms2_schema()
+    audit = _hybrid_ms2_audit_schema(use64)
+    ms2_fields = [
+        pa.field(name, ms2.field(name).type, nullable=True)
+        for name in MS2_COLUMNS
+        if name != "run_id"
+    ] + [
+        pa.field(name, audit.field(name).type, nullable=True)
+        for name in HYBRID_MS2_AUDIT_COLUMNS
+        if name not in {"run_id", "ms2_event_id", "feature_id"}
+    ]
+    return pa.schema(
+        list(base)
+        + quant_fields
+        + [pa.field("ms2_events", pa.list_(pa.struct(ms2_fields)), nullable=False)]
     )
 
 
@@ -314,17 +347,21 @@ def _identification_schema():
     return pa.schema(pa.field(name, fields[name], nullable=name not in {"run_id", "psm_id", "mapping_status", "q_value"}) for name in IDENTIFICATION_COLUMNS)
 
 
-def _id_assay_schema():
+def _merged_identification_schema():
+    base = _identification_schema()
     category = pa.dictionary(pa.int8(), pa.string())
-    fields = {
-        "run_id": category, "assay_id": pa.int32(), "ms2_event_id": pa.int32(),
-        "psm_id": pa.string(), "canonical_peptidoform": pa.string(),
-        "charge": pa.int16(), "rt_sec": pa.float64(), "faims_cv": pa.float32(),
-        "monoisotopic_mz": pa.float64(), "selected_isotope_index": pa.int8(),
-        "selected_mz_error_ppm": pa.float32(), "q_value": pa.float64(),
-        "pep": pa.float64(), "conflict_status": category,
+    additions = {
+        "assay_id": pa.int32(),
+        "assay_charge": pa.int16(),
+        "assay_rt_sec": pa.float64(),
+        "assay_faims_cv": pa.float32(),
+        "monoisotopic_mz": pa.float64(),
+        "assay_conflict_status": category,
     }
-    return pa.schema(pa.field(name, fields[name], nullable=name in {"faims_cv", "pep"}) for name in ID_ASSAY_COLUMNS)
+    return pa.schema(
+        list(base)
+        + [pa.field(name, additions[name], nullable=True) for name in MERGED_ASSAY_COLUMNS]
+    )
 
 
 def compact_schemas(
@@ -335,13 +372,12 @@ def compact_schemas(
 ):
     return {
         "features": _feature_schema(use64, include_mono, extra_details),
+        "hybrid_features": _hybrid_feature_schema(use64, include_mono, extra_details),
         "hills": _hill_schema(use64, include_hill_lists),
         "ms1": _ms1_schema(use64),
         "ms2": _ms2_schema(),
-        "hybrid_feature_quant": _hybrid_feature_quant_schema(use64),
-        "hybrid_ms2_audit": _hybrid_ms2_audit_schema(use64),
         "identifications": _identification_schema(),
-        "id_assays": _id_assay_schema(),
+        "merged_identifications": _merged_identification_schema(),
     }
 
 

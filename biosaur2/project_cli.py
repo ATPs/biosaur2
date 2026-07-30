@@ -9,6 +9,12 @@ import math
 from .cache_runtime import CacheWorkspace, default_cache_dir
 from .project_manifest import auto_pair_runs, write_manifest
 from .project import run_project, validate_project
+from .search import (
+    _advanced_help,
+    _auto_or_positive_float,
+    _comma_separated_integers,
+    _positive_integer,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +27,8 @@ class _HelpFormatter(
     def _get_help_string(self, action):
         if action.required:
             return (action.help or "") + " (required)"
+        if "(default:" in (action.help or ""):
+            return action.help
         return super()._get_help_string(action)
 
 
@@ -74,6 +82,11 @@ def run_project_cli(arguments):
             arguments[1:], "biosaur2 project make-manifest"
         )
     if arguments and arguments[0] == "run":
+        show_all = "--help-all" in arguments[1:]
+        if show_all:
+            arguments = [
+                value for value in arguments if value != "--help-all"
+            ] + ["--help"]
         parser = argparse.ArgumentParser(
             prog="biosaur2 project run",
             description=(
@@ -96,6 +109,7 @@ README.md and examples/hybrid_project_manifest.tsv.
             formatter_class=_HelpFormatter,
         )
         parser.add_argument("--manifest", required=True, help="input project manifest TSV")
+        parser.add_argument("--help-all", action="help", help="show everyday and advanced project options, then exit")
         parser.add_argument("--output-dir", required=True, help="root directory for per-run atomic outputs")
         parser.add_argument("--project-db", required=True, help="DuckDB path for run/stage status, resolved options, alignment and validation metadata")
         parser.add_argument(
@@ -105,6 +119,10 @@ README.md and examples/hybrid_project_manifest.tsv.
             help=(
                 "legacy=strict untargeted; hybrid=direct/generic residual workflow"
             ),
+        )
+        parser.add_argument(
+            "--format", choices=("tsv", "parquet", "duckdb"), default=None,
+            help="per-run output format (default: automatic: tsv in legacy mode, parquet in hybrid mode)",
         )
         parser.add_argument("--workers", type=int, default=4, help="total CPU worker-process budget shared dynamically across runs")
         parser.add_argument("--cache-dir", default=str(default_cache_dir()), help="root for all raw, strict-stage, candidate, and project caches")
@@ -117,48 +135,78 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument("--resume", action="store_true", help="reuse successful runs only when input and resolved option signatures still match")
         parser.add_argument("--overwrite", action="store_true", help="atomically replace existing per-run/project outputs instead of refusing collisions")
         parser.add_argument("--psm-q-value-max", type=float, default=0.01, help="default maximum Percolator q-value; manifest q_value_max may override it per run")
-        parser.add_argument("--psm-pep-max", type=float, default=None, help="optional maximum PSM posterior error probability; none disables this filter")
+        parser.add_argument("--psm-pep-max", type=float, default=None, help=_advanced_help(show_all, "optional maximum PSM posterior error probability; none disables this filter"))
         parser.add_argument("--fixed-mod", action="append", default=[], help="explicit repeatable fixed modification SITE=MOD, for example C=UNIMOD:4")
         parser.add_argument("--quant-method", choices=("all", "envelope_area", "mono_area", "envelope_apex"), default="all", help="quantification output; all reports every metric and uses envelope area as quant_value")
-        parser.add_argument("--feature-baseline", choices=("none", "edge_linear"), default="edge_linear", help="baseline preprocessing before hybrid feature quantification")
-        parser.add_argument("--direct-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable q-filtered same-run direct PSM assays in hybrid mode")
+        parser.add_argument("--feature-baseline", choices=("none", "edge_linear"), default="edge_linear", help=_advanced_help(show_all, "baseline preprocessing before hybrid feature quantification"))
+        parser.add_argument("--direct-id", action=argparse.BooleanOptionalAction, default=True, help=_advanced_help(show_all, "enable/disable q-filtered same-run direct PSM assays in hybrid mode"))
         parser.add_argument("--external-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable aligned external assays inside compatible alignment groups")
-        parser.add_argument("--external-q-value-max", type=float, default=0.01, help="maximum target/decoy q-value for aligned recipient extraction")
-        parser.add_argument("--external-ppm", type=float, default=8.0, help="recipient-run m/z tolerance in ppm for aligned external assays")
+        parser.add_argument("--external-q-value-max", type=float, default=0.01, help=_advanced_help(show_all, "maximum target/decoy q-value for aligned recipient extraction"))
+        parser.add_argument("--external-ppm", type=float, default=8.0, help=_advanced_help(show_all, "recipient-run m/z tolerance in ppm for aligned external assays"))
         parser.add_argument(
             "--external-alignment-min-anchors", type=int, default=5,
-            help="minimum shared direct peptide/charge anchors required for RT alignment",
+            help=_advanced_help(show_all, "minimum shared direct peptide/charge anchors required for RT alignment"),
         )
         parser.add_argument(
             "--external-alignment-max-mad-sec", type=float, default=30.0,
-            help="maximum robust RT-alignment residual MAD in seconds",
+            help=_advanced_help(show_all, "maximum robust RT-alignment residual MAD in seconds"),
         )
         parser.add_argument(
             "--external-min-isotope-cosine", type=float, default=0.8,
-            help="minimum theoretical/observed isotope cosine for an external candidate",
+            help=_advanced_help(show_all, "minimum theoretical/observed isotope cosine for an external candidate"),
         )
         parser.add_argument("--generic-ms2-refine", action=argparse.BooleanOptionalAction, default=True, help="enable/disable unidentified-MS2 hypotheses and residual local recovery")
         parser.add_argument("--generic-q-value-max", type=float, default=0.01, help="estimated false-discovery limit for unidentified-MS2 associations from target/decoy (real-versus-shifted precursor) competition; not the PSM q-value")
+        parser.add_argument("--generic-ms2-ppm", type=float, default=10.0, help=_advanced_help(show_all, "selected-ion precursor tolerance in ppm for generic MS2 hypotheses"))
+        parser.add_argument("--generic-ms2-isotope-errors", type=_comma_separated_integers, default=(0, 1, 2, 3), help=_advanced_help(show_all, "selected-isotope indices; mono m/z = selected-ion m/z - error*1.003354835/charge. Default 0,1,2,3 tests M through M+3; negative values require validation"))
+        parser.add_argument("--generic-local-isotope-count", type=_positive_integer, default=5, help=_advanced_help(show_all, "number of isotope channels evaluated for generic local envelopes"))
+        parser.add_argument("--generic-local-min-mono-points", type=_positive_integer, default=3, help=_advanced_help(show_all, "minimum monoisotopic points in standard generic local recovery"))
+        parser.add_argument("--generic-local-min-channel-points", type=_positive_integer, default=3, help=_advanced_help(show_all, "minimum points for an isotope channel to count as supported"))
+        parser.add_argument("--generic-local-min-supported-channels", type=_positive_integer, default=2, help=_advanced_help(show_all, "minimum supported isotope channels in standard recovery"))
+        parser.add_argument("--generic-local-min-isotope-cosine", type=float, default=0.90, help=_advanced_help(show_all, "minimum observed-versus-averagine envelope cosine in standard recovery"))
+        parser.add_argument("--generic-local-max-width-sec", type=_auto_or_positive_float, default="auto", help=_advanced_help(show_all, "maximum local component width. auto uses strict-feature (rt_end_sec - rt_start_sec) q99 clamped to 15-60 s, or 30 s when no strict widths exist; an explicit positive value disables adaptation. This rejects candidate width and is not the MS2 search window"))
+        parser.add_argument("--generic-relaxed-min-mono-points", type=_positive_integer, default=2, help=_advanced_help(show_all, "minimum monoisotopic points in the optional relaxed retry"))
+        parser.add_argument("--generic-relaxed-min-channel-points", type=_positive_integer, default=2, help=_advanced_help(show_all, "minimum supported-channel points in the optional relaxed retry"))
+        parser.add_argument("--generic-relaxed-min-supported-channels", type=_positive_integer, default=2, help=_advanced_help(show_all, "minimum supported channels in the optional relaxed retry"))
+        parser.add_argument("--generic-relaxed-min-isotope-cosine", type=float, default=0.95, help=_advanced_help(show_all, "minimum averagine cosine in the relaxed retry; the higher default offsets its two-point allowance"))
         parser.add_argument(
             "--relaxed-ms2-feature",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help=(
+            help=_advanced_help(show_all, (
                 "retry unresolved direct/generic MS2 once with conservative "
                 "multi-scan criteria and the applicable confidence control"
-            ),
+            )),
         )
         parser.add_argument(
             "--ms2-rt-tolerance-sec", type=float, default=120.0,
             help="initial same-run MS1 search distance around each MS2 event; not cross-run RT alignment",
         )
         args = parser.parse_args(arguments[1:])
+        args.format = args.format or (
+            "parquet" if args.mode == "hybrid" else "tsv"
+        )
         if args.workers < 1:
             parser.error("--workers must be positive")
         if args.max_charge < 1:
             parser.error("--max-charge must be positive")
         if not math.isfinite(args.generic_q_value_max) or not 0 <= args.generic_q_value_max <= 1:
             parser.error("--generic-q-value-max must be finite and in [0, 1]")
+        if not math.isfinite(args.generic_ms2_ppm) or args.generic_ms2_ppm <= 0:
+            parser.error("--generic-ms2-ppm must be finite and positive")
+        if args.generic_local_isotope_count > 10:
+            parser.error("--generic-local-isotope-count must be at most 10")
+        if args.generic_local_min_supported_channels > args.generic_local_isotope_count:
+            parser.error("--generic-local-min-supported-channels cannot exceed --generic-local-isotope-count")
+        if args.generic_relaxed_min_supported_channels > args.generic_local_isotope_count:
+            parser.error("--generic-relaxed-min-supported-channels cannot exceed --generic-local-isotope-count")
+        for name in (
+            "generic_local_min_isotope_cosine",
+            "generic_relaxed_min_isotope_cosine",
+        ):
+            value = getattr(args, name)
+            if not math.isfinite(value) or not 0 <= value <= 1:
+                parser.error("--%s must be finite and in [0, 1]" % name.replace("_", "-"))
         if not math.isfinite(args.external_q_value_max) or not 0 <= args.external_q_value_max <= 1:
             parser.error("--external-q-value-max must be finite and in [0, 1]")
         if not math.isfinite(args.external_ppm) or args.external_ppm <= 0:

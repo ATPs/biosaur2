@@ -17,6 +17,7 @@ from biosaur2.project import (
     _write_project_database,
     validate_project,
 )
+from biosaur2.schema import compact_schemas
 
 
 def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
@@ -96,7 +97,9 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
     position = command.index("--max-charge")
     assert command[position + 1] == "8"
     assert "--relaxed-ms2-feature" in command
-    assert "--write-ms2" in command
+    assert "--write-ms2" not in command
+    assert command[command.index("--format") + 1] == "parquet"
+    assert command[command.index("--generic-ms2-isotope-errors") + 1] == "0,1,2,3"
     assert "--workers" not in command
     assert "--cache-dir" not in command
 
@@ -153,16 +156,13 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     run_dir = tmp_path / "run-output"
     run_dir.mkdir()
     paths = {
+        "format": "parquet",
+        "run_output": None,
         "features": str(run_dir / "features.parquet"),
-        "ms2": str(run_dir / "ms2.parquet"),
-        "audit": str(run_dir / "audit.parquet"),
-        "feature_quant": str(run_dir / "quant.parquet"),
         "identifications": str(run_dir / "identifications.parquet"),
-        "assays": str(run_dir / "assays.parquet"),
+        "external_evidence": str(run_dir / "external.parquet"),
         "raw_ms1_cache": str(run_dir / "raw_ms1_cache"),
     }
-    pq.write_table(pa.table({"feature_idx": [1]}), paths["features"])
-    pq.write_table(pa.table({"ms2_event_id": [1]}), paths["ms2"])
     hybrid_summary = {
         "strict_feature_count": 1,
         "direct_assay_count": 1,
@@ -173,16 +173,31 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
             "competition_counts": {"decoy_only_candidate_count": 1}
         },
     }
-    audit_table = pa.table({"ms2_event_id": [1], "feature_id": [None]})
-    audit_table = audit_table.replace_schema_metadata(
+    schemas = compact_schemas()
+    feature_table = pa.Table.from_pylist(
+        [{"feature_idx": 1, "quant_value": 10.0, "ms2_events": []}],
+        schema=schemas["hybrid_features"],
+    ).replace_schema_metadata(
         {
             b"biosaur2_hybrid_summary_json": json.dumps(
                 hybrid_summary, sort_keys=True
             ).encode()
         }
     )
-    pq.write_table(audit_table, paths["audit"])
-    pq.write_table(pa.table({"feature_id": [1]}), paths["feature_quant"])
+    pq.write_table(feature_table, paths["features"])
+    identification_table = pa.Table.from_pylist(
+        [
+            {
+                "run_id": "run",
+                "psm_id": "psm-1",
+                "mapping_status": "mapped",
+                "q_value": 0.001,
+                "assay_id": 1,
+            }
+        ],
+        schema=schemas["merged_identifications"],
+    )
+    pq.write_table(identification_table, paths["identifications"])
     Path(paths["raw_ms1_cache"]).mkdir()
     Path(paths["raw_ms1_cache"], "manifest.json").write_text(
         "{}\n", encoding="utf-8"
@@ -274,7 +289,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert json.loads(persisted[1]) == hybrid_summary["generic_summary"]
     assert external == (10, 9, 2)
     assert alignment == ("explicit:g", "run", "run", "other", "accepted")
-    assert schema_version == "3"
+    assert schema_version == "4"
     assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")

@@ -2,69 +2,114 @@
 
 ## What Biosaur2 measures
 
-In liquid chromatography-mass spectrometry (LC-MS), molecules leave the
-chromatography column at different times. The mass spectrometer repeatedly
-measures ions during that time.
+An LC-MS instrument repeatedly observes ions as they leave a chromatography
+column.
 
-- **MS1 scan:** a survey measurement of intact ions. Its signal is used for
-  feature detection and abundance.
-- **MS2 event:** fragmentation of a selected precursor ion. It can help
-  identify a peptide, but its fragment signal is not copied into MS1
-  abundance.
-- **m/z:** mass divided by charge, the horizontal coordinate in a mass
-  spectrum.
+- **MS1 scan:** a survey of intact ions. Biosaur2 measures abundance here.
+- **MS2 event:** fragmentation of a selected precursor. Its precursor metadata
+  helps locate a feature; fragment intensity is not used as feature abundance.
+- **m/z:** mass divided by charge.
 - **Retention time (RT):** when a signal appears during chromatography.
-- **Isotope envelope:** the related peaks produced by natural isotopes of one
-  molecule.
-- **Feature:** an isotope envelope followed across several MS1 scans. One
-  accepted feature receives one abundance row.
-- **PSM:** a peptide-spectrum match, meaning a search engine assigned a peptide
-  sequence to an MS2 spectrum.
+- **Isotope envelope:** related peaks caused by natural isotopes of one ion.
+- **Feature:** an isotope envelope followed across several MS1 scans.
+- **PSM:** a peptide-spectrum match from a search engine, usually one proposed
+  peptide for one MS2 spectrum.
 
 ```mermaid
 flowchart LR
-    A[Centroided mzML] --> B[MS1 hills]
-    B --> C[Isotope features]
-    A --> D[MS2 precursor events]
-    E[Optional same-run PSMs] --> D
-    D --> F[Evidence-controlled association]
-    C --> F
-    F --> G[One abundance row per feature]
+    A[Centroided mzML] --> B[MS1 isotope features]
+    A --> C[MS2 precursor events]
+    D[Optional same-run PSM table] --> E[Direct peptide assays]
+    C --> E
+    B --> F[Association and local recovery]
+    E --> F
+    F --> G[One quantitative row per feature]
 ```
 
-## Which mode should I use?
+Use default `legacy` mode for strict, untargeted LC-MS1 detection. Use
+`--feature-mode hybrid` for DDA data when you want MS2-aware association,
+target/decoy confidence control, local recovery, and named quantification.
 
-Use the default `legacy` mode when you want the established strict, untargeted
-MS1 detector and do not need MS2-to-feature audit information.
+## First commands
 
-Use `--feature-mode hybrid` for DDA data when you want MS2-aware association,
-local recovery, target/decoy confidence control, and the quantification
-sidecars. A PSM table improves direct peptide-specific assays but is optional.
-
-Use `biosaur2 project run --mode hybrid` for several comparable runs when you
-also need retention-time alignment and recipient-run extraction.
-
-## First hybrid command
+Legacy defaults to one TSV:
 
 ```bash
-biosaur2 sample.mzML.gz \
-  --feature-mode hybrid \
-  --feature-format parquet \
-  --workers 4
+biosaur2 sample.mzML.gz
 ```
 
-This writes the ordinary feature table plus the hybrid sidecars described in
-[Outputs and quantification](outputs-and-quantification.md).
+Hybrid defaults to two Parquet files:
 
-## Confidence words
+```bash
+biosaur2 sample.mzML.gz --feature-mode hybrid --workers 4
+```
 
-A **target** is a real precursor hypothesis. A **decoy** is an intentionally
-incorrect hypothesis processed by the same rules. Target and decoy outcomes
-are compared to estimate how many accepted target associations may be false.
+The files are `sample.features.parquet` and
+`sample.identifications.parquet`. The features table is the main quantitative
+result. See [Outputs and quantification](outputs-and-quantification.md).
 
-A **q-value** is the estimated false-discovery rate among results at least as
-strong as a candidate. A threshold of `0.01` means an estimated rate of no more
-than about 1%, not a 99% probability that every individual row is correct.
+## PSM input
 
-Read [Hybrid workflow](hybrid-workflow.md) before changing confidence
-thresholds.
+`--psm-path` accepts a Percolator target PSM TSV from the same mzML run. It may
+also be compressed. Common accepted headers include a spectrum identifier,
+peptide, q-value, PEP, score and charge. A minimal illustrative file is:
+
+```tsv
+PSMId	peptide	q-value	posterior_error_prob	score	charge
+sample_1542_2_1	K.PEPTIDEK.R	0.0021	0.0014	8.73	2
+sample_1601_3_1	R.ACDEFGHIK.K	0.0068	0.0041	7.92	3
+```
+
+The spectrum identifier must map to an MS2 spectrum in the same mzML. Header
+spelling varies among Percolator pipelines; Biosaur2 recognizes its supported
+aliases and reports a clear error for missing required fields.
+
+The peptide column contains the peptide assigned to the spectrum. Flanking
+residues such as `K.PEPTIDEK.R` are allowed. Modifications should be explicit,
+preferably as Unimod identifiers, for example:
+
+```text
+K.AC[UNIMOD:4]DEFGHIK.R
+M[UNIMOD:35]PEPTIDE
+n[UNIMOD:1]PEPTIDEK
+```
+
+A fixed modification normally is not repeated in every peptide string. Tell
+Biosaur2 about it with a repeatable `--fixed-mod SITE=MOD` option:
+
+```bash
+--fixed-mod C=UNIMOD:4
+--fixed-mod peptide_n_term=UNIMOD:1
+--fixed-mod K=UNIMOD:259
+```
+
+Do not declare a variable modification as fixed. Biosaur2 does not guess fixed
+chemistry because the exact formula and isotope envelope depend on it.
+
+## Confidence in plain language
+
+A **target** is the real precursor hypothesis. A **decoy** is an intentionally
+incorrect shifted hypothesis evaluated by the same rules. Target and decoy
+wins estimate how many accepted associations may be false.
+
+A **q-value** is an estimated false-discovery rate among accepted results at
+least as strong as that row. A threshold of 0.01 means an estimated rate near
+or below 1% for the accepted group. It is not a 99% probability for every
+individual row.
+
+Percolator PSM q-values and Biosaur2 generic extraction q-values answer
+different questions. Read [Hybrid workflow](hybrid-workflow.md) before
+changing either threshold.
+
+## Several comparable files
+
+Project mode can use shared identifications to align retention time and look
+for a missing peptide-ion signal in another run. It never transfers donor
+intensity: every accepted value is remeasured from the recipient mzML.
+
+```bash
+biosaur2 project run --manifest runs.tsv --output-dir results \
+  --project-db results/project.duckdb --mode hybrid --workers 16
+```
+
+Continue with [Project workflow](project-workflow.md).

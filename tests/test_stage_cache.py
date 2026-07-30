@@ -206,7 +206,7 @@ def test_hybrid_stage_cache_cold_and_replay_are_logically_equal(tmp_path):
                 str(source),
                 "-o",
                 str(feature_path),
-                "--feature-format",
+                "--format",
                 "parquet",
                 "--feature-mode",
                 "hybrid",
@@ -227,20 +227,11 @@ def test_hybrid_stage_cache_cold_and_replay_are_logically_equal(tmp_path):
     assert replay_result.returncode == 0, replay_result.stderr
     assert "Reused strict-stage cache" in replay_result.stderr
 
-    stem = "PXD010154_1554451_middle"
     pairs = [
         (cold / "features.parquet", replay / "features.parquet"),
         (
-            cold / (stem + ".feature_quant.parquet"),
-            replay / (stem + ".feature_quant.parquet"),
-        ),
-        (
-            cold / (stem + ".ms2.parquet"),
-            replay / (stem + ".ms2.parquet"),
-        ),
-        (
-            cold / (stem + ".ms2_feature_links.parquet"),
-            replay / (stem + ".ms2_feature_links.parquet"),
+            cold / "features.identifications.parquet",
+            replay / "features.identifications.parquet",
         ),
     ]
     for cold_path, replay_path in pairs:
@@ -263,7 +254,7 @@ def test_hybrid_stage_cache_rejects_existing_file_path(tmp_path):
             str(source),
             "-o",
             str(tmp_path / "features.parquet"),
-            "--feature-format",
+            "--format",
             "parquet",
             "--feature-mode",
             "hybrid",

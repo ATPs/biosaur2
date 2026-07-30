@@ -15,19 +15,17 @@ def _args(tmp_path, database=False, **updates):
     input_path.write_bytes(b"test-input")
     values = {
         "file": str(input_path),
-        "o": str(tmp_path / "result.features.parquet"),
-        "duckdb_output": str(tmp_path / "result.duckdb") if database else "",
-        "feature_format": "parquet",
+        "o": str(
+            tmp_path / ("result.duckdb" if database else "result.features.parquet")
+        ),
+        "format": "duckdb" if database else "parquet",
         "parquet_engine": "duckdb",
         "parquet_compression": "zstd",
         "parquet_compression_level": 6,
         "parquet_row_group_size": 100,
         "parquet_sort": "mz_rt",
-        "parquet_temp_dir": "",
         "write_hills": False,
-        "hills_format": "tsv",
         "write_ms1": False,
-        "ms1_format": "tsv",
         "stop_after_hills": False,
         "no_mono_hills": True,
         "no_hill_list": True,
@@ -143,7 +141,7 @@ def test_duckdb_parquet_is_v2_single_file_with_compact_types(tmp_path):
     assert [path.name for path in tmp_path.glob("*.parquet")] == [output.name]
 
 
-def test_duckdb_hybrid_summary_is_persisted_in_sidecar_metadata(tmp_path):
+def test_duckdb_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     args = _args(tmp_path, feature_mode="hybrid")
     manager = DuckDBOutputManager(args)
     args["_hybrid_summary"] = {
@@ -153,51 +151,30 @@ def test_duckdb_hybrid_summary_is_persisted_in_sidecar_metadata(tmp_path):
         },
     }
     manager.finalize()
-    metadata = pq.ParquetFile(
-        tmp_path / "sample.ms2_feature_links.parquet"
-    ).metadata.metadata
-    assert metadata[b"biosaur2_hybrid_schema_version"] == b"4"
-    assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
-        "_hybrid_summary"
-    ]
+    metadata = pq.ParquetFile(tmp_path / "result.features.parquet").metadata.metadata
+    provenance = json.loads(metadata[b"biosaur2_provenance_json"])
+    assert provenance["hybrid_schema_version"] == "5"
+    assert json.loads(provenance["hybrid_summary_json"]) == args["_hybrid_summary"]
+    assert (tmp_path / "result.identifications.parquet").is_file()
 
 
-def test_duckdb_mixes_feature_tsv_with_hills_and_ms1_parquet(tmp_path):
+def test_unified_tsv_format_does_not_select_duckdb(tmp_path):
     args = _args(
         tmp_path,
         o=str(tmp_path / "mixed.features.tsv"),
-        feature_format="tsv",
+        format="tsv",
         write_hills=True,
-        hills_format="parquet",
         write_ms1=True,
-        ms1_format="parquet",
         tsv_float_decimals="roundtrip",
     )
-    assert uses_duckdb(args)
-    manager = DuckDBOutputManager(args)
-    assert manager.table_names == ["hills", "ms1"]
-    assert set(manager.tsv_sinks) == {"features"}
-    manager.append_features([_feature()])
-    manager.append_hills([_hill()])
-    manager.append_ms1(
-        [{"scan_number": None, "scan_index": 4, "rt_sec": 120.0, "total_intensity": 2.5}]
-    )
-    manager.finalize()
-
-    assert (tmp_path / "mixed.features.tsv").exists()
-    hills_path = tmp_path / "mixed.features.hills.parquet"
-    ms1_path = tmp_path / "mixed.features.ms1.parquet"
-    assert pq.read_table(hills_path).num_rows == 1
-    assert pq.read_table(ms1_path).to_pylist()[0]["scan_id"] == 5
+    assert not uses_duckdb(args)
 
 
 def test_duckdb_writes_all_three_requested_parquet_products(tmp_path):
     args = _args(
         tmp_path,
         write_hills=True,
-        hills_format="parquet",
         write_ms1=True,
-        ms1_format="parquet",
     )
     manager = DuckDBOutputManager(args)
     manager.append_features([_feature()])
@@ -208,26 +185,25 @@ def test_duckdb_writes_all_three_requested_parquet_products(tmp_path):
     manager.finalize()
     assert {path.name for path in tmp_path.glob("*.parquet")} == {
         "result.features.parquet",
-        "result.features.hills.parquet",
-        "result.features.ms1.parquet",
+        "result.hills.parquet",
+        "result.ms1.parquet",
     }
 
 
-def test_explicit_pyarrow_does_not_select_duckdb_for_auxiliary_parquet(tmp_path):
+def test_explicit_pyarrow_does_not_select_duckdb_for_unified_tsv(tmp_path):
     args = _args(
         tmp_path,
-        feature_format="tsv",
+        format="tsv",
         write_hills=True,
-        hills_format="parquet",
         parquet_engine="pyarrow",
     )
     assert not uses_duckdb(args)
 
 
-def test_duckdb_staging_database_uses_requested_temp_directory(tmp_path):
+def test_duckdb_staging_database_uses_cache_workspace(tmp_path):
     staging = tmp_path / "staging"
-    manager = DuckDBOutputManager(_args(tmp_path, parquet_temp_dir=str(staging)))
-    assert manager.staging_path.parent == staging
+    manager = DuckDBOutputManager(_args(tmp_path, _cache_workspace=str(staging)))
+    assert manager.staging_path.parent == staging / "output_staging"
     manager.abort()
 
 
