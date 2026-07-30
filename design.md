@@ -1,0 +1,513 @@
+# Biosaur2 algorithm design
+
+## Document status
+
+This document describes the algorithm and workflow implemented in the repository
+as of 2026-07-30. It covers the legacy detector, weak-MS2 compatibility mode,
+and the opt-in hybrid residual workflow. It is an implementation design
+document, not a promise that every MS2 event can always be assigned a feature.
+
+The central scientific objective is to build an accurate, nearly complete,
+de-duplicated MS1 feature population with one reliable quantitative value per
+accepted feature. MS2 and q-value-filtered PSM evidence are used to improve and
+associate that population, but they never justify fabricating chromatographic
+evidence or duplicating shared MS1 intensity.
+
+## Design principles
+
+1. **MS1 features are the primary population.** A feature does not require an
+   MS2 event. Features without MS2 always retain the ordinary strict acceptance
+   thresholds.
+2. **Every MS2 receives an audit outcome.** The workflow tries to associate
+   every event with the best defensible MS1 evidence, while allowing explicit
+   null outcomes such as insufficient evidence, ambiguity, precursor-only
+   signal, or no signal.
+3. **PSMs are strong priors, not unconditional truth.** Percolator input is
+   filtered before assay construction. A valid PSM contributes exact peptide
+   chemistry, charge, monoisotopic mass, isotope distribution, MS2 location and
+   C13 selection information, but an accepted feature still requires coherent
+   MS1 evidence.
+4. **Signal ownership is non-negative and conserved.** Accepted features own
+   only their assigned contribution to raw centroid points. The implementation
+   does not delete entire scans, windows or hills.
+5. **One feature has one abundance.** Multiple PSMs and MS2 events may link to
+   one feature; they update support counts but do not create duplicate feature
+   rows or duplicate quantitative values.
+6. **Relaxation is local and MS2-only.** Any moderately relaxed recovery is
+   opt-in, bounded, and restricted to unresolved MS2-supported candidates.
+   Untargeted/non-MS2 standards are never lowered.
+7. **Ambiguity is preferable to false precision.** When different envelopes
+   share signal and the decomposition is not identifiable, the event remains a
+   conflict/ambiguity instead of assigning the same intensity several times.
+8. **Reproducibility is part of the algorithm.** Candidate order, conflict
+   decisions, feature IDs, cache fingerprints, project execution and output
+   publication are deterministic and bounded.
+
+## User-visible modes
+
+| Mode | Activation | Behavior |
+|---|---|---|
+| `legacy` | default | Ordinary Biosaur2 hill construction, isotope-envelope detection and legacy feature output. |
+| `weak-ms2` | `--feature-mode weak-ms2` or the compatibility alias `--ms2-seed` | Uses bounded DDA precursor metadata as ordering/association evidence while preserving the earlier weak-MS2 behavior. |
+| `hybrid` | `--feature-mode hybrid` or project `--mode hybrid` | Enables q-filtered direct assays, generic MS2 hypotheses, residual allocation, local recovery, target/decoy confidence, explicit quantification and exhaustive MS2 audit. |
+
+Hybrid mode is deliberately opt-in. `--relaxed-ms2-feature` is a second,
+independent opt-in switch and defaults to false. Disabling the new mode keeps
+legacy and weak-MS2 workflows available.
+
+## Core data model
+
+### Raw MS1 store
+
+`RawMS1Store` is a compact, scan-indexed representation of the original MS1
+centroids. It retains scan identifiers, real RT seconds, m/z, intensity, FAIMS
+and ion-mobility metadata required by local extraction. The original signal is
+immutable and can be memory-mapped from a fingerprinted cache.
+
+### Hills
+
+A hill is a mass-consistent trace through consecutive MS1 scans. Hills are
+useful candidate-building structures, but they are not indivisible scientific
+ownership units. The strict detector may split hills at chromatographic
+valleys; hybrid local refinement may merge, extend, relink or segment evidence
+on a common scan/RT grid.
+
+### Strict candidates and features
+
+The ordinary Biosaur2 detector links compatible hills into isotope envelopes,
+checks charge spacing, isotope mass error, isotope-pattern agreement,
+coelution, scan support and configured thresholds, then resolves greedy hill
+ownership. Accepted candidates become the initial strict feature population.
+
+### Direct assays
+
+A direct assay is constructed from a same-run, q-value-filtered PSM. It records
+the canonical modified peptide, explicit fixed modifications, charge, elemental
+formula state, theoretical monoisotopic/isotope m/z values, sequence-specific
+isotope probabilities, MS2 RT, precursor scan context and selected C13 isotope.
+
+### Generic MS2 hypotheses
+
+An unidentified MS2 event is represented by its RT, precursor MS1 relationship,
+selected/isolation m/z, isolation offsets, available charge or bounded charge
+hypotheses, FAIMS/IM, and plausible isotope offsets such as M, M+1 and M+2.
+Expected isotope intensity is approximated with an averagine model.
+
+### Residual ledger
+
+For every raw point, the ledger maintains the invariant:
+
+```text
+observed intensity = sum(accepted feature contributions) + residual intensity
+```
+
+Allocations are non-negative, cannot exceed the observed intensity, and retain
+provenance to the original scan/m/z positions. Shared or uncertain intensity
+stays residual unless a bounded decomposition is identifiable.
+
+## End-to-end single-run workflow
+
+```text
+mzML/mzML.gz + optional Percolator PSM table
+                    |
+                    v
+       one-pass MS1/MS2 ingestion and raw cache
+                    |
+                    v
+      strict hill and isotope-envelope detection
+                    |
+                    +--> capture bounded direct-relevant losing competitors
+                    |
+                    v
+       initial strict feature population and ledger ownership
+                    |
+                    v
+      direct PSM association and bounded local recovery
+                    |
+                    v
+     generic MS2 -> strict association -> local target/decoy recovery
+                    |
+                    v
+       optional guarded MS2-only relaxed retry
+                    |
+                    v
+       unchanged strict detector on remaining residual MS1
+                    |
+                    v
+       recheck unresolved direct and generic MS2 events
+                    |
+                    v
+ de-duplicated features + one quant row/feature + one audit row/MS2
+```
+
+### Stage 0: ingestion and metadata normalization
+
+The mzML reader processes the file once and collects:
+
+- usable MS1 scans and their original centroid points;
+- every DDA MS2 event, RT and spectrum/native scan identity;
+- precursor MS1 resolution, selected-ion/isolation-window metadata and charge;
+- FAIMS and ion-mobility values when available;
+- compact MS1/MS2 rows and the raw store needed by residual extraction.
+
+Retention times are normalized to seconds. Scan identity is preserved rather
+than inferred from row position when native scan metadata exists. Optional raw
+cache publication is atomic; stale caches are rejected using source and
+scientific-parameter fingerprints.
+
+### Stage 1: Percolator parsing and exact chemistry
+
+The identification adapter handles common compression, BOM/encoding,
+delimiter/header variations and maps PSMs to MS2 using native identity when
+possible, otherwise safe run/scan parsing with charge validation.
+
+Default PSM filtering is q-value <= 0.01 and is configurable. Rank alone is not
+used to discard a PSM. Fixed modifications must be explicit, for example
+`C=UNIMOD:4`; they are never silently inferred. Peptidoforms are normalized
+against the pinned local Unimod subset and classified as exact-formula,
+mass-only or unavailable. Only usable mappings become direct assays.
+
+When the instrument selected a heavy isotope, the assay jointly evaluates the
+selected isotope index and precursor mass error rather than assuming that every
+precursor m/z is monoisotopic.
+
+### Stage 2: strict MS1 detection
+
+The production strict detector performs the established Biosaur2 operations:
+
+1. link centroid points into m/z-consistent hills;
+2. split chromatographically multi-modal hills using configured valley rules;
+3. calculate hill apex, intensity, mass and scan properties;
+4. enumerate charge and isotope-envelope candidates;
+5. require mass accuracy, scan support, isotope consistency and coelution;
+6. resolve competing candidates deterministically;
+7. produce the initial strict untargeted population.
+
+Direct-relevant processed-hill candidates that pass ordinary mass/cosine gates
+but would lose destructive greedy ownership can be captured immediately before
+the conflict pass. Capture is bounded to the top three deterministic
+representations per direct PSM and persisted in strict-stage cache version 2.
+These candidates only guide a later retry; they cannot bypass raw extraction,
+conflict, quantification or conservation gates.
+
+### Stage 3: initialize strict ownership
+
+All accepted initial strict features are converted to raw-point contributions
+and allocated once in the residual ledger. If strict ownership cannot be
+reconstructed safely, later final-residual detection is suppressed rather than
+operating on an invalid residual state.
+
+This ordering deliberately protects the complete strict MS1 population,
+including features without MS2. Direct and generic candidates must either link
+to that population or demonstrate defensible residual evidence without taking
+already-owned strict signal.
+
+### Stage 4: direct identified association and recovery
+
+Each exact direct assay first competes against the strict population using
+charge, calibrated ppm, RT interval, FAIMS and isotope-selection compatibility.
+If a strict feature explains the event, the MS2/PSM is linked to that existing
+feature and only its support metadata changes.
+
+For an unresolved assay, the workflow extracts isotope XICs from raw MS1 around
+the MS2 event. It jointly selects the chromatographic component nearest the
+event, checks multi-scan support, isotope channels, isotope cosine, mass error,
+coelution, apex alignment, isolation context and boundary quality.
+
+Run-specific calibration is learned from reliable direct-to-strict matches:
+
+- mass-error center and retry ppm;
+- MS2-to-feature apex RT offset and robust RT tolerance;
+- typical feature width.
+
+At most one retry is compared monotonically with the original candidate. A
+captured processed-hill competitor may supply a bounded RT center, width and
+mass shift to this same retry. Selection of a retry is not acceptance: all
+strict-hill conflict, recovered-feature equivalence, raw-point conflict,
+residual allocation and quantitative gates still apply.
+
+Equivalent repeated PSMs/MS2 events reuse the same recovered feature. Conflicting
+identifications or non-identifiable overlapping local candidates remain null
+or ambiguous.
+
+### Stage 5: quantify the initial and direct-recovered population
+
+Initial strict features and accepted direct-recovered features are quantified
+from their final assigned traces. Direct PSM/MS2 support counts are accumulated
+after de-duplication. A PSM does not copy intensity into the feature and does
+not generate a second abundance row.
+
+### Stage 6: generic MS2 association with strict features
+
+For every still-relevant MS2 event, the workflow creates bounded target
+hypotheses and deterministic paired decoy hypotheses. Candidate scoring combines
+calibrated evidence such as:
+
+- precursor and isotope m/z agreement;
+- charge and isotope-offset consistency;
+- RT and precursor-scan localization;
+- isolation-window compatibility;
+- event-apex and selected-intensity support;
+- isotope count, mass accuracy and averagine cosine;
+- coelution and chromatographic point support.
+
+Weights can be calibrated from paired direct anchors. Target and decoy candidates
+compete within the same family, and extraction q-values are calculated
+independently of the Percolator PSM q-value. A generic event that already has a
+defensible strict feature is associated without changing that feature's
+abundance.
+
+### Stage 7: generic residual local recovery
+
+Unresolved generic events are evaluated against raw and residual isotope traces.
+The algorithm uses a run-derived width limit and a bounded local search. Local
+refinement may propose:
+
+- `split`: common RT segmentation across isotope traces;
+- `merge`: combine compatible adjacent trace fragments;
+- `extend`: recover a short supported boundary/gap;
+- `relink`: replace an incorrect local hill relationship.
+
+Candidate envelopes are clustered so repeated compatible MS2 events may share
+one feature. Small identifiable overlaps may use non-negative local
+deconvolution. A candidate is rejected when there are too few mono points,
+insufficient isotope channels, incoherent isotope apexes, weak averagine fit,
+excessive width, event-scan absence, isolation inconsistency, a decoy win, a
+q-value failure, strict-hill ownership, or an unresolved raw-point conflict.
+
+Accepted generic features receive new IDs and residual allocations only once.
+
+### Stage 8: optional guarded relaxed retry
+
+`--relaxed-ms2-feature` retries only unresolved, MS2-supported candidates. It
+does not modify the strict detector or non-MS2 feature thresholds.
+
+The relaxation is deliberately limited:
+
+- direct relaxation requires a same-run PSM with q-value < 0.01;
+- generic relaxation retains paired target/decoy competition;
+- traces remain multi-scan; single-point features are forbidden;
+- partial envelopes still require multiple supported channels;
+- generic relaxed candidates retain strong isotope cosine and localization;
+- a clearly superior equivalent strict candidate wins;
+- cross-envelope sharing is rejected when joint allocation is not identifiable.
+
+This guard makes “prefer the MS2-supported model when similarly plausible” a
+bounded tie-breaker, not permission to replace a clearly better strict feature.
+
+### Stage 9: final strict detector on residual MS1
+
+After targeted stages, the ordinary strict detector runs again on materialized
+residual MS1 using unchanged untargeted thresholds. It discovers features that
+were hidden by earlier overlap or were not selected in the initial population.
+
+Residual strict candidates are checked against every accepted strict, direct
+and generic feature to prevent rediscovery. Accepted candidates must allocate
+successfully in the same ledger and are quantified as strict untargeted
+features. This stage never receives an MS2-only threshold relaxation.
+
+### Stage 10: final MS2 recheck and audit finalization
+
+Unresolved direct assays are rechecked against new final-residual strict
+features. Unidentified events are re-evaluated through a separate final-strict
+target/decoy family. Failed prior audit reasons are preserved unless a valid
+feature association is obtained.
+
+Finally, every MS2 event has exactly one audit row. Quantitative feature links,
+precursor-only signal, statistical rejection, metadata failure, insufficient
+chromatographic evidence and ambiguity are mutually exclusive final outcomes.
+
+## Hill repair and overlap policy
+
+All isotope traces for a candidate are evaluated on a common real scan/RT grid.
+The algorithm avoids independently splitting isotope hills at unrelated
+boundaries. Edits must improve a bounded objective and retain reversible
+provenance.
+
+For overlapping envelopes:
+
+1. equivalent candidates are de-duplicated;
+2. repeated MS2 events may share one feature;
+3. clearly superior strict evidence protects the strict representation;
+4. identifiable same-envelope intensity sharing may use non-negative least
+   squares/local decomposition;
+5. different envelopes with non-identifiable shared raw points remain conflict
+   or ambiguity;
+6. no candidate may subtract more intensity than exists.
+
+The design intentionally does not claim universal decomposition. Some overlap
+regions are mathematically underdetermined from the observed MS1 data.
+
+## Feature quantification
+
+Hybrid mode exposes three feature-level methods:
+
+| Method | Definition |
+|---|---|
+| `envelope_area` | Trapezoidal integration of the sum of final assigned isotope traces over actual RT seconds; default. |
+| `mono_area` | Trapezoidal integration of the final monoisotopic contribution. |
+| `envelope_apex` | Maximum summed assigned isotope intensity at one common MS1 scan. |
+
+`edge_linear` or `none` is optional baseline preprocessing, not a fourth
+quantification method. Raw and corrected areas are retained. If baseline
+correction would be unreliable, the raw value is retained with an explicit
+status/quality flag.
+
+Every accepted feature has exactly one positive quantification row containing
+its method, status, origin, confidence tier, quality flags, isotope cosine,
+mass error, RT boundaries, point count and supporting PSM/MS2 counts. Legacy
+`intensitySum`, `intensityApex` and `area_sum` semantics remain available in
+the ordinary feature output.
+
+## Confidence and quality control
+
+Confidence is evidence-family specific:
+
+- Percolator q-values control direct PSM entry, default <= 0.01;
+- direct MS1 extraction must still pass chromatographic/isotope gates;
+- generic candidates use paired target/decoy extraction q-values;
+- external assays have a separate aligned-transfer target/decoy q-value;
+- relaxed direct and generic candidates carry explicit relaxed origin/flags;
+- strict features retain strict confidence independent of MS2 association.
+
+Audit reason codes remain visible so coverage cannot be increased by silently
+dropping difficult events from the denominator.
+
+## Project and external-assay workflow
+
+Project mode reads a deterministic manifest containing at least `run_id` and
+`mzml_path`, plus optional PSM/configuration and experimental grouping fields.
+Each run first completes its own single-run workflow and publishes atomically.
+
+For compatible alignment groups, the project stage then:
+
+1. selects reference runs deterministically;
+2. builds shared high-confidence peptide/charge anchors;
+3. fits robust monotonic RT mappings with minimum-anchor and MAD checks;
+4. plans missing exact assays in recipient runs;
+5. extracts and quantifies recipient-run MS1 signal;
+6. applies separate target/decoy and isotope-quality controls;
+7. writes external evidence and project summaries.
+
+Donor intensity is never copied into a recipient. An external assay may add no
+feature when the recipient lacks defensible MS1 evidence.
+
+## Caching and performance design
+
+Three cache layers accelerate repeated development without changing scientific
+results:
+
+1. **Raw MS1 cache**: compact memory-mappable original centroids and scan
+   metadata.
+2. **Strict-stage cache**: ingestion products, strict contexts/features and
+   bounded direct processed-hill competitors. Current format is cache v2.
+3. **Candidate cache**: expensive generic target/decoy local candidates keyed
+   by the residual ownership state.
+
+Cache keys include source fingerprints, scientific parameters and relevant
+implementation signatures. Scheduling-only/downstream options do not
+unnecessarily invalidate upstream caches. A stale or partially published cache
+is rejected rather than reused. Outputs and cache directories use staging plus
+atomic publication.
+
+Parallelism is bounded at two visible levels:
+
+- `run_workers`: files processed concurrently;
+- `nprocs`: internal detection/local-extraction workers per file.
+
+Nested parallelism requires explicit permission because the total process budget
+is approximately `run_workers * nprocs`.
+
+## Output contract
+
+Hybrid mode publishes a single de-duplicated population and sidecars:
+
+| Output | Contract |
+|---|---|
+| `<stem>.features.parquet` | One row per accepted MS1 feature. |
+| `<stem>.feature_quant.parquet` | Exactly one positive quantitative row per accepted feature ID. |
+| `<stem>.ms2.parquet` | One normalized precursor metadata row per MS2 event. |
+| `<stem>.ms2_feature_links.parquet` | Exactly one audit/association row per MS2 event, including null outcomes. |
+| `<stem>.identifications.parquet` | PSM parsing, mapping and assay status. |
+| `<stem>.id_assays.parquet` | Accepted exact direct-assay definitions and confidence fields. |
+| `project.duckdb` | Run status, paths, resolved options, stage/cache summaries, alignment and validation metadata. |
+
+Feature IDs are positive and unique. Feature and quantification ID sets must be
+equal. A quantitative MS2 link must reference an existing positive-quant feature.
+Project validation checks these contracts before considering a run successful.
+
+## Important defaults
+
+| Parameter | Current default | Meaning |
+|---|---:|---|
+| feature/project mode | `legacy` | Hybrid residual processing is opt-in. |
+| PSM q-value maximum | 0.01 | Direct-assay input control. |
+| targeted MS2 RT tolerance | 120 s | Initial bounded local search window; run calibration may tighten retries. |
+| maximum charge | 7 | Charge hypotheses/features up to z=7. |
+| quantification | `envelope_area` | Final assigned envelope area. |
+| project baseline | `edge_linear` | Optional baseline preprocessing. |
+| generic extraction q-value maximum | 0.01 | Separate target/decoy family; configurable. |
+| relaxed MS2 feature | false | Conservative MS2-only retry is disabled by default. |
+| run workers | 1 | One file worker unless explicitly increased. |
+| internal workers | 4 | Per-file worker budget unless explicitly increased. |
+
+## Module responsibilities
+
+| Module | Responsibility |
+|---|---|
+| `main.py` | Strict detection orchestration, strict-stage cache and final residual strict detector. |
+| `hills.py`, `cutils.pyx` | Deterministic hill normalization and performance-critical detection routines. |
+| `preprocessing.py`, `raw_ms1.py` | mzML ingestion, MS1/MS2 metadata and compact raw store/cache. |
+| `identifications.py`, `chemistry.py` | Percolator parsing/mapping, modification normalization, exact formulas and isotope libraries. |
+| `hybrid.py` | Direct/generic association, residual recovery, strict protection, quantification assembly and audit finalization. |
+| `ms2_seed.py`, `generic_local.py` | Generic precursor hypotheses, scoring, local extraction and target/decoy candidates. |
+| `local_refinement.py`, `optimization.py` | Bounded trace edits, local components and non-negative decomposition. |
+| `residual.py` | Reversible intensity ownership and conservation ledger. |
+| `direct_competitors.py` | Pre-conflict capture of bounded direct-relevant losing hill candidates. |
+| `confidence.py` | Deterministic decoys, competitions and extraction q-values. |
+| `quantification.py` | Area/apex calculations and baseline handling. |
+| `external.py`, `alignment.py` | Multi-run RT alignment and recipient-run external assay extraction. |
+| `stage_cache.py`, `postprocess_cache.py` | Fingerprinted strict and local candidate caches. |
+| `project.py`, `project_manifest.py` | Bounded multi-run execution, resume/validation and project metadata. |
+| `output.py`, `legacy_output.py`, `duckdb_output.py` | Atomic output lifecycle, schemas and compact formats. |
+
+## Validated behavior as of 2026-07-30
+
+- Standard residual mode on the frozen 12-run panel linked
+  363,117/514,529 MS2 events to positive-quant features: 70.5727%.
+- Guarded relaxed mode on four runs linked 115,693/165,776 events: 69.7888%,
+  adding 1,119 links over its same-input standard baseline with zero lost
+  standard links and zero lost baseline final-strict scientific rows.
+- The guarded four-run output contained 794,341 features and exactly 794,341
+  positive quant rows; all four residual ledgers conserved intensity.
+- Repeated-MS2 behavior reuses one feature abundance rather than duplicating it.
+- Real cache-v2 validation captured 465 losing-hill matches for 443 direct
+  assays. Seventeen retries were attempted and 14 locally selected, but no new
+  feature/link passed all final gates. This is retained as a safe bounded path,
+  not claimed as a measured coverage improvement.
+- The most recent full test baseline is 215 passed; build, compile, CLI and
+  output validation also passed.
+
+## Known boundaries
+
+- Reliable coverage is not forced to 100%. Sparse chromatographic traces,
+  missing event-scan isotope signal and non-identifiable overlaps remain null.
+- Universal decomposition of distinct overlapping envelopes is not always
+  mathematically identifiable. Such cases remain explicit conflicts.
+- External aligned assays are implemented, but the current validation panel
+  produced zero accepted q<=0.01 gain. Confidence thresholds were not weakened.
+- The real processed-hill cache-v2 experiment demonstrated execution and safety
+  but zero final coverage gain on run 1555082.
+
+These boundaries must not be “fixed” by lowering non-MS2 thresholds, accepting
+single-survey-scan features, duplicating shared intensity, copying donor
+abundance, or weakening q-value control.
+
+## Design maintenance
+
+Update this document whenever a change materially alters feature population
+construction, hill ownership/repair, residual allocation, evidence hierarchy,
+confidence control, quantification semantics, output contracts, cache validity,
+mode defaults, or project execution. Small refactors that do not change design
+or observable behavior do not require a design rewrite, but their update notes
+should still state that the design is unchanged.
