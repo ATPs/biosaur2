@@ -222,6 +222,27 @@ def test_trace_selection_falls_back_for_nonmonotonic_rt_store():
     )
 
 
+def test_native_trace_extraction_accepts_read_only_cached_arrays():
+    builder = preprocessing.RawMS1StoreBuilder()
+    builder.append(
+        [500.0], [10.0], source_scan_index=1, scan_number=101,
+        rt_sec=1.0, faims_cv=None,
+    )
+    store = builder.finalize()
+    for values in (
+        store.offsets,
+        store.mz,
+        store.intensity,
+        store.source_scan_index,
+        store.scan_number,
+        store.rt_sec,
+        store.faims_cv,
+    ):
+        values.setflags(write=False)
+    trace = store.extract_trace(500.0, 10.0, 0.0, 2.0)
+    np.testing.assert_allclose(trace.intensity, [10.0])
+
+
 def test_persisted_and_mmap_raw_stores_are_identical_and_fingerprint_safe(tmp_path):
     source = tmp_path / "run.mzML.gz"
     source.write_bytes(b"mzML-prefix" + b"x" * 100 + b"mzML-suffix")

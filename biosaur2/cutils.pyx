@@ -31,10 +31,10 @@ def extract_trace_values(
     cdef double total, weighted_mz, value
     cdef np.ndarray[np.float64_t, ndim=1] values = np.zeros(count, dtype=np.float64)
     cdef np.ndarray[np.float64_t, ndim=1] observed = np.empty(count, dtype=np.float64)
-    cdef long long[::1] offsets_view = offsets
-    cdef double[::1] mz_view = mz
-    cdef double[::1] intensity_view = intensity
-    cdef long long[::1] local_indices_view = local_indices
+    cdef const long long[::1] offsets_view = offsets
+    cdef const double[::1] mz_view = mz
+    cdef const double[::1] intensity_view = intensity
+    cdef const long long[::1] local_indices_view = local_indices
     cdef double[::1] values_view = values
     cdef double[::1] observed_view = observed
 
@@ -97,11 +97,11 @@ def extract_traces_values(
     cdef np.ndarray[np.float64_t, ndim=2] observed = np.empty(
         (target_count, scan_count), dtype=np.float64
     )
-    cdef long long[::1] offsets_view = offsets
-    cdef double[::1] mz_view = mz
-    cdef double[::1] intensity_view = intensity
-    cdef long long[::1] local_indices_view = local_indices
-    cdef double[::1] target_mzs_view = target_mzs
+    cdef const long long[::1] offsets_view = offsets
+    cdef const double[::1] mz_view = mz
+    cdef const double[::1] intensity_view = intensity
+    cdef const long long[::1] local_indices_view = local_indices
+    cdef const double[::1] target_mzs_view = target_mzs
     cdef double[:, ::1] values_view = values
     cdef double[:, ::1] observed_view = observed
 
