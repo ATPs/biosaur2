@@ -67,6 +67,20 @@ def ms2_feature_links_output_path(args: Mapping[str, Any]) -> Path:
     )
 
 
+def hybrid_sidecar_path(args: Mapping[str, Any], kind: str) -> Path:
+    names = {
+        "hybrid_feature_quant": "feature_quant.parquet",
+        "identifications": "identifications.parquet",
+        "id_assays": "id_assays.parquet",
+    }
+    if kind == "hybrid_ms2_audit":
+        return ms2_feature_links_output_path(args)
+    if kind not in names:
+        raise ValueError("unknown hybrid sidecar kind: %s" % kind)
+    base = ms2_output_path(args)
+    return base.with_name(input_stem(str(args["file"])) + "." + names[kind])
+
+
 def planned_output_paths(args: Mapping[str, Any]):
     """Resolve final outputs without creating writers or staging files."""
 
@@ -110,6 +124,16 @@ def planned_output_paths(args: Mapping[str, Any]):
         paths.append(ms2_output_path(args))
     if args.get("ms2_seed"):
         paths.append(ms2_feature_links_output_path(args))
+    if args.get("feature_mode") == "hybrid":
+        paths.extend(
+            hybrid_sidecar_path(args, kind)
+            for kind in (
+                "hybrid_feature_quant",
+                "hybrid_ms2_audit",
+                "identifications",
+                "id_assays",
+            )
+        )
     return paths
 
 

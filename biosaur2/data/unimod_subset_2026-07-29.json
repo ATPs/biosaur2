@@ -1,0 +1,19 @@
+{
+  "snapshot": "biosaur2-unimod-subset-2026-07-29-v1",
+  "source": "https://www.unimod.org/xml/unimod.xml",
+  "attribution": "Unimod protein modifications database; curated offline subset for Biosaur2.",
+  "accessed": "2026-07-29",
+  "entries": [
+    {"accession": "UNIMOD:1", "title": "Acetyl", "aliases": ["Acetylation"], "mono_mass": 42.010565, "average_mass": 42.0367, "composition": {"C": 2, "H": 2, "O": 1}, "specificity": ["peptide_n_term", "protein_n_term", "K"]},
+    {"accession": "UNIMOD:4", "title": "Carbamidomethyl", "aliases": ["CAM"], "mono_mass": 57.021464, "average_mass": 57.0513, "composition": {"C": 2, "H": 3, "N": 1, "O": 1}, "specificity": ["C"]},
+    {"accession": "UNIMOD:7", "title": "Deamidated", "aliases": ["Deamidation"], "mono_mass": 0.984016, "average_mass": 0.9848, "composition": {"H": -1, "N": -1, "O": 1}, "specificity": ["N", "Q"]},
+    {"accession": "UNIMOD:21", "title": "Phospho", "aliases": ["Phosphorylation"], "mono_mass": 79.966331, "average_mass": 79.9799, "composition": {"H": 1, "O": 3, "P": 1}, "specificity": ["S", "T", "Y"]},
+    {"accession": "UNIMOD:27", "title": "Glu->pyro-Glu", "aliases": ["Pyro-glu from E"], "mono_mass": -18.010565, "average_mass": -18.0153, "composition": {"H": -2, "O": -1}, "specificity": ["E", "peptide_n_term"]},
+    {"accession": "UNIMOD:28", "title": "Gln->pyro-Glu", "aliases": ["Pyro-glu from Q"], "mono_mass": -17.026549, "average_mass": -17.0305, "composition": {"H": -3, "N": -1}, "specificity": ["Q", "peptide_n_term"]},
+    {"accession": "UNIMOD:34", "title": "Methyl", "aliases": ["Methylation"], "mono_mass": 14.01565, "average_mass": 14.0266, "composition": {"C": 1, "H": 2}, "specificity": ["K", "R", "peptide_n_term", "protein_n_term"]},
+    {"accession": "UNIMOD:35", "title": "Oxidation", "aliases": ["Oxidized"], "mono_mass": 15.994915, "average_mass": 15.9994, "composition": {"O": 1}, "specificity": ["M", "W", "P", "H", "C"]},
+    {"accession": "UNIMOD:36", "title": "Dimethyl", "aliases": ["Dimethylation"], "mono_mass": 28.0313, "average_mass": 28.0532, "composition": {"C": 2, "H": 4}, "specificity": ["K", "R", "peptide_n_term", "protein_n_term"]},
+    {"accession": "UNIMOD:37", "title": "Trimethyl", "aliases": ["Trimethylation"], "mono_mass": 42.04695, "average_mass": 42.0797, "composition": {"C": 3, "H": 6}, "specificity": ["K", "R"]},
+    {"accession": "UNIMOD:121", "title": "GlyGly", "aliases": ["GG"], "mono_mass": 114.042927, "average_mass": 114.1026, "composition": {"C": 4, "H": 6, "N": 2, "O": 2}, "specificity": ["K"]}
+  ]
+}

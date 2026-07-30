@@ -78,6 +78,11 @@ def test_help_documents_compact_output_contract():
         "--run-workers",
         "--continue-on-error",
         "--write-ms2",
+        "--feature-mode",
+        "--quant-method",
+        "--max-charge",
+        "--relaxed-ms2-feature",
+        "--hybrid-candidate-cache-dir",
     ):
         assert text in result.stdout
 
@@ -132,3 +137,45 @@ def test_mixed_inputs_are_validated_before_any_output_manager(tmp_path):
     assert result.returncode != 0
     assert "--write-ms1 cannot be used with hills input" in result.stderr
     assert not output.exists()
+
+
+def test_feature_mode_alias_and_hybrid_mode_validation(tmp_path):
+    hills = tmp_path / "sample.hills.parquet"
+    hills.write_bytes(b"not read")
+    result = _run(hills, "--feature-mode", "hybrid")
+    assert result.returncode != 0
+    assert "normal mzML" in result.stderr
+
+    mzml = tmp_path / "sample.mzML"
+    mzml.write_bytes(b"not read")
+    result = _run(mzml, "--ms2-seed", "--feature-mode", "legacy")
+    assert result.returncode != 0
+    assert "compatibility alias" in result.stderr
+
+    result = _run(mzml, "-cmin", "8", "--max-charge", "7")
+    assert result.returncode != 0
+    assert "must be at least -cmin" in result.stderr
+
+
+def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
+    help_result = _run("project", "run", "--help")
+    assert help_result.returncode == 0
+    assert "--ms2-seed-rt-tolerance-sec" in help_result.stdout
+    assert "--allow-nested-parallelism" in help_result.stdout
+    assert "--max-charge" in help_result.stdout
+    assert "--relaxed-ms2-feature" in help_result.stdout
+
+    result = _run(
+        "project",
+        "run",
+        "--manifest",
+        tmp_path / "missing.tsv",
+        "--output-dir",
+        tmp_path / "runs",
+        "--project-db",
+        tmp_path / "project.duckdb",
+        "--ms2-seed-rt-tolerance-sec",
+        "-1",
+    )
+    assert result.returncode != 0
+    assert "finite nonnegative number" in result.stderr

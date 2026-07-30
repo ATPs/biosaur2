@@ -8,6 +8,20 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 
+QUANTIFICATION_METHODS = ("envelope_area", "mono_area", "envelope_apex")
+BASELINE_METHODS = ("none", "edge_linear")
+
+
+@dataclass(frozen=True)
+class FeatureQuantification:
+    method: str
+    baseline: str
+    value: Optional[float]
+    isotope_values: tuple[float, ...]
+    common_apex_index: Optional[int]
+    flags: frozenset[str]
+
+
 @dataclass
 class NormalizedTrace:
     rt: np.ndarray
@@ -139,3 +153,93 @@ def raw_area_sum(
             return None, approximate
         total += area
     return total, approximate
+
+
+def quantify_feature_traces(
+    rt_sec: Iterable[float],
+    isotope_traces: Sequence[Iterable[float]],
+    *,
+    method: str = "envelope_area",
+    baseline: str = "none",
+) -> FeatureQuantification:
+    """Quantify final isotope traces on one common real-RT grid in float64."""
+
+    if method not in QUANTIFICATION_METHODS:
+        raise ValueError(
+            "quantification method must be one of %s" % ", ".join(QUANTIFICATION_METHODS)
+        )
+    if baseline not in BASELINE_METHODS:
+        raise ValueError("baseline must be 'none' or 'edge_linear'")
+    rt = np.asarray(list(rt_sec), dtype=np.float64)
+    traces = [np.asarray(list(values), dtype=np.float64) for values in isotope_traces]
+    if not traces:
+        return FeatureQuantification(method, baseline, None, (), None, frozenset({"no_isotope_traces"}))
+    if any(values.size != rt.size for values in traces):
+        raise ValueError("all isotope traces must share the RT grid")
+    flags = set()
+    finite_rt = np.isfinite(rt)
+    if not np.all(finite_rt) or any(not np.all(np.isfinite(values)) for values in traces):
+        raise ValueError("quantification arrays must be finite")
+    if rt.size < 2 or np.unique(rt).size < 2:
+        return FeatureQuantification(method, baseline, None, (), None, frozenset({"insufficient_rt_points"}))
+    if np.any(np.diff(rt) <= 0):
+        raise ValueError("quantification RT grid must be strictly increasing")
+
+    processed = []
+    raw_processed = []
+    baseline_available = baseline == "none" or rt.size >= 5
+    for values in traces:
+        if np.any(values < 0):
+            flags.add("negative_intensity_clipped")
+        values = np.clip(values, 0.0, None)
+        raw_processed.append(values)
+        if baseline == "edge_linear" and baseline_available:
+            edge_count = min(3, max(1, values.size // 5))
+            left = float(np.median(values[:edge_count]))
+            right = float(np.median(values[-edge_count:]))
+            fraction = (rt - rt[0]) / (rt[-1] - rt[0])
+            edge = left + fraction * (right - left)
+            values = np.clip(values - edge, 0.0, None)
+            flags.add("edge_linear_baseline")
+        processed.append(values)
+    if baseline == "edge_linear" and not baseline_available:
+        processed = raw_processed
+        flags.add("raw_baseline_fallback")
+    envelope = np.sum(np.stack(processed), axis=0, dtype=np.float64)
+    apex = int(np.argmax(envelope)) if envelope.size else None
+    areas = tuple(float(trapezoid_area(NormalizedTrace(rt, values, set())) or 0.0) for values in processed)
+    if method == "envelope_area":
+        value = float(sum(areas))
+        isotope_values = areas
+    elif method == "mono_area":
+        value = areas[0]
+        isotope_values = (areas[0],)
+    else:
+        value = float(envelope[apex])
+        isotope_values = tuple(float(values[apex]) for values in processed)
+    if baseline == "edge_linear" and (value is None or value <= 0):
+        raw_envelope = np.sum(np.stack(raw_processed), axis=0, dtype=np.float64)
+        raw_apex = int(np.argmax(raw_envelope))
+        raw_areas = tuple(
+            float(trapezoid_area(NormalizedTrace(rt, values, set())) or 0.0)
+            for values in raw_processed
+        )
+        if method == "envelope_area":
+            value = float(sum(raw_areas))
+            isotope_values = raw_areas
+        elif method == "mono_area":
+            value = raw_areas[0]
+            isotope_values = (raw_areas[0],)
+        else:
+            value = float(raw_envelope[raw_apex])
+            isotope_values = tuple(float(values[raw_apex]) for values in raw_processed)
+            apex = raw_apex
+        flags.add("raw_baseline_fallback")
+    return FeatureQuantification(
+        method,
+        baseline,
+        value,
+        isotope_values,
+        apex,
+        frozenset(flags),
+    )

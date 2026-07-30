@@ -24,14 +24,15 @@ from .output import (
     _TsvSink,
     _temporary_neighbor,
     build_provenance,
+    hybrid_sidecar_path,
     input_stem,
     ms2_output_path,
     ms2_feature_links_output_path,
     publish_staged_files,
 )
 from .schema import (
+    HYBRID_SCHEMA_VERSION,
     MS1_COLUMNS,
-    MS2_COLUMNS,
     MS2_SCHEMA_VERSION,
     MS2_FEATURE_LINK_SCHEMA_VERSION,
     compact_schemas,
@@ -65,6 +66,7 @@ class DuckDBOutputManager:
         self.tsv_sinks = self._tsv_sinks()
         self.ms2_sink = self._ms2_sink()
         self.ms2_feature_link_sink = self._ms2_feature_link_sink()
+        self.hybrid_sinks = self._hybrid_sinks()
         self.final_paths = self._final_paths()
         self._preflight()
         self.staging_path = self._staging_path()
@@ -131,6 +133,24 @@ class DuckDBOutputManager:
             self.schemas["ms2_feature_links"], self.args, ("run_id", "status"),
         )
 
+    def _hybrid_sinks(self):
+        if self.args.get("feature_mode") != "hybrid":
+            return {}
+        result = {}
+        for kind in (
+            "hybrid_feature_quant",
+            "hybrid_ms2_audit",
+            "identifications",
+            "id_assays",
+        ):
+            result[kind] = _CompactParquetSink(
+                hybrid_sidecar_path(self.args, kind),
+                self.schemas[kind],
+                self.args,
+                ("run_id",),
+            )
+        return result
+
     def _tsv_sinks(self):
         if self.database_mode:
             return {}
@@ -189,6 +209,7 @@ class DuckDBOutputManager:
             values.append(self.ms2_sink.final_path)
         if self.ms2_feature_link_sink is not None:
             values.append(self.ms2_feature_link_sink.final_path)
+        values.extend(sink.final_path for sink in self.hybrid_sinks.values())
         if len(values) != len(set(values)):
             raise ValueError("DuckDB output paths collide")
         existing = [path for path in values if path.exists()]
@@ -295,6 +316,36 @@ class DuckDBOutputManager:
                 [compact_ms2_feature_link(row, self.args) for row in batch]
             )
 
+    def _append_hybrid(self, kind, rows):
+        sink = self.hybrid_sinks.get(kind)
+        if sink is None:
+            return
+        converted = [
+            {name: row.get(name) for name in self.schemas[kind].names}
+            for row in rows
+        ]
+        if kind == "hybrid_ms2_audit":
+            converted.sort(key=lambda row: row["ms2_event_id"])
+        elif kind == "hybrid_feature_quant":
+            converted.sort(key=lambda row: row["feature_id"])
+        elif kind == "id_assays":
+            converted.sort(key=lambda row: row["assay_id"])
+        else:
+            converted.sort(key=lambda row: (row.get("ms2_event_id") is None, row.get("ms2_event_id") or -1, row["psm_id"]))
+        sink.append(converted)
+
+    def append_hybrid_feature_quant(self, rows):
+        self._append_hybrid("hybrid_feature_quant", rows)
+
+    def append_hybrid_ms2_audit(self, rows):
+        self._append_hybrid("hybrid_ms2_audit", rows)
+
+    def append_identifications(self, rows):
+        self._append_hybrid("identifications", rows)
+
+    def append_id_assays(self, rows):
+        self._append_hybrid("id_assays", rows)
+
     def _order(self, table_name):
         if table_name == "features":
             mode = self.args.get("parquet_sort", "mz_rt")
@@ -393,6 +444,20 @@ class DuckDBOutputManager:
             )
             self.ms2_feature_link_sink.add_provenance(metadata)
             self.ms2_feature_link_sink.close()
+        for sink in self.hybrid_sinks.values():
+            metadata = dict(self.provenance)
+            metadata.update(
+                {
+                    "hybrid_schema_version": HYBRID_SCHEMA_VERSION,
+                    "hybrid_summary_json": json.dumps(
+                        self.args.get("_hybrid_summary", {}),
+                        sort_keys=True,
+                        default=str,
+                    ),
+                }
+            )
+            sink.add_provenance(metadata)
+            sink.close()
         self.connection.close()
         self.connection = None
         for sink in self.tsv_sinks.values():
@@ -417,6 +482,10 @@ class DuckDBOutputManager:
             pairs.append((self.ms2_sink.temp_path, self.ms2_sink.final_path))
         if self.ms2_feature_link_sink is not None:
             pairs.append((self.ms2_feature_link_sink.temp_path, self.ms2_feature_link_sink.final_path))
+        pairs.extend(
+            (sink.temp_path, sink.final_path)
+            for sink in self.hybrid_sinks.values()
+        )
         return pairs
 
     def finalize(self):
@@ -435,6 +504,8 @@ class DuckDBOutputManager:
             self.ms2_sink.abort()
         if self.ms2_feature_link_sink is not None:
             self.ms2_feature_link_sink.abort()
+        for sink in self.hybrid_sinks.values():
+            sink.abort()
 
 
 def uses_duckdb(args: Mapping[str, Any]) -> bool:

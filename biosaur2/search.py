@@ -194,6 +194,14 @@ def _log_batch_report(logger, files, results):
 
 
 def run():
+    if len(sys.argv) > 1 and sys.argv[1] == 'project':
+        from .project_cli import run_project_cli
+
+        return run_project_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == 'build-manifest':
+        from .project_cli import run_build_manifest_alias
+
+        return run_build_manifest_alias(sys.argv[2:])
     parser = argparse.ArgumentParser(
         description='Detect isotope features in centroided LC-MS1 mzML data.',
         epilog='''
@@ -254,7 +262,12 @@ Examples:
     parser.add_argument('-minlh', help='minimum length for hill', default=2, type=int)
     parser.add_argument('-pasefminlh', help='minimum length for pasef hill', default=1, type=int)
     parser.add_argument('-cmin', help='min charge', default=1, type=int)
-    parser.add_argument('-cmax', help='max charge', default=6, type=int)
+    parser.add_argument(
+        '-cmax', '--max-charge', '--max_charge', dest='cmax',
+        help='maximum precursor/feature charge (default: 7)',
+        default=7,
+        type=int,
+    )
     parser.add_argument('-nprocs', help='number of processes', default=4, type=int)
     parser.add_argument(
         '--run-workers',
@@ -305,6 +318,60 @@ Examples:
     parser.add_argument(
         '--ms2-seed', '--ms2_seed', dest='ms2_seed', action='store_true',
         help='use eligible DDA MS2 precursor metadata as bounded ordering evidence',
+    )
+    parser.add_argument(
+        '--feature-mode',
+        choices=('legacy', 'weak-ms2', 'hybrid'),
+        default='legacy',
+        help='feature evidence mode; --ms2-seed remains an alias for weak-ms2',
+    )
+    parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM table for hybrid mode')
+    parser.add_argument('--psm-q-value-max', type=float, default=0.01)
+    parser.add_argument('--psm-pep-max', type=float, default=None)
+    parser.add_argument('--fixed-mod', action='append', default=[], help='explicit hybrid fixed modification SITE=MOD; repeatable')
+    parser.add_argument(
+        '--quant-method',
+        choices=('envelope_area', 'mono_area', 'envelope_apex'),
+        default='envelope_area',
+    )
+    parser.add_argument(
+        '--feature-baseline', choices=('none', 'edge_linear'), default=None
+    )
+    parser.add_argument('--direct-id', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--external-id', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--generic-ms2-refine', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--generic-q-value-max', type=float, default=0.01)
+    parser.add_argument(
+        '--relaxed-ms2-feature',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            'retry otherwise unresolved MS2 once with conservative multi-scan '
+            'criteria; direct retries require same-run PSM q-value < 0.01 and '
+            'generic retries retain paired target-decoy control'
+        ),
+    )
+    parser.add_argument(
+        '--raw-ms1-cache-dir',
+        default='',
+        help='optional persisted mmap-compatible raw MS1 cache directory for hybrid mode',
+    )
+    parser.add_argument(
+        '--hybrid-stage-cache-dir',
+        default='',
+        help=(
+            'optional fingerprinted strict-stage cache; a valid existing '
+            'cache skips mzML ingestion, hill detection and strict candidate '
+            'generation, otherwise the completed strict stage is saved here'
+        ),
+    )
+    parser.add_argument(
+        '--hybrid-candidate-cache-dir',
+        default='',
+        help=(
+            'optional fingerprinted cache root for expensive hybrid local '
+            'target/decoy candidate extraction on a specific residual state'
+        ),
     )
     parser.add_argument(
         '--ms2-seed-ppm', '--ms2_seed_ppm', dest='ms2_seed_ppm', type=float,
@@ -381,6 +448,8 @@ Examples:
     args = vars(parser.parse_args())
     if args['nprocs'] < 1:
         parser.error('-nprocs must be a positive integer.')
+    if args['cmin'] < 1 or args['cmax'] < args['cmin']:
+        parser.error('-cmin must be positive and -cmax/--max-charge must be at least -cmin.')
     if args['combine_every'] < 1:
         parser.error('-combine_every must be a positive integer.')
     if args['combine_every'] > 1:
@@ -391,6 +460,37 @@ Examples:
         parser.error('--ms2-seed-ppm must be a finite positive number.')
     if not math.isfinite(args['ms2_seed_rt_tolerance_sec']) or args['ms2_seed_rt_tolerance_sec'] < 0:
         parser.error('--ms2-seed-rt-tolerance-sec must be a finite nonnegative number.')
+    if not math.isfinite(args['psm_q_value_max']) or not 0 <= args['psm_q_value_max'] <= 1:
+        parser.error('--psm-q-value-max must be finite and in [0, 1].')
+    if args['psm_pep_max'] is not None and (
+        not math.isfinite(args['psm_pep_max']) or not 0 <= args['psm_pep_max'] <= 1
+    ):
+        parser.error('--psm-pep-max must be finite and in [0, 1].')
+    if not math.isfinite(args['generic_q_value_max']) or not 0 <= args['generic_q_value_max'] <= 1:
+        parser.error('--generic-q-value-max must be finite and in [0, 1].')
+    feature_mode_supplied = _option_was_supplied('--feature-mode')
+    if args['ms2_seed'] and feature_mode_supplied and args['feature_mode'] != 'weak-ms2':
+        parser.error('--ms2-seed is a compatibility alias for --feature-mode weak-ms2 and conflicts with the selected mode.')
+    if args['ms2_seed']:
+        args['feature_mode'] = 'weak-ms2'
+    elif args['feature_mode'] == 'weak-ms2':
+        args['ms2_seed'] = True
+    if args['feature_mode'] == 'hybrid':
+        args['write_ms2'] = True
+        args['feature_baseline'] = args['feature_baseline'] or 'edge_linear'
+    else:
+        args['feature_baseline'] = args['feature_baseline'] or 'none'
+    if args['raw_ms1_cache_dir'] and args['feature_mode'] != 'hybrid':
+        parser.error('--raw-ms1-cache-dir requires --feature-mode hybrid.')
+    if args['hybrid_stage_cache_dir'] and args['feature_mode'] != 'hybrid':
+        parser.error('--hybrid-stage-cache-dir requires --feature-mode hybrid.')
+    if args['hybrid_candidate_cache_dir'] and args['feature_mode'] != 'hybrid':
+        parser.error('--hybrid-candidate-cache-dir requires --feature-mode hybrid.')
+    if args['hybrid_stage_cache_dir'] and not args['raw_ms1_cache_dir']:
+        parser.error(
+            '--hybrid-stage-cache-dir requires --raw-ms1-cache-dir so local '
+            'post-processing can reuse the fingerprinted raw MS1 store.'
+        )
     if args['ms2_seed']:
         args['write_ms2'] = True
     if args['parquet_compression'] not in {'zstd', 'brotli'} and _option_was_supplied(
@@ -411,6 +511,10 @@ Examples:
         parser.error('DIA modes do not support --duckdb-output.')
     if args['no_mono_hills'] and args['dia']:
         parser.error('--no-mono-hills cannot be used with -dia because DIA processing requires mono_hills_* columns.')
+    if args['feature_mode'] == 'hybrid' and (
+        args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
+    ):
+        parser.error('--feature-mode hybrid is supported only for the normal mzML feature workflow.')
     for filename in args['files']:
         if not _is_hills_input(filename):
             continue

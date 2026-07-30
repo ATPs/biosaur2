@@ -18,6 +18,11 @@ from .schema import (
     MS2_UNRESOLVED_SPECTRUM_REF,
 )
 from .spectra import extract_scan_number, faims_value, retention_time_seconds
+from .raw_ms1 import (
+    RawMS1StoreBuilder,
+    load_raw_ms1_cache,
+    save_raw_ms1_cache,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,7 @@ class MzMLIngestion:
     ms1_rows: list
     ms2_rows: list
     ms1_metadata: dict
+    raw_ms1_store: object = None
 
 
 def centroid_pasef_data(data, args, mz_step):
@@ -343,6 +349,11 @@ def ingest_mzml(args):
     preceding_ms1 = None
     ms1_by_native_id = {}
     ms1_metadata = {}
+    raw_builder = (
+        RawMS1StoreBuilder()
+        if args.get("feature_mode") == "hybrid" or args.get("_collect_raw_ms1")
+        else None
+    )
 
     for spectrum_index, spectrum in enumerate(iterator):
         ms_level = spectrum.get("ms level")
@@ -371,10 +382,20 @@ def ingest_mzml(args):
             scan_info["scan start time"], args.get("input_rt_unit", "seconds")
         )
         scan_number = extract_scan_number(spectrum)
+        spectrum_faims = faims_value(spectrum)
+        if raw_builder is not None:
+            raw_builder.append(
+                spectrum["m/z array"],
+                spectrum["intensity array"],
+                source_scan_index=fallback_index,
+                scan_number=scan_number,
+                rt_sec=rt_sec,
+                faims_cv=spectrum_faims,
+            )
         if collect_ms2:
             ms1_metadata[fallback_index] = {
                 "rt_sec": rt_sec,
-                "faims_cv": faims_value(spectrum),
+                "faims_cv": spectrum_faims,
             }
         if collect_ms1:
             ms1_rows.append(
@@ -388,7 +409,7 @@ def ingest_mzml(args):
                             np.sum(spectrum.get("intensity array", [])),
                         )
                     ),
-                    "faims_cv": faims_value(spectrum),
+                    "faims_cv": spectrum_faims,
                     "ion_mobility_1_over_k0": None,
                 }
             )
@@ -432,7 +453,38 @@ def ingest_mzml(args):
     logger.info("Number of skipped MS1 scans: %d", skipped)
     if source_count == 0 or not data:
         raise ValueError("No usable MS1 scans remain after input filtering.")
-    return MzMLIngestion(data, ms1_rows, ms2_rows, ms1_metadata)
+    raw_store = None if raw_builder is None else raw_builder.finalize()
+    raw_cache = args.get("raw_ms1_cache_dir")
+    if raw_store is not None and raw_cache:
+        from pathlib import Path
+
+        cache_path = Path(raw_cache)
+        if cache_path.exists():
+            cached = load_raw_ms1_cache(cache_path, args["file"], mmap=True)
+            if (
+                cached.scan_count != raw_store.scan_count
+                or cached.point_count != raw_store.point_count
+            ):
+                raise ValueError("existing raw MS1 cache does not match current ingestion")
+            raw_store = cached
+            logger.info("Validated and mapped existing raw MS1 cache: %s", cache_path)
+        else:
+            save_raw_ms1_cache(raw_store, cache_path, args["file"])
+            raw_store = load_raw_ms1_cache(cache_path, args["file"], mmap=True)
+            logger.info(
+                "Published raw MS1 cache: %s (%d scans, %d points, %d bytes in arrays)",
+                cache_path,
+                raw_store.scan_count,
+                raw_store.point_count,
+                raw_store.memory_bytes,
+            )
+    return MzMLIngestion(
+        data,
+        ms1_rows,
+        ms2_rows,
+        ms1_metadata,
+        raw_store,
+    )
 
 
 def process_mzml(args):

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "format": "percolator_tsv",
+  "text": {
+    "encoding": "auto",
+    "delimiter": "auto",
+    "compression": "auto",
+    "strict_decode": true
+  },
+  "filter": {
+    "q_value_max": 0.01,
+    "posterior_error_probability_max": null,
+    "targets_only": true,
+    "require_rank_one": false
+  },
+  "fixed_modifications": [
+    {
+      "site": "C",
+      "modification": "UNIMOD:4",
+      "application": "add_if_absent"
+    }
+  ]
+}

@@ -10,6 +10,21 @@ import numpy as np
 
 C13_C12_MASS_DIFF = 1.003354835
 SEED_BONUS_CAP = 0.20
+COMPOSITE_SCORE_WEIGHT_ITEMS = (
+    ("mz_support", 0.20),
+    ("selected_intensity_support", 0.20),
+    ("event_apex_support", 0.15),
+    ("isotope_cosine_support", 0.12),
+    ("scan_support", 0.10),
+    ("isolation_support", 0.08),
+    ("rt_support", 0.04),
+    ("isotope_count_support", 0.04),
+    ("isotope_mass_support", 0.03),
+    ("coelution_support", 0.02),
+    ("point_support", 0.02),
+    ("precursor_joint_support", 0.00),
+)
+COMPOSITE_SCORE_WEIGHTS = dict(COMPOSITE_SCORE_WEIGHT_ITEMS)
 
 FLAG_ELIGIBLE = 0x0001
 FLAG_MZ_MATCH = 0x0002
@@ -101,6 +116,129 @@ def _point_in_window(hills_dict, hill_index, local_scan, window):
     if window[0] <= mz <= window[1]:
         return float(hills_dict["hills_intensity_array"][hill_index][position])
     return None
+
+
+def _candidate_shape_support(hills_dict, hill_indices, local_scan, candidate, args):
+    """Return transparent feature-quality and event-locality score components.
+
+    This is opt-in for hybrid generic association.  Weak-MS2 compatibility
+    continues to use its historical multiplicative score.
+    """
+
+    envelope_by_scan = {}
+    isotope_apex_scans = []
+    for hill_index in hill_indices:
+        scans = hills_dict["hills_scan_lists"][hill_index]
+        intensities = hills_dict["hills_intensity_array"][hill_index]
+        if len(scans):
+            isotope_apex_scans.append(
+                int(scans[int(np.argmax(np.asarray(intensities)))])
+            )
+        for scan, intensity in zip(scans, intensities):
+            envelope_by_scan[int(scan)] = (
+                envelope_by_scan.get(int(scan), 0.0) + float(intensity)
+            )
+    envelope_apex = max(envelope_by_scan.values(), default=0.0)
+    event_apex_support = (
+        min(
+            1.0,
+            max(0.0, envelope_by_scan.get(int(local_scan), 0.0) / envelope_apex),
+        )
+        if envelope_apex > 0
+        else 0.0
+    )
+    mono_points = len(hills_dict["hills_scan_lists"][hill_indices[0]])
+    point_support = min(1.0, float(mono_points) / 5.0)
+    isotope_cosine = min(
+        1.0,
+        max(0.0, (float(candidate.get("cos_cor_isotopes", 0.0)) - 0.6) / 0.4),
+    )
+    isotope_count_support = min(
+        1.0, float(candidate.get("nIsotopes", len(hill_indices))) / 4.0
+    )
+    mass_errors = [
+        abs(float(value.get("mass_diff_ppm", math.inf)))
+        for value in candidate.get("isotopes", ())
+    ]
+    isotope_mass_support = (
+        max(
+            0.0,
+            1.0
+            - float(np.mean(mass_errors))
+            / max(float(args.get("itol", args.get("ms2_seed_ppm", 10.0))), 1e-12),
+        )
+        if mass_errors
+        else 0.0
+    )
+    if len(isotope_apex_scans) >= 2:
+        span = max(isotope_apex_scans) - min(isotope_apex_scans)
+        coelution_support = max(0.0, 1.0 - float(span) / 5.0)
+    else:
+        coelution_support = 0.0
+    return {
+        "event_apex_support": event_apex_support,
+        "isotope_cosine_support": isotope_cosine,
+        "isotope_count_support": isotope_count_support,
+        "isotope_mass_support": isotope_mass_support,
+        "coelution_support": coelution_support,
+        "point_support": point_support,
+    }
+
+
+def _selected_intensity_support(row, hills_dict, hill_indices, offset, local_scan):
+    """Compare precursor metadata with the selected isotope at its exact scan."""
+
+    reference = _finite(row.get("selected_ion_intensity"), positive=True)
+    if reference is None:
+        return 0.5
+    if (
+        local_scan is None
+        or offset is None
+        or int(offset) < 0
+        or int(offset) >= len(hill_indices)
+    ):
+        return 0.0
+    hill_index = hill_indices[int(offset)]
+    scans = hills_dict["hills_scan_lists"][hill_index]
+    position = bisect_left(scans, int(local_scan))
+    if position == len(scans) or scans[position] != int(local_scan):
+        return 0.0
+    observed = float(hills_dict["hills_intensity_array"][hill_index][position])
+    if not math.isfinite(observed) or observed <= 0:
+        return 0.0
+    ratio = min(observed, reference) / max(observed, reference)
+    # Instrument precursor intensity is not numerically identical to the raw
+    # centroid (the 1555082 median ratio is about 0.37), so use a deliberately
+    # broad one-decade log scale.  Exact agreement is 1; a 10-fold difference
+    # is exp(-1), while an absent selected isotope remains 0.
+    return float(math.exp(-abs(math.log(ratio)) / math.log(10.0)))
+
+
+def composite_seed_support(score_components, weights=None):
+    """Combine transparent score components with normalized non-negative weights."""
+
+    selected_weights = COMPOSITE_SCORE_WEIGHTS if weights is None else weights
+    return float(
+        sum(
+            float(selected_weights.get(name, 0.0))
+            * min(1.0, max(0.0, float(score_components.get(name, 0.0))))
+            for name, _base_weight in COMPOSITE_SCORE_WEIGHT_ITEMS
+        )
+    )
+
+
+def precursor_joint_support(score_components):
+    """Require precursor localization and feature shape to agree jointly."""
+
+    values = (
+        float(score_components.get("mz_support", 0.0)),
+        float(score_components.get("selected_intensity_support", 0.0)),
+        float(score_components.get("event_apex_support", 0.0)),
+        float(score_components.get("isotope_cosine_support", 0.0)),
+    )
+    if any(not math.isfinite(value) or value <= 0.0 for value in values):
+        return 0.0
+    return float(np.prod(np.clip(values, 0.0, 1.0)) ** (1.0 / len(values)))
 
 
 def _build_scan_point_index(hills_dict, scan_count):
@@ -354,12 +492,50 @@ def annotate_candidate_support(candidate, hills_dict, context, args):
             flags |= FLAG_RT_TOLERANCE
         else:
             rt_support = 0.0
-        support = mz_support * rt_support * scan_support * isolation_support
+        if args.get("ms2_seed_composite_score", False):
+            precursor = row.get("precursor_ms1_index")
+            local_scan = (
+                context["source_to_local"].get(int(precursor))
+                if precursor is not None
+                else None
+            )
+            shape = (
+                _candidate_shape_support(
+                    hills_dict, hill_indices, local_scan, candidate, args
+                )
+                if local_scan is not None
+                else {
+                    "event_apex_support": 0.0,
+                    "isotope_cosine_support": 0.0,
+                    "isotope_count_support": 0.0,
+                    "isotope_mass_support": 0.0,
+                    "coelution_support": 0.0,
+                    "point_support": 0.0,
+                }
+            )
+            selected_intensity_support = _selected_intensity_support(
+                row, hills_dict, hill_indices, offset, local_scan
+            )
+            score_components = {
+                "mz_support": mz_support,
+                "rt_support": rt_support,
+                "scan_support": scan_support,
+                "isolation_support": isolation_support,
+                "selected_intensity_support": selected_intensity_support,
+                **shape,
+            }
+            score_components["precursor_joint_support"] = (
+                precursor_joint_support(score_components)
+            )
+            support = composite_seed_support(score_components)
+        else:
+            score_components = None
+            support = mz_support * rt_support * scan_support * isolation_support
         flags |= FLAG_MZ_MATCH | FLAG_STANDARD_CANDIDATE
         edge = {"candidate": candidate, "event_id": row["ms2_event_id"], "support": support,
                 "offset": offset, "ppm_error": ppm_error, "rt_distance": distance_rt,
                 "scan_distance": scan_distance, "isolated_index": isolated,
-                "flags": flags}
+                "flags": flags, "score_components": score_components}
         edges.append(edge)
         context["event_edges"].setdefault(row["ms2_event_id"], []).append(edge)
     candidate["_ms2_seed_edges"] = edges
@@ -392,6 +568,7 @@ def build_link_rows(ms2_rows, context, final_candidates):
                   "selected_ion_isotope_offset": None, "isolated_isotope_index": None,
                   "mz_error_ppm": None, "rt_distance_sec": None,
                   "precursor_scan_distance": None, "seed_support": None,
+                  "_score_components": None,
                   "reason_flags": int(
                       event.get("flags", 0) | event.get("diagnostic_flags", 0)
                   )}
@@ -413,6 +590,7 @@ def build_link_rows(ms2_rows, context, final_candidates):
                         "isolated_isotope_index": best["isolated_index"],
                         "mz_error_ppm": best["ppm_error"], "rt_distance_sec": best["rt_distance"],
                         "precursor_scan_distance": best["scan_distance"], "seed_support": best["support"],
+                        "_score_components": best.get("score_components"),
                         "reason_flags": result["reason_flags"] | best["flags"] | FLAG_SELECTED_CANDIDATE,
                     })
             elif edges:
@@ -420,7 +598,8 @@ def build_link_rows(ms2_rows, context, final_candidates):
                 result.update({"status": "seed_candidate_lost_conflict", "selected_ion_isotope_offset": best["offset"],
                                "isolated_isotope_index": best["isolated_index"], "mz_error_ppm": best["ppm_error"],
                                "rt_distance_sec": best["rt_distance"], "precursor_scan_distance": best["scan_distance"],
-                               "seed_support": best["support"], "reason_flags": result["reason_flags"] | best["flags"]})
+                               "seed_support": best["support"], "_score_components": best.get("score_components"),
+                               "reason_flags": result["reason_flags"] | best["flags"]})
             else:
                 result["status"] = "no_standard_candidate"
         statuses[result["status"]] = statuses.get(result["status"], 0) + 1

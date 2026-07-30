@@ -1,0 +1,3 @@
+run_id	mzml_path	psm_path	psm_format	identification_config	fixed_mods	q_value_max	sample_id	condition	replicate	fraction	batch	alignment_group
+run_a	mzml/run_a.mzML.gz	percolator/run_a.percolator.target.psms.tsv	percolator_tsv	identification_config.json	C=UNIMOD:4	0.01	sample_a	control	1		batch_1	batch_1
+run_b	mzml/run_b.mzML.gz	percolator/run_b.percolator.target.psms.tsv	percolator_tsv	identification_config.json	C=UNIMOD:4	0.01	sample_b	treatment	1		batch_1	batch_1

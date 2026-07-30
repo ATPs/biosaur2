@@ -1,3 +1,4 @@
+import json
 import pyarrow.parquet as pq
 import pytest
 
@@ -165,6 +166,29 @@ def test_pyarrow_provenance_is_final_and_omits_input_hash(tmp_path):
     assert b"biosaur2_input_hash_algorithm" not in metadata
     assert b"late" in metadata[b"biosaur2_calibration"]
     assert metadata[b"biosaur2_area_sum_rt"] == b"approximated_from_hill_anchors"
+
+
+def test_hybrid_summary_is_persisted_in_sidecar_metadata(tmp_path):
+    args = _args(
+        tmp_path,
+        o=str(tmp_path / "hybrid.features.parquet"),
+        feature_format="parquet",
+        feature_mode="hybrid",
+    )
+    (tmp_path / "sample.mzML.gz").write_bytes(b"input")
+    manager = CompactOutputManager(args)
+    args["_hybrid_summary"] = {
+        "audit_row_count": 1,
+        "audit_status_counts": {"generic_decoy_only": 1},
+    }
+    manager.finalize()
+    metadata = pq.ParquetFile(
+        tmp_path / "sample.ms2_feature_links.parquet"
+    ).metadata.metadata
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"2"
+    assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
+        "_hybrid_summary"
+    ]
 
 
 def test_write_extra_details_stays_in_same_feature_file(tmp_path):

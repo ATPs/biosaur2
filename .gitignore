@@ -5,3 +5,38 @@ biosaur2/*.so
 biosaur2/cutils.c
 dev/test
 .local
+dist/
+*.pyc
+*.pyo
+*.so
+*.o
+*.dylib
+*.dll
+
+# Python tooling and local environments
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+
+# Cython and packaging intermediates
+.cython_debug/
+*.egg
+*.pyd
+
+# Editor and operating-system metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+

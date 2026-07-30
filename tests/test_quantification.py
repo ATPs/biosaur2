@@ -1,9 +1,11 @@
 import math
 
 import numpy as np
+import pytest
 
 from biosaur2.quantification import (
     normalize_trace,
+    quantify_feature_traces,
     raw_area_sum,
     trapezoid_area,
 )
@@ -95,3 +97,44 @@ def test_raw_area_sum_is_null_when_a_selected_trace_cannot_be_integrated():
     )
     assert area is None
     assert approximate is False
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        ("envelope_area", 9.0),
+        ("mono_area", 6.0),
+        ("envelope_apex", 6.0),
+    ],
+)
+def test_exactly_three_feature_quantification_methods(method, expected):
+    result = quantify_feature_traces(
+        [0.0, 1.0, 3.0],
+        [[0.0, 4.0, 0.0], [0.0, 2.0, 0.0]],
+        method=method,
+    )
+    assert result.value == expected
+
+
+def test_quantification_rejects_single_rt_point_and_supports_edge_baseline():
+    single = quantify_feature_traces([1.0], [[10.0]])
+    assert single.value is None
+    assert "insufficient_rt_points" in single.flags
+    corrected = quantify_feature_traces(
+        [0.0, 1.0, 2.0], [[2.0, 10.0, 4.0]], baseline="edge_linear"
+    )
+    assert corrected.value == pytest.approx(13.0)
+    assert "raw_baseline_fallback" in corrected.flags
+
+    corrected = quantify_feature_traces(
+        [0.0, 1.0, 2.0, 3.0, 4.0],
+        [[2.0, 4.0, 10.0, 6.0, 2.0]],
+        baseline="edge_linear",
+    )
+    assert corrected.value == pytest.approx(14.0)
+    assert "raw_baseline_fallback" not in corrected.flags
+
+
+def test_unknown_quantification_method_is_not_a_hidden_fourth_choice():
+    with pytest.raises(ValueError, match="quantification method"):
+        quantify_feature_traces([0.0, 1.0], [[1.0, 1.0]], method="sum")

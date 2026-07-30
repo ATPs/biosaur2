@@ -5,10 +5,13 @@ import pyarrow.parquet as pq
 from biosaur2.legacy_output import CompactOutputManager
 from biosaur2.ms2_seed import (
     C13_C12_MASS_DIFF,
+    COMPOSITE_SCORE_WEIGHTS,
     annotate_candidate_support,
     build_link_rows,
+    composite_seed_support,
     partition_mono_indices,
     prepare_seed_context,
+    precursor_joint_support,
 )
 from biosaur2.schema import compact_schemas
 
@@ -47,6 +50,7 @@ def _event(**values):
         "charge": 2, "rt_sec": 55.0, "precursor_ms1_index": 100,
         "faims_cv": None, "isolation_target_mz": 500.0,
         "isolation_lower_offset": 1.0, "isolation_upper_offset": 1.0,
+        "selected_ion_intensity": None,
     }
     result.update(values)
     return result
@@ -86,6 +90,90 @@ def test_seed_support_uses_source_scan_and_isolation():
     assert edge["offset"] == 0
     assert edge["scan_distance"] == 0
     assert edge["isolated_index"] == 0
+
+
+def test_hybrid_composite_support_rewards_feature_quality_and_event_apex():
+    hills = _hills()
+    shoulder_event = _event(ms2_event_id=7, precursor_ms1_index=100)
+    apex_event = _event(ms2_event_id=8, precursor_ms1_index=101, rt_sec=60.0)
+    args = _args(ms2_seed_composite_score=True)
+    context = prepare_seed_context(
+        hills,
+        _spectra(),
+        [shoulder_event, apex_event],
+        {100: {"faims_cv": None}, 101: {"faims_cv": None}},
+        None,
+        {0: 50.0, 1: 60.0},
+        args,
+        1,
+    )
+    candidate = _candidate()
+    candidate["isotopes"][0]["mass_diff_ppm"] = 0.0
+    annotate_candidate_support(candidate, hills, context, args)
+    edges = {edge["event_id"]: edge for edge in candidate["_ms2_seed_edges"]}
+
+    assert edges[8]["support"] > edges[7]["support"]
+    assert edges[8]["score_components"]["event_apex_support"] == 1.0
+    assert edges[7]["score_components"]["event_apex_support"] == 0.5
+    assert edges[8]["score_components"]["isotope_cosine_support"] > 0.7
+
+
+def test_hybrid_composite_support_uses_exact_selected_isotope_intensity():
+    hills = _hills()
+    matched = _event(
+        ms2_event_id=7,
+        precursor_ms1_index=101,
+        rt_sec=60.0,
+        selected_ion_intensity=20.0,
+    )
+    mismatched = _event(
+        ms2_event_id=8,
+        precursor_ms1_index=101,
+        rt_sec=60.0,
+        selected_ion_intensity=2000.0,
+    )
+    args = _args(ms2_seed_composite_score=True)
+    context = prepare_seed_context(
+        hills,
+        _spectra(),
+        [matched, mismatched],
+        {100: {"faims_cv": None}, 101: {"faims_cv": None}},
+        None,
+        {0: 50.0, 1: 60.0},
+        args,
+        1,
+    )
+    candidate = _candidate()
+    candidate["isotopes"][0]["mass_diff_ppm"] = 0.0
+    annotate_candidate_support(candidate, hills, context, args)
+    edges = {edge["event_id"]: edge for edge in candidate["_ms2_seed_edges"]}
+
+    assert edges[7]["score_components"]["selected_intensity_support"] == 1.0
+    assert edges[8]["score_components"]["selected_intensity_support"] < 0.2
+    assert edges[7]["support"] > edges[8]["support"]
+
+
+def test_composite_seed_support_weights_are_normalized_and_bounded():
+    assert sum(COMPOSITE_SCORE_WEIGHTS.values()) == 1.0
+    assert composite_seed_support({}) == 0.0
+    assert composite_seed_support(
+        {name: 1.0 for name in COMPOSITE_SCORE_WEIGHTS}
+    ) == 1.0
+    assert composite_seed_support(
+        {name: 2.0 for name in COMPOSITE_SCORE_WEIGHTS}
+    ) == 1.0
+
+
+def test_precursor_joint_support_requires_all_localization_evidence():
+    components = {
+        "mz_support": 1.0,
+        "selected_intensity_support": 0.81,
+        "event_apex_support": 1.0,
+        "isotope_cosine_support": 1.0,
+    }
+    assert precursor_joint_support(components) == 0.81 ** 0.25
+    components["event_apex_support"] = 0.0
+    assert precursor_joint_support(components) == 0.0
 
 
 def test_support_can_use_isotope_scan_when_mono_is_not_seed_local():
@@ -154,6 +242,20 @@ def test_missing_charge_is_ineligible_and_keeps_null_link():
     assert row["status"] == "ineligible_seed"
     assert row["feature_id"] is None
     assert row["seed_eligible"] is False
+
+
+def test_reported_charge_seven_is_eligible_when_max_charge_is_seven():
+    event = _event(charge=7)
+    excluded = prepare_seed_context(
+        _hills(), _spectra(), [event], {100: {"faims_cv": None}}, None,
+        {0: 50.0, 1: 60.0}, _args(cmax=6), 1,
+    )
+    included = prepare_seed_context(
+        _hills(), _spectra(), [event], {100: {"faims_cv": None}}, None,
+        {0: 50.0, 1: 60.0}, _args(cmax=7), 1,
+    )
+    assert not excluded["events"][7]["eligible"]
+    assert included["events"][7]["eligible"]
 
 
 def test_link_sidecar_schema_and_atomic_publication(tmp_path):

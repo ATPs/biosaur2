@@ -90,6 +90,35 @@ MS2_FEATURE_LINK_COLUMNS = (
     "precursor_scan_distance", "seed_support", "reason_flags",
 )
 MS2_FEATURE_LINK_SCHEMA_VERSION = "1"
+HYBRID_SCHEMA_VERSION = "2"
+
+HYBRID_FEATURE_QUANT_COLUMNS = (
+    "run_id", "feature_id", "feature_origin", "confidence_tier",
+    "quant_value", "quant_method", "quant_status", "area_envelope_raw",
+    "area_envelope_corrected", "area_mono_raw", "area_mono_corrected",
+    "envelope_apex", "feature_quality_score", "quality_flags",
+    "extraction_q_value", "supporting_psm_count", "supporting_ms2_count",
+    "points_across_peak", "rt_start_sec", "rt_apex_sec", "rt_end_sec",
+    "isotope_cosine", "mass_error_ppm_median",
+)
+HYBRID_MS2_AUDIT_COLUMNS = (
+    "run_id", "ms2_event_id", "feature_id", "association_tier", "status",
+    "primary_identification_id", "assay_id", "charge_used", "charge_source",
+    "selected_isotope_index", "generic_isotope_error", "mz_error_ppm",
+    "rt_error_sec", "score", "extraction_q_value", "alternative_count",
+    "reason_flags",
+)
+IDENTIFICATION_COLUMNS = (
+    "run_id", "psm_id", "ms2_event_id", "mapping_status", "q_value", "pep",
+    "score", "rank", "peptide_raw", "canonical_peptidoform", "formula_status",
+    "assay_status", "selected_isotope_index", "selected_mz_error_ppm",
+)
+ID_ASSAY_COLUMNS = (
+    "run_id", "assay_id", "ms2_event_id", "psm_id", "canonical_peptidoform",
+    "charge", "rt_sec", "faims_cv", "monoisotopic_mz",
+    "selected_isotope_index", "selected_mz_error_ppm", "q_value", "pep",
+    "conflict_status",
+)
 
 MS2_SCHEMA_VERSION = "1"
 MS2_MISSING_PRECURSOR_MZ = 0x0001
@@ -261,6 +290,69 @@ def _ms2_feature_link_schema(use64=False):
     )
 
 
+def _hybrid_feature_quant_schema(use64=False):
+    feature_id = pa.int64() if use64 else pa.int32()
+    category = pa.dictionary(pa.int8(), pa.string())
+    fields = {
+        "run_id": category, "feature_id": feature_id,
+        "feature_origin": category, "confidence_tier": category,
+        "quant_value": pa.float64(), "quant_method": category,
+        "quant_status": category, "area_envelope_raw": pa.float64(),
+        "area_envelope_corrected": pa.float64(), "area_mono_raw": pa.float64(),
+        "area_mono_corrected": pa.float64(), "envelope_apex": pa.float64(),
+        "feature_quality_score": pa.float32(), "quality_flags": pa.uint32(),
+        "extraction_q_value": pa.float32(), "supporting_psm_count": pa.int32(),
+        "supporting_ms2_count": pa.int32(), "points_across_peak": pa.int32(),
+        "rt_start_sec": pa.float64(), "rt_apex_sec": pa.float64(),
+        "rt_end_sec": pa.float64(), "isotope_cosine": pa.float32(),
+        "mass_error_ppm_median": pa.float32(),
+    }
+    return pa.schema(pa.field(name, fields[name], nullable=name not in {"run_id", "feature_id"}) for name in HYBRID_FEATURE_QUANT_COLUMNS)
+
+
+def _hybrid_ms2_audit_schema(use64=False):
+    feature_id = pa.int64() if use64 else pa.int32()
+    category = pa.dictionary(pa.int8(), pa.string())
+    fields = {
+        "run_id": category, "ms2_event_id": pa.int32(), "feature_id": feature_id,
+        "association_tier": category, "status": category,
+        "primary_identification_id": pa.string(), "assay_id": pa.int32(),
+        "charge_used": pa.int16(), "charge_source": category,
+        "selected_isotope_index": pa.int8(), "generic_isotope_error": pa.int8(),
+        "mz_error_ppm": pa.float32(), "rt_error_sec": pa.float32(),
+        "score": pa.float32(), "extraction_q_value": pa.float32(),
+        "alternative_count": pa.int16(), "reason_flags": pa.uint32(),
+    }
+    required = {"run_id", "ms2_event_id", "association_tier", "status", "alternative_count", "reason_flags"}
+    return pa.schema(pa.field(name, fields[name], nullable=name not in required) for name in HYBRID_MS2_AUDIT_COLUMNS)
+
+
+def _identification_schema():
+    category = pa.dictionary(pa.int8(), pa.string())
+    fields = {
+        "run_id": category, "psm_id": pa.string(), "ms2_event_id": pa.int32(),
+        "mapping_status": category, "q_value": pa.float64(), "pep": pa.float64(),
+        "score": pa.float64(), "rank": pa.int16(), "peptide_raw": pa.string(),
+        "canonical_peptidoform": pa.string(), "formula_status": category,
+        "assay_status": category, "selected_isotope_index": pa.int8(),
+        "selected_mz_error_ppm": pa.float32(),
+    }
+    return pa.schema(pa.field(name, fields[name], nullable=name not in {"run_id", "psm_id", "mapping_status", "q_value"}) for name in IDENTIFICATION_COLUMNS)
+
+
+def _id_assay_schema():
+    category = pa.dictionary(pa.int8(), pa.string())
+    fields = {
+        "run_id": category, "assay_id": pa.int32(), "ms2_event_id": pa.int32(),
+        "psm_id": pa.string(), "canonical_peptidoform": pa.string(),
+        "charge": pa.int16(), "rt_sec": pa.float64(), "faims_cv": pa.float32(),
+        "monoisotopic_mz": pa.float64(), "selected_isotope_index": pa.int8(),
+        "selected_mz_error_ppm": pa.float32(), "q_value": pa.float64(),
+        "pep": pa.float64(), "conflict_status": category,
+    }
+    return pa.schema(pa.field(name, fields[name], nullable=name in {"faims_cv", "pep"}) for name in ID_ASSAY_COLUMNS)
+
+
 def compact_schemas(
     use64=False,
     include_mono=True,
@@ -273,6 +365,10 @@ def compact_schemas(
         "ms1": _ms1_schema(use64),
         "ms2": _ms2_schema(),
         "ms2_feature_links": _ms2_feature_link_schema(use64),
+        "hybrid_feature_quant": _hybrid_feature_quant_schema(use64),
+        "hybrid_ms2_audit": _hybrid_ms2_audit_schema(use64),
+        "identifications": _identification_schema(),
+        "id_assays": _id_assay_schema(),
     }
 
 

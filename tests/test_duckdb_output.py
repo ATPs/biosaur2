@@ -143,6 +143,25 @@ def test_duckdb_parquet_is_v2_single_file_with_compact_types(tmp_path):
     assert [path.name for path in tmp_path.glob("*.parquet")] == [output.name]
 
 
+def test_duckdb_hybrid_summary_is_persisted_in_sidecar_metadata(tmp_path):
+    args = _args(tmp_path, feature_mode="hybrid")
+    manager = DuckDBOutputManager(args)
+    args["_hybrid_summary"] = {
+        "audit_row_count": 2,
+        "generic_summary": {
+            "competition_counts": {"decoy_only_candidate_count": 1}
+        },
+    }
+    manager.finalize()
+    metadata = pq.ParquetFile(
+        tmp_path / "sample.ms2_feature_links.parquet"
+    ).metadata.metadata
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"2"
+    assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
+        "_hybrid_summary"
+    ]
+
+
 def test_duckdb_mixes_feature_tsv_with_hills_and_ms1_parquet(tmp_path):
     args = _args(
         tmp_path,

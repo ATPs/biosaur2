@@ -29,6 +29,142 @@ unavailable, Biosaur2 emits a visible warning and falls back to an optimized
 PyArrow writer. Selecting `--parquet-engine pyarrow` explicitly avoids that
 fallback check.
 
+## Feature modes and hybrid DDA workflow
+
+The single-file CLI has three explicit modes:
+
+```text
+--feature-mode legacy
+--feature-mode weak-ms2
+--feature-mode hybrid
+```
+
+`legacy` preserves ordinary Biosaur2 detection. `weak-ms2` preserves the
+bounded compatibility seed (the existing `--ms2-seed` flag is its alias).
+`hybrid` is an optional identification-aware residual workflow and is off by
+default. It keeps the strict untargeted feature population, then uses evidence
+in this order:
+
+1. q-value-filtered direct PSM assays from the same run;
+2. calibrated exact assays aligned from compatible project runs;
+3. generic unidentified-MS2 precursor and C13-offset hypotheses;
+4. a final strict untargeted detector on unallocated residual MS1 signal.
+
+Direct PSMs are strong priors, not unconditional feature truth. A single
+survey-scan precursor signal is audited as `precursor_signal_only` and is not
+given a quantitative feature ID. Multiple PSMs or MS2 events may support one
+feature, but its signal and abundance are allocated once.
+
+A direct/generic single-run example is:
+
+```bash
+biosaur2 sample.mzML.gz \
+  --feature-mode hybrid \
+  --psm-path sample.percolator.target.psms.tsv \
+  --psm-q-value-max 0.01 \
+  --fixed-mod C=UNIMOD:4 \
+  --generic-q-value-max 0.01 \
+  --ms2-seed-rt-tolerance-sec 120 \
+  --max-charge 7 \
+  --quant-method envelope_area \
+  --feature-baseline edge_linear \
+  --raw-ms1-cache-dir cache/sample-raw \
+  --hybrid-stage-cache-dir cache/sample-strict \
+  --hybrid-candidate-cache-dir cache/sample-local \
+  --feature-format parquet
+```
+
+Percolator q-value filtering defaults to `0.01`; rank greater than one is not
+discarded solely because of rank. Fixed modifications must be explicit and
+are never inferred from precursor mass. The targeted RT tolerance defaults to
+120 seconds. `--relaxed-ms2-feature` enables one conservative retry for
+unresolved MS2-supported local evidence; it never lowers thresholds for
+features without MS2. Generic and external extraction q-values are separate
+from the Percolator q-value.
+
+Hybrid mode writes one de-duplicated feature population plus compact sidecars:
+
+```text
+<stem>.features.parquet
+<stem>.feature_quant.parquet
+<stem>.ms2.parquet
+<stem>.ms2_feature_links.parquet
+<stem>.identifications.parquet
+<stem>.id_assays.parquet
+```
+
+There is exactly one MS2 audit row per event, including honest null outcomes.
+The hybrid summary reports audit coverage, observed local MS1-signal coverage,
+quantitative-feature coverage, direct/generic coverage, and mutually exclusive
+unresolved categories. Observed local signal is not itself a quantitative
+feature.
+
+## Hybrid quantification
+
+Hybrid mode exposes exactly three feature-level methods:
+
+| Method | Definition |
+| --- | --- |
+| `envelope_area` | trapezoidal area of the summed final assigned isotope traces on actual RT seconds (default) |
+| `mono_area` | trapezoidal area of the final monoisotopic contribution |
+| `envelope_apex` | maximum summed assigned isotope intensity at one common MS1 scan |
+
+`--feature-baseline` is either `none` or `edge_linear`; it is preprocessing,
+not a fourth quantification method. The compact quantification sidecar records
+raw/corrected areas, the selected value, status, origin, evidence counts and
+quality flags. Legacy `intensityApex`, `intensitySum`, and `area_sum` semantics
+are unchanged.
+
+## Project manifests and alignment
+
+Build a deterministic manifest from exact normalized stems:
+
+```bash
+biosaur2 project make-manifest \
+  --mzml-dir mzml \
+  --psm-dir percolator \
+  --psm-suffix .percolator.target.psms.tsv \
+  --output runs.tsv
+```
+
+Run and validate a bounded project:
+
+```bash
+biosaur2 project run \
+  --manifest runs.tsv \
+  --output-dir results \
+  --project-db results/project.duckdb \
+  --mode hybrid \
+  --run-workers 4 \
+  --nprocs 20 \
+  --allow-nested-parallelism \
+  --psm-q-value-max 0.01 \
+  --external-id \
+  --external-q-value-max 0.01 \
+  --generic-q-value-max 0.01 \
+  --hybrid-stage-cache
+
+biosaur2 project validate --project-db results/project.duckdb
+```
+
+Project execution also defaults to `legacy`; pass `--mode hybrid` explicitly
+to enable identification/MS2-guided residual feature detection. This keeps the
+new workflow opt-in for both single-run and manifest-driven commands.
+
+Only `run_id` and `mzml_path` are required. Optional columns include
+`psm_path`, `psm_format`, `identification_config`, `fixed_mods`, `q_value_max`,
+sample/condition/replicate/fraction/batch metadata, and `alignment_group`.
+External assays stay inside compatible groups, use robust monotonic RT
+alignment, and always quantify recipient-run MS1 signal rather than copying
+donor abundance. See `examples/hybrid_project_manifest.tsv` and
+`examples/identification_config.json`.
+
+Raw MS1, strict-stage, and local-candidate caches are fingerprinted and
+atomically published. Reuse is refused when source, scientific parameters,
+implementation signature, or residual ownership state differs. Project
+parallelism is explicitly bounded; nested file/internal workers require
+`--allow-nested-parallelism` so the total process budget is visible.
+
 ## Compact feature output
 
 Default feature columns, in order, are:
