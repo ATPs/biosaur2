@@ -3,8 +3,8 @@
 ## Document status
 
 This document describes the algorithm and workflow implemented in the repository
-as of 2026-07-30. It covers the legacy detector, weak-MS2 compatibility mode,
-and the opt-in hybrid residual workflow. It is an implementation design
+as of 2026-07-30. It covers the legacy detector and the opt-in hybrid residual
+workflow. It is an implementation design
 document, not a promise that every MS2 event can always be assigned a feature.
 
 The central scientific objective is to build an accurate, nearly complete,
@@ -48,12 +48,11 @@ evidence or duplicating shared MS1 intensity.
 | Mode | Activation | Behavior |
 |---|---|---|
 | `legacy` | default | Ordinary Biosaur2 hill construction, isotope-envelope detection and legacy feature output. |
-| `weak-ms2` | `--feature-mode weak-ms2` or the compatibility alias `--ms2-seed` | Uses bounded DDA precursor metadata as ordering/association evidence while preserving the earlier weak-MS2 behavior. |
 | `hybrid` | `--feature-mode hybrid` or project `--mode hybrid` | Enables q-filtered direct assays, generic MS2 hypotheses, residual allocation, local recovery, target/decoy confidence, explicit quantification and exhaustive MS2 audit. |
 
 Hybrid mode is deliberately opt-in. `--relaxed-ms2-feature` is a second,
-independent opt-in switch and defaults to false. Disabling the new mode keeps
-legacy and weak-MS2 workflows available.
+independent opt-in switch and defaults to false. Disabling hybrid keeps the
+legacy strict workflow unchanged.
 
 ## Core data model
 
@@ -460,7 +459,7 @@ Project validation checks these contracts before considering a run successful.
 | `preprocessing.py`, `raw_ms1.py` | mzML ingestion, MS1/MS2 metadata and compact raw store/cache. |
 | `identifications.py`, `chemistry.py` | Percolator parsing/mapping, modification normalization, exact formulas and isotope libraries. |
 | `hybrid.py` | Direct/generic association, residual recovery, strict protection, quantification assembly and audit finalization. |
-| `ms2_seed.py`, `generic_local.py` | Generic precursor hypotheses, scoring, local extraction and target/decoy candidates. |
+| `generic_association.py`, `generic_local.py` | Generic precursor association, scoring, local extraction and target/decoy candidates. |
 | `local_refinement.py`, `optimization.py` | Bounded trace edits, local components and non-negative decomposition. |
 | `residual.py` | Reversible intensity ownership and conservation ledger. |
 | `direct_competitors.py` | Pre-conflict capture of bounded direct-relevant losing hill candidates. |

@@ -185,7 +185,7 @@ def test_hybrid_summary_is_persisted_in_sidecar_metadata(tmp_path):
     metadata = pq.ParquetFile(
         tmp_path / "sample.ms2_feature_links.parquet"
     ).metadata.metadata
-    assert metadata[b"biosaur2_hybrid_schema_version"] == b"2"
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"3"
     assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
         "_hybrid_summary"
     ]

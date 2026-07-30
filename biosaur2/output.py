@@ -59,8 +59,8 @@ def ms2_output_path(args: Mapping[str, Any]) -> Path:
     return directory / (stem + ".ms2.parquet")
 
 
-def ms2_feature_links_output_path(args: Mapping[str, Any]) -> Path:
-    """Return the fixed input-stem MS2 feature-link sidecar path."""
+def hybrid_ms2_audit_output_path(args: Mapping[str, Any]) -> Path:
+    """Return the fixed input-stem hybrid MS2 audit sidecar path."""
 
     return ms2_output_path(args).with_name(
         input_stem(str(args["file"])) + ".ms2_feature_links.parquet"
@@ -74,7 +74,7 @@ def hybrid_sidecar_path(args: Mapping[str, Any], kind: str) -> Path:
         "id_assays": "id_assays.parquet",
     }
     if kind == "hybrid_ms2_audit":
-        return ms2_feature_links_output_path(args)
+        return hybrid_ms2_audit_output_path(args)
     if kind not in names:
         raise ValueError("unknown hybrid sidecar kind: %s" % kind)
     base = ms2_output_path(args)
@@ -122,8 +122,6 @@ def planned_output_paths(args: Mapping[str, Any]):
             )
     if args.get("write_ms2"):
         paths.append(ms2_output_path(args))
-    if args.get("ms2_seed"):
-        paths.append(ms2_feature_links_output_path(args))
     if args.get("feature_mode") == "hybrid":
         paths.extend(
             hybrid_sidecar_path(args, kind)

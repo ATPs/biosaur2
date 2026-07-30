@@ -10,7 +10,7 @@ from biosaur2.hybrid import (
     QUALITY_FLAG_TWO_POINT_QUANT,
     _apply_generic_strict_associations,
     _calibrate_generic_score_weights,
-    _compact_seed_summary,
+    _compact_generic_association_summary,
     _compete_generic_local_by_input_family,
     _direct_relaxed_retry_enabled,
     _feature_population_summary,
@@ -38,7 +38,7 @@ from biosaur2.hybrid import (
     extract_local_feature,
     match_assay_to_strict_feature,
 )
-from biosaur2.ms2_seed import COMPOSITE_SCORE_WEIGHTS, composite_seed_support
+from biosaur2.generic_association import GENERIC_ASSOCIATION_SCORE_WEIGHTS, composite_association_support
 from biosaur2.identifications import (
     IdentificationMappingResult,
     IdentificationRecord,
@@ -689,13 +689,13 @@ def _generic_link(event_id, *, status, support=None, feature_id=None):
         "selected_ion_isotope_offset": 1 if feature_id is not None else None,
         "mz_error_ppm": 0.5 if feature_id is not None else None,
         "rt_distance_sec": 0.0 if feature_id is not None else None,
-        "seed_support": support,
+        "association_support": support,
         "reason_flags": 1,
     }
 
 
 def _score_components(**updates):
-    values = {name: 0.5 for name in COMPOSITE_SCORE_WEIGHTS}
+    values = {name: 0.5 for name in GENERIC_ASSOCIATION_SCORE_WEIGHTS}
     values.update(updates)
     return values
 
@@ -748,14 +748,14 @@ def test_generic_score_calibration_uses_direct_anchors_and_held_out_decoys():
         > report["base_validation"]["median_margin"]
     )
 
-    target_before = targets[0]["seed_support"]
-    decoy_before = decoys[0]["seed_support"]
+    target_before = targets[0]["association_support"]
+    decoy_before = decoys[0]["association_support"]
     assert _rescore_generic_link_rows(targets, weights) == 80
     assert _rescore_generic_link_rows(decoys, weights) == 80
-    assert targets[0]["seed_support"] > target_before
-    assert decoys[0]["seed_support"] < decoy_before
-    assert targets[0]["seed_support"] == pytest.approx(
-        composite_seed_support(targets[0]["_score_components"], weights)
+    assert targets[0]["association_support"] > target_before
+    assert decoys[0]["association_support"] < decoy_before
+    assert targets[0]["association_support"] == pytest.approx(
+        composite_association_support(targets[0]["_score_components"], weights)
     )
 
 
@@ -787,7 +787,7 @@ def test_generic_score_calibration_retains_base_weights_when_anchors_are_sparse(
     weights, report = _calibrate_generic_score_weights(audits, targets, decoys)
 
     assert report["status"] == "base_weights_insufficient_paired_anchors"
-    assert weights == COMPOSITE_SCORE_WEIGHTS
+    assert weights == GENERIC_ASSOCIATION_SCORE_WEIGHTS
 
 
 def test_generic_score_calibration_rejects_weights_that_reduce_q_accepted_targets():
@@ -838,7 +838,7 @@ def test_generic_score_calibration_rejects_weights_that_reduce_q_accepted_target
                 if name in {"mz_support", "selected_intensity_support"}
                 else 0.675
             )
-            for name in COMPOSITE_SCORE_WEIGHTS
+            for name in GENERIC_ASSOCIATION_SCORE_WEIGHTS
         }
         decoy = _generic_link(
             event_id,
@@ -848,7 +848,7 @@ def test_generic_score_calibration_rejects_weights_that_reduce_q_accepted_target
         )
         decoy["_score_components"] = {
             name: (1.0 if name in {"mz_support", "selected_intensity_support"} else 0.0)
-            for name in COMPOSITE_SCORE_WEIGHTS
+            for name in GENERIC_ASSOCIATION_SCORE_WEIGHTS
         }
         targets.append(target)
         decoys.append(decoy)
@@ -857,7 +857,7 @@ def test_generic_score_calibration_rejects_weights_that_reduce_q_accepted_target
 
     assert report["base_generic_q_metrics"]["accepted_target_count"] == 200
     assert report["status"] == "base_weights_retained_by_dual_validation"
-    assert weights == COMPOSITE_SCORE_WEIGHTS
+    assert weights == GENERIC_ASSOCIATION_SCORE_WEIGHTS
     assert all(
         not item["generic_q_acceptance_preserved"]
         for item in report["candidate_evaluations"]
@@ -883,11 +883,11 @@ def test_generic_decoy_shifts_selected_ion_and_isolation_window_together():
     assert source["selected_ion_mz"] == 500.0
 
 
-def test_generic_seed_summary_persists_histogram_not_per_event_array():
-    compact = _compact_seed_summary(
+def test_generic_association_summary_persists_histogram_not_per_event_array():
+    compact = _compact_generic_association_summary(
         {
-            "eligible_seed_count": 3,
-            "seed_local_hill_count": 4,
+            "eligible_event_count": 3,
+            "association_local_hill_count": 4,
             "local_candidate_counts": [0, 2, 2],
             "status_counts": {"matched_existing_feature": 1},
         }

@@ -15,7 +15,6 @@ from .output import (
     build_provenance,
     input_stem,
     hybrid_sidecar_path,
-    ms2_feature_links_output_path,
     ms2_output_path,
     publish_staged_files,
     round_intensity,
@@ -28,8 +27,6 @@ from .schema import (
     hill_columns,
     MS1_COLUMNS,
     MS2_COLUMNS,
-    MS2_FEATURE_LINK_COLUMNS,
-    MS2_FEATURE_LINK_SCHEMA_VERSION,
     MS2_SCHEMA_VERSION,
     HYBRID_FEATURE_QUANT_COLUMNS,
     HYBRID_MS2_AUDIT_COLUMNS,
@@ -160,10 +157,6 @@ def compact_ms2(row: Mapping[str, Any], args: Mapping[str, Any]):
         "ion_mobility": row.get("ion_mobility"),
         "metadata_flags": row.get("metadata_flags", 0),
     }
-
-
-def compact_ms2_feature_link(row: Mapping[str, Any], args: Mapping[str, Any]):
-    return {name: row.get(name) for name in MS2_FEATURE_LINK_COLUMNS}
 
 
 def compact_sort_key(row, kind, mode="mz_rt"):
@@ -306,8 +299,6 @@ class CompactOutputManager:
     def _target(self, kind, output_format):
         if kind == "ms2":
             return ms2_output_path(self.args)
-        if kind == "ms2_feature_links":
-            return ms2_feature_links_output_path(self.args)
         if kind in {"hybrid_feature_quant", "hybrid_ms2_audit", "identifications", "id_assays"}:
             return hybrid_sidecar_path(self.args, kind)
         explicit = self.args.get("o")
@@ -327,7 +318,7 @@ class CompactOutputManager:
                 decimals=self.args.get("tsv_float_decimals", "roundtrip"),
             )
         dictionary_columns = ()
-        if kind in {"ms2", "ms2_feature_links", "hybrid_feature_quant", "hybrid_ms2_audit", "identifications", "id_assays"}:
+        if kind in {"ms2", "hybrid_feature_quant", "hybrid_ms2_audit", "identifications", "id_assays"}:
             dictionary_columns = (
                 "run_id",
                 *( ("precursor_resolution", "precursor_mz_source") if kind == "ms2" else () ),
@@ -357,10 +348,6 @@ class CompactOutputManager:
             )
         if self.args.get("write_ms2"):
             self.sinks["ms2"] = self._sink("ms2", "parquet", MS2_COLUMNS)
-        if self.args.get("ms2_seed"):
-            self.sinks["ms2_feature_links"] = self._sink(
-                "ms2_feature_links", "parquet", MS2_FEATURE_LINK_COLUMNS
-            )
         if self.args.get("feature_mode") == "hybrid":
             for kind, columns in (
                 ("hybrid_feature_quant", HYBRID_FEATURE_QUANT_COLUMNS),
@@ -414,14 +401,6 @@ class CompactOutputManager:
             converted = [compact_ms2(row, self.args) for row in batch]
             converted.sort(key=lambda row: compact_sort_key(row, "ms2"))
             self.sinks["ms2"].append(converted)
-
-    def append_ms2_feature_links(self, rows):
-        if "ms2_feature_links" not in self.sinks:
-            return
-        for batch in row_batches(rows):
-            converted = [compact_ms2_feature_link(row, self.args) for row in batch]
-            converted.sort(key=lambda row: compact_sort_key(row, "ms2"))
-            self.sinks["ms2_feature_links"].append(converted)
 
     def _append_hybrid(self, kind, rows):
         if kind not in self.sinks:
@@ -478,13 +457,6 @@ class CompactOutputManager:
                                 "0x0004 unresolved_spectrum_ref; "
                                 "0x0008 missing_precursor_ms1"
                             ),
-                        }
-                    )
-                elif name == "ms2_feature_links":
-                    provenance.update(
-                        {
-                            "ms2_feature_link_schema_version": MS2_FEATURE_LINK_SCHEMA_VERSION,
-                            "ms2_seed_summary": self.args.get("_ms2_seed_summary", {}),
                         }
                     )
                 elif name in {

@@ -48,7 +48,7 @@ sample.mzML.gz
 ```
 
 Use centroided MS1 spectra. Biosaur2 can read DDA MS2 precursor metadata from
-the same mzML in `weak-ms2` and `hybrid` modes. Profile processing and the
+the same mzML in `hybrid` mode. Profile processing and the
 experimental DIA/DIA2 paths have different assumptions and should not be used
 as a substitute for centroiding a conventional DDA experiment first.
 
@@ -100,7 +100,6 @@ rank.
 | Situation | Recommended command mode | Why |
 | --- | --- | --- |
 | Ordinary untargeted LC-MS1 feature detection | default `legacy` | Fast, established strict MS1 population; use when MS2 association is not required. |
-| Existing compatibility workflow using DDA precursor metadata | `--feature-mode weak-ms2` or `--ms2-seed` | Preserves the bounded weak-MS2 behavior. |
 | DDA data, no trustworthy PSM table | `--feature-mode hybrid` | Keeps strict MS1 detection and uses generic MS2 precursor/charge/C13 evidence with target/decoy control. |
 | DDA data with Percolator PSMs | `--feature-mode hybrid --psm-path ...` | Adds q-filtered exact peptide/charge/isotope assays to improve association and local recovery. |
 | Several comparable runs, with optional PSMs | `biosaur2 project run --mode hybrid` | Adds bounded project execution and optional RT-aligned external assays; recipient-run MS1 is always re-extracted. |
@@ -114,19 +113,16 @@ is scientifically defensible, not to force a feature for every precursor.
 
 ## Feature modes and hybrid DDA workflow
 
-The single-file CLI has three explicit modes:
+The single-file CLI has two explicit modes:
 
 ```text
 --feature-mode legacy
---feature-mode weak-ms2
 --feature-mode hybrid
 ```
 
-`legacy` preserves ordinary Biosaur2 detection. `weak-ms2` preserves the
-bounded compatibility seed (the existing `--ms2-seed` flag is its alias).
-`hybrid` is an optional identification-aware residual workflow and is off by
-default. It keeps the strict untargeted feature population, then uses evidence
-in this order:
+`legacy` preserves ordinary Biosaur2 detection. `hybrid` is an optional
+identification-aware residual workflow and is off by default. It keeps the
+strict untargeted feature population, then uses evidence in this order:
 
 1. q-value-filtered direct PSM assays from the same run;
 2. calibrated exact assays aligned from compatible project runs;
@@ -165,7 +161,8 @@ biosaur2 sample.mzML.gz \
   --feature-mode hybrid \
   --generic-ms2-refine \
   --generic-q-value-max 0.01 \
-  --ms2-seed-rt-tolerance-sec 120 \
+  --generic-ms2-ppm 10 \
+  --ms2-rt-tolerance-sec 120 \
   --max-charge 7 \
   --feature-format parquet
 ```
@@ -181,7 +178,8 @@ biosaur2 sample.mzML.gz \
   --psm-q-value-max 0.01 \
   --fixed-mod C=UNIMOD:4 \
   --generic-q-value-max 0.01 \
-  --ms2-seed-rt-tolerance-sec 120 \
+  --generic-ms2-ppm 10 \
+  --ms2-rt-tolerance-sec 120 \
   --max-charge 7 \
   --quant-method envelope_area \
   --feature-baseline edge_linear \
@@ -363,7 +361,7 @@ affect practical use.
 
 | Option | Default | Meaning and when to change it |
 | --- | ---: | --- |
-| `--feature-mode` | `legacy` | Select `legacy`, `weak-ms2`, or opt-in `hybrid`. `--ms2-seed` is the weak-MS2 compatibility alias. |
+| `--feature-mode` | `legacy` | Select strict untargeted `legacy` or opt-in `hybrid`. |
 | `--psm-path` | empty | Same-run Percolator target PSM table for exact direct assays. Empty is valid for generic-only hybrid processing. |
 | `--psm-q-value-max` | 0.01 | PSM quality filter applied before direct-assay construction. Do not raise it merely to increase links. |
 | `--psm-pep-max` | none | Optional additional PEP filter. |
@@ -371,9 +369,8 @@ affect practical use.
 | `--direct-id` | true | Enable direct PSM association/local recovery in hybrid mode. |
 | `--generic-ms2-refine` | true | Enable generic unidentified-MS2 hypotheses, target/decoy association and local recovery. |
 | `--generic-q-value-max` | 0.01 | Generic target/decoy extraction q-value threshold; separate from the PSM q-value. |
-| `--ms2-seed-ppm` | 10 ppm | Selected-ion tolerance for weak/generic precursor hypotheses. |
-| `--ms2-seed-rt-tolerance-sec` | 120 s | Initial local RT window around an MS2 event. Calibration may tighten a direct retry. |
-| `--ms2-seed-isotope-errors` | `-1,0,1,2,3` | Joint selected-ion C13/isotope-offset hypotheses. |
+| `--generic-ms2-ppm` | 10 ppm | Selected-ion tolerance for generic precursor hypotheses. |
+| `--ms2-rt-tolerance-sec` | 120 s | Initial local RT window around an MS2 event. Calibration may tighten a direct retry. |
 | `--relaxed-ms2-feature` | false | One bounded, MS2-only retry for unresolved evidence. Keep false for the broad standard configuration; enable only for a measured A/B. |
 | `--quant-method` | `envelope_area` | `envelope_area`, `mono_area`, or `envelope_apex` from final assigned signal. |
 | `--feature-baseline` | hybrid: `edge_linear` | `none` or `edge_linear` baseline preprocessing. It is not a separate quantitative method. |
@@ -578,8 +575,8 @@ three-file layout and the public options `--parquet-layout`, `--legacy-columns`,
 of silently acting as compatibility aliases. Use `--64` for wide structured
 storage and `--input-rt-unit` only to describe metadata-free input.
 
-The new hybrid workflow is opt-in through `--feature-mode hybrid`; existing
-legacy and weak-MS2 invocation remains available. Hybrid output adds sidecars
+The hybrid workflow is opt-in through `--feature-mode hybrid`; legacy remains
+the default strict workflow. Hybrid output adds sidecars
 for quantitative feature values, normalized MS2 events, MS2 audit links, PSM
 mapping and direct assays. Read [design.md](design.md) before comparing hybrid
 and legacy abundance semantics, and [the v0.5.0 update](updates/2026-07-30.md)

@@ -145,8 +145,8 @@ def _command_for_run(run, paths, options, effective_nprocs):
         command.extend(("--generic-q-value-max", str(options["generic_q_value_max"])))
         command.extend(
             (
-                "--ms2-seed-rt-tolerance-sec",
-                str(options.get("ms2_seed_rt_tolerance_sec", 120.0)),
+                "--ms2-rt-tolerance-sec",
+                str(options.get("ms2_rt_tolerance_sec", 120.0)),
             )
         )
         command.extend(("--raw-ms1-cache-dir", paths["raw_ms1_cache"]))
@@ -564,7 +564,7 @@ def _run_external_stage(runs, results, options):
                 "options": {
                     "ppm": options.get("external_ppm", 8.0),
                     "rt_tolerance_sec": options.get(
-                        "ms2_seed_rt_tolerance_sec", 120.0
+                        "ms2_rt_tolerance_sec", 120.0
                     ),
                     "min_isotope_cosine": options.get(
                         "external_min_isotope_cosine", 0.8

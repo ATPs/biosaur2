@@ -226,7 +226,7 @@ def test_strict_iteration_retains_only_direct_relevant_losing_candidate(
         "nm": 0,
         "iuse": -1,
         "no_mono_hills": False,
-        "ms2_seed_rt_tolerance_sec": 120.0,
+        "ms2_rt_tolerance_sec": 120.0,
     }
     spectra = [
         {"scan_index": 10 + value, "rt_sec": float(value)}

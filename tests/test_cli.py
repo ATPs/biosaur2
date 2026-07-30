@@ -79,6 +79,8 @@ def test_help_documents_compact_output_contract():
         "--continue-on-error",
         "--write-ms2",
         "--feature-mode",
+        "--generic-ms2-ppm",
+        "--ms2-rt-tolerance-sec",
         "--quant-method",
         "--max-charge",
         "--relaxed-ms2-feature",
@@ -161,7 +163,7 @@ def test_mixed_inputs_are_validated_before_any_output_manager(tmp_path):
     assert not output.exists()
 
 
-def test_feature_mode_alias_and_hybrid_mode_validation(tmp_path):
+def test_removed_weak_mode_and_hybrid_mode_validation(tmp_path):
     hills = tmp_path / "sample.hills.parquet"
     hills.write_bytes(b"not read")
     result = _run(hills, "--feature-mode", "hybrid")
@@ -170,9 +172,35 @@ def test_feature_mode_alias_and_hybrid_mode_validation(tmp_path):
 
     mzml = tmp_path / "sample.mzML"
     mzml.write_bytes(b"not read")
-    result = _run(mzml, "--ms2-seed", "--feature-mode", "legacy")
+    result = _run(mzml, "--feature-mode", "weak-ms2")
     assert result.returncode != 0
-    assert "compatibility alias" in result.stderr
+    assert "invalid choice" in result.stderr
+
+    result = _run(mzml, "--ms2-seed")
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
+
+    result = _run(mzml, "--ms2-seed-ppm", "10")
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
+
+    result = _run(mzml, "--ms2-seed-isotope-errors", "0,1")
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
+
+    result = _run(mzml, "--generic-ms2-ppm", "0")
+    assert result.returncode != 0
+    assert "finite positive number" in result.stderr
+
+    result = _run(
+        "project", "run",
+        "--manifest", tmp_path / "missing.tsv",
+        "--output-dir", tmp_path / "runs",
+        "--project-db", tmp_path / "project.duckdb",
+        "--mode", "weak-ms2",
+    )
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
 
     result = _run(mzml, "-cmin", "8", "--max-charge", "7")
     assert result.returncode != 0
@@ -182,7 +210,7 @@ def test_feature_mode_alias_and_hybrid_mode_validation(tmp_path):
 def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     help_result = _run("project", "run", "--help")
     assert help_result.returncode == 0
-    assert "--ms2-seed-rt-tolerance-sec" in help_result.stdout
+    assert "--ms2-rt-tolerance-sec" in help_result.stdout
     assert "--allow-nested-parallelism" in help_result.stdout
     assert "--max-charge" in help_result.stdout
     assert "--relaxed-ms2-feature" in help_result.stdout
@@ -203,7 +231,7 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
         tmp_path / "runs",
         "--project-db",
         tmp_path / "project.duckdb",
-        "--ms2-seed-rt-tolerance-sec",
+        "--ms2-rt-tolerance-sec",
         "-1",
     )
     assert result.returncode != 0

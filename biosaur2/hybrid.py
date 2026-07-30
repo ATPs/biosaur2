@@ -25,13 +25,13 @@ from .generic_local import (
     evaluate_generic_local_candidate_pairs,
     generic_local_width_limit,
 )
-from .ms2_seed import (
-    COMPOSITE_SCORE_WEIGHT_ITEMS,
-    COMPOSITE_SCORE_WEIGHTS,
-    annotate_candidate_support,
-    build_link_rows,
-    composite_seed_support,
-    prepare_seed_context,
+from .generic_association import (
+    GENERIC_ASSOCIATION_SCORE_WEIGHT_ITEMS,
+    GENERIC_ASSOCIATION_SCORE_WEIGHTS,
+    annotate_candidate_association,
+    build_association_rows,
+    composite_association_support,
+    prepare_association_context,
     precursor_joint_support,
 )
 from .quantification import FeatureQuantification, quantify_feature_traces
@@ -1529,16 +1529,16 @@ def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
     """
 
     generic_args = dict(args)
-    generic_args["ms2_seed_isotope_errors"] = tuple(range(-3, 4))
-    # Hybrid generic association uses chromatographic/isotope feature quality
-    # in addition to the compatibility-mode seed score.  Target and paired
-    # decoy rows traverse this identical path.
-    generic_args["ms2_seed_composite_score"] = True
+    generic_args["generic_ms2_isotope_errors"] = tuple(range(-3, 4))
+    # Hybrid generic association combines precursor localization with
+    # chromatographic/isotope feature quality. Targets and paired decoys
+    # traverse this identical path.
+    generic_args["generic_ms2_composite_score"] = True
     contexts = []
     final_candidates = []
     next_candidate_id = 0
     for strict in strict_contexts:
-        context = prepare_seed_context(
+        context = prepare_association_context(
             strict["hills"],
             strict["spectra"],
             ms2_rows,
@@ -1550,16 +1550,14 @@ def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
         )
         context["next_candidate_id"] = next_candidate_id
         for candidate in strict["candidates"]:
-            # Target and decoy passes reuse the final candidate objects.  Clear
-            # only transient weak-seed annotations before rebuilding edges.
+            # Target and decoy passes reuse the final candidate objects. Clear
+            # only transient association annotations before rebuilding edges.
             for key in (
-                "_ms2_seed_id",
-                "_ms2_seed_edges",
-                "_ms2_seed_support",
-                "_ms2_seed_contributor",
+                "_generic_association_id",
+                "_generic_association_edges",
             ):
                 candidate.pop(key, None)
-            annotate_candidate_support(
+            annotate_candidate_association(
                 candidate, strict["hills"], context, generic_args
             )
         next_candidate_id = context["next_candidate_id"]
@@ -1570,8 +1568,8 @@ def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
         "events": {},
         "event_edges": {},
         "summary": {
-            "eligible_seed_count": 0,
-            "seed_local_hill_count": 0,
+            "eligible_event_count": 0,
+            "association_local_hill_count": 0,
             "local_candidate_counts": [],
         },
     }
@@ -1581,7 +1579,7 @@ def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
                 aggregate["events"][event_id] = event
         for event_id, edges in context["event_edges"].items():
             aggregate["event_edges"].setdefault(event_id, []).extend(edges)
-        for key in ("eligible_seed_count", "seed_local_hill_count"):
+        for key in ("eligible_event_count", "association_local_hill_count"):
             aggregate["summary"][key] += context["summary"][key]
         aggregate["summary"]["local_candidate_counts"].extend(
             context["summary"]["local_candidate_counts"]
@@ -1613,15 +1611,15 @@ def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
         for name, values in sorted(component_values.items())
         if values
     }
-    return build_link_rows(ms2_rows, aggregate, final_candidates), aggregate["summary"]
+    return build_association_rows(ms2_rows, aggregate, final_candidates), aggregate["summary"]
 
 
-def _compact_seed_summary(summary):
+def _compact_generic_association_summary(summary):
     counts = [int(value) for value in summary.get("local_candidate_counts", ())]
     histogram = Counter(counts)
     return {
-        "eligible_seed_count": int(summary.get("eligible_seed_count", 0)),
-        "seed_local_hill_count": int(summary.get("seed_local_hill_count", 0)),
+        "eligible_event_count": int(summary.get("eligible_event_count", 0)),
+        "association_local_hill_count": int(summary.get("association_local_hill_count", 0)),
         "status_counts": dict(sorted(summary.get("status_counts", {}).items())),
         "local_candidate_event_count": len(counts),
         "local_candidate_count_min": min(counts) if counts else None,
@@ -1663,7 +1661,7 @@ def _complete_score_components(row):
             components
         )
     result = {}
-    for name, _weight in COMPOSITE_SCORE_WEIGHT_ITEMS:
+    for name, _weight in GENERIC_ASSOCIATION_SCORE_WEIGHT_ITEMS:
         value = components.get(name)
         if value is None or not math.isfinite(float(value)):
             return None
@@ -1674,8 +1672,8 @@ def _complete_score_components(row):
 def _paired_score_metrics(pairs, weights):
     margins = np.asarray(
         [
-            composite_seed_support(target, weights)
-            - composite_seed_support(decoy, weights)
+            composite_association_support(target, weights)
+            - composite_association_support(decoy, weights)
             for target, decoy in pairs
         ],
         dtype=np.float64,
@@ -1700,7 +1698,7 @@ def _paired_score_metrics(pairs, weights):
 def _generic_q_metrics(
     audit_by_event, target_rows, decoy_rows, weights, q_value_max
 ):
-    matched = {"matched_seeded_feature", "matched_existing_feature"}
+    matched = {"matched_existing_feature"}
     unresolved_ids = {
         int(event_id)
         for event_id, audit in audit_by_event.items()
@@ -1718,12 +1716,12 @@ def _generic_q_metrics(
         target_components = _complete_score_components(target)
         decoy_components = _complete_score_components(decoy)
         target_score = (
-            composite_seed_support(target_components, weights)
+            composite_association_support(target_components, weights)
             if target.get("status") in matched and target_components is not None
             else None
         )
         decoy_score = (
-            composite_seed_support(decoy_components, weights)
+            composite_association_support(decoy_components, weights)
             if decoy.get("status") in matched and decoy_components is not None
             else None
         )
@@ -1756,8 +1754,8 @@ def _calibrate_generic_score_weights(
     present, so training and validation compare identical evidence paths.
     """
 
-    base_weights = dict(COMPOSITE_SCORE_WEIGHTS)
-    matched = {"matched_seeded_feature", "matched_existing_feature"}
+    base_weights = dict(GENERIC_ASSOCIATION_SCORE_WEIGHTS)
+    matched = {"matched_existing_feature"}
     decoy_by_event = {
         int(row["ms2_event_id"]): row for row in decoy_rows
     }
@@ -1804,7 +1802,7 @@ def _calibrate_generic_score_weights(
 
     component_statistics = {}
     discriminative_signal = {}
-    for name, _base_weight in COMPOSITE_SCORE_WEIGHT_ITEMS:
+    for name, _base_weight in GENERIC_ASSOCIATION_SCORE_WEIGHT_ITEMS:
         target_values = np.asarray(
             [target[name] for target, _decoy in training], dtype=np.float64
         )
@@ -1859,7 +1857,7 @@ def _calibrate_generic_score_weights(
                 * discriminative_signal[name]
                 / signal_total
             )
-            for name, _base_weight in COMPOSITE_SCORE_WEIGHT_ITEMS
+            for name, _base_weight in GENERIC_ASSOCIATION_SCORE_WEIGHT_ITEMS
         }
         candidate_validation = _paired_score_metrics(
             validation, candidate_weights
@@ -1924,7 +1922,7 @@ def _rescore_generic_link_rows(rows, weights):
         components = _complete_score_components(row)
         if components is None:
             continue
-        row["seed_support"] = composite_seed_support(components, weights)
+        row["association_support"] = composite_association_support(components, weights)
         rescored += 1
     return rescored
 
@@ -1985,7 +1983,7 @@ def _compete_generic_local_by_input_family(
 
 
 def _generic_competitions(target_rows, decoy_rows):
-    matched = {"matched_seeded_feature", "matched_existing_feature"}
+    matched = {"matched_existing_feature"}
     decoy_by_event = {row["ms2_event_id"]: row for row in decoy_rows}
     competitions = []
     for target in target_rows:
@@ -1993,8 +1991,8 @@ def _generic_competitions(target_rows, decoy_rows):
         competitions.append(
             TargetDecoyCompetition(
                 str(target["ms2_event_id"]),
-                target.get("seed_support") if target["status"] in matched else None,
-                decoy.get("seed_support") if decoy["status"] in matched else None,
+                target.get("association_support") if target["status"] in matched else None,
+                decoy.get("association_support") if decoy["status"] in matched else None,
             )
         )
     return {
@@ -2030,7 +2028,7 @@ def _apply_generic_strict_associations(
         row for row in decoy_rows if int(row["ms2_event_id"]) in unresolved_ids
     ]
     competitions = _generic_competitions(filtered_targets, filtered_decoys)
-    matched = {"matched_seeded_feature", "matched_existing_feature"}
+    matched = {"matched_existing_feature"}
     status_counts = {}
     component_values_by_status = defaultdict(lambda: defaultdict(list))
     for target in filtered_targets:
@@ -2052,7 +2050,7 @@ def _apply_generic_strict_associations(
                     ],
                     "mz_error_ppm": target["mz_error_ppm"],
                     "rt_error_sec": target["rt_distance_sec"],
-                    "score": target["seed_support"],
+                    "score": target["association_support"],
                     "extraction_q_value": competition.q_value,
                     "reason_flags": target["reason_flags"],
                 }
@@ -2074,7 +2072,7 @@ def _apply_generic_strict_associations(
                     "generic_isotope_error": target[
                         "selected_ion_isotope_offset"
                     ],
-                    "score": target["seed_support"],
+                    "score": target["association_support"],
                     "extraction_q_value": competition.q_value,
                     "reason_flags": target["reason_flags"],
                 }
@@ -2485,7 +2483,7 @@ def run_hybrid_postprocessing(
         )
     base_ppm = float(args.get("itol", 8.0))
     base_rt_tolerance = float(
-        args.get("ms2_seed_rt_tolerance_sec", 120.0)
+        args.get("ms2_rt_tolerance_sec", 120.0)
     )
     direct_match_results = tuple(
         match_assay_to_strict_feature(
@@ -2833,7 +2831,7 @@ def run_hybrid_postprocessing(
     generic_recovered_feature_rows = []
     generic_recovered_quant_rows = []
     generic_recovered = []
-    generic_score_weights = dict(COMPOSITE_SCORE_WEIGHTS)
+    generic_score_weights = dict(GENERIC_ASSOCIATION_SCORE_WEIGHTS)
     if args.get("generic_ms2_refine", True):
         logger.info("Hybrid generic stage: matching target precursor hypotheses")
         target_links, target_summary = _generic_standard_links(
@@ -2872,8 +2870,8 @@ def run_hybrid_postprocessing(
             q_value_max=float(args.get("generic_q_value_max", 0.01)),
         )
         generic_summary = {
-            "target": _compact_seed_summary(target_summary),
-            "decoy": _compact_seed_summary(decoy_summary),
+            "target": _compact_generic_association_summary(target_summary),
+            "decoy": _compact_generic_association_summary(decoy_summary),
             "audit_status_counts": generic_status_counts,
             "competition_counts": generic_competition_counts,
             "score_calibration": generic_score_calibration,
@@ -2900,9 +2898,9 @@ def run_hybrid_postprocessing(
             for event in local_events
         }
         width_limit = generic_local_width_limit(strict_quant_rows)
-        local_ppm = float(args.get("ms2_seed_ppm", 10.0))
+        local_ppm = float(args.get("generic_ms2_ppm", 10.0))
         local_rt_tolerance = float(
-            args.get("ms2_seed_rt_tolerance_sec", 120.0)
+            args.get("ms2_rt_tolerance_sec", 120.0)
         )
         logger.info(
             "Hybrid generic local stage: evaluating %d unresolved events; width limit %.3f sec",
@@ -3892,8 +3890,8 @@ def run_hybrid_postprocessing(
             "eligible_unlinked_event_count": len(unlinked_events),
             "rescored_target_count": rescored_target,
             "rescored_decoy_count": rescored_decoy,
-            "target": _compact_seed_summary(final_target_summary),
-            "decoy": _compact_seed_summary(final_decoy_summary),
+            "target": _compact_generic_association_summary(final_target_summary),
+            "decoy": _compact_generic_association_summary(final_decoy_summary),
             "audit_status_counts": recheck_status,
             "competition_counts": recheck_competition,
         }

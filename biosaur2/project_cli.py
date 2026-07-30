@@ -100,11 +100,10 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument("--project-db", required=True, help="DuckDB path for run/stage status, resolved options, alignment and validation metadata")
         parser.add_argument(
             "--mode",
-            choices=("legacy", "weak-ms2", "hybrid"),
+            choices=("legacy", "hybrid"),
             default="legacy",
             help=(
-                "legacy=strict untargeted; weak-ms2=compatibility precursor "
-                "seed; hybrid=direct/generic residual workflow"
+                "legacy=strict untargeted; hybrid=direct/generic residual workflow"
             ),
         )
         parser.add_argument("--run-workers", type=int, default=1, help="maximum number of mzML runs processed concurrently")
@@ -166,7 +165,7 @@ README.md and examples/hybrid_project_manifest.tsv.
             ),
         )
         parser.add_argument(
-            "--ms2-seed-rt-tolerance-sec", type=float, default=120.0,
+            "--ms2-rt-tolerance-sec", type=float, default=120.0,
             help="initial local RT search tolerance in seconds around each MS2 event",
         )
         args = parser.parse_args(arguments[1:])
@@ -197,11 +196,11 @@ README.md and examples/hybrid_project_manifest.tsv.
                 "--external-min-isotope-cosine must be finite and in [0, 1]"
             )
         if (
-            not math.isfinite(args.ms2_seed_rt_tolerance_sec)
-            or args.ms2_seed_rt_tolerance_sec < 0
+            not math.isfinite(args.ms2_rt_tolerance_sec)
+            or args.ms2_rt_tolerance_sec < 0
         ):
             parser.error(
-                "--ms2-seed-rt-tolerance-sec must be a finite nonnegative number"
+                "--ms2-rt-tolerance-sec must be a finite nonnegative number"
             )
         options = vars(args)
         manifest = options.pop("manifest")

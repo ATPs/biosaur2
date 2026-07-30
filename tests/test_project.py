@@ -88,10 +88,10 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
         "generic_q_value_max": 0.01,
         "max_charge": 8,
         "relaxed_ms2_feature": True,
-        "ms2_seed_rt_tolerance_sec": 90.0,
+        "ms2_rt_tolerance_sec": 90.0,
     }
     command = _command_for_run(run, paths, options, 1)
-    position = command.index("--ms2-seed-rt-tolerance-sec")
+    position = command.index("--ms2-rt-tolerance-sec")
     assert command[position + 1] == "90.0"
     position = command.index("--max-charge")
     assert command[position + 1] == "8"

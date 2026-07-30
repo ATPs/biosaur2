@@ -1,4 +1,4 @@
-"""Bounded DDA MS2 precursor evidence for existing MS1 candidates."""
+"""Generic DDA precursor association for existing MS1 candidates."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ import numpy as np
 
 
 C13_C12_MASS_DIFF = 1.003354835
-SEED_BONUS_CAP = 0.20
-COMPOSITE_SCORE_WEIGHT_ITEMS = (
+GENERIC_ASSOCIATION_SCORE_WEIGHT_ITEMS = (
     ("mz_support", 0.20),
     ("selected_intensity_support", 0.20),
     ("event_apex_support", 0.15),
@@ -24,7 +23,9 @@ COMPOSITE_SCORE_WEIGHT_ITEMS = (
     ("point_support", 0.02),
     ("precursor_joint_support", 0.00),
 )
-COMPOSITE_SCORE_WEIGHTS = dict(COMPOSITE_SCORE_WEIGHT_ITEMS)
+GENERIC_ASSOCIATION_SCORE_WEIGHTS = dict(
+    GENERIC_ASSOCIATION_SCORE_WEIGHT_ITEMS
+)
 
 FLAG_ELIGIBLE = 0x0001
 FLAG_MZ_MATCH = 0x0002
@@ -121,8 +122,8 @@ def _point_in_window(hills_dict, hill_index, local_scan, window):
 def _candidate_shape_support(hills_dict, hill_indices, local_scan, candidate, args):
     """Return transparent feature-quality and event-locality score components.
 
-    This is opt-in for hybrid generic association.  Weak-MS2 compatibility
-    continues to use its historical multiplicative score.
+    This score is used by hybrid generic association for both targets and
+    paired decoys.
     """
 
     envelope_by_scan = {}
@@ -165,7 +166,10 @@ def _candidate_shape_support(hills_dict, hill_indices, local_scan, candidate, ar
             0.0,
             1.0
             - float(np.mean(mass_errors))
-            / max(float(args.get("itol", args.get("ms2_seed_ppm", 10.0))), 1e-12),
+            / max(
+                float(args.get("itol", args.get("generic_ms2_ppm", 10.0))),
+                1e-12,
+            ),
         )
         if mass_errors
         else 0.0
@@ -214,15 +218,17 @@ def _selected_intensity_support(row, hills_dict, hill_indices, offset, local_sca
     return float(math.exp(-abs(math.log(ratio)) / math.log(10.0)))
 
 
-def composite_seed_support(score_components, weights=None):
+def composite_association_support(score_components, weights=None):
     """Combine transparent score components with normalized non-negative weights."""
 
-    selected_weights = COMPOSITE_SCORE_WEIGHTS if weights is None else weights
+    selected_weights = (
+        GENERIC_ASSOCIATION_SCORE_WEIGHTS if weights is None else weights
+    )
     return float(
         sum(
             float(selected_weights.get(name, 0.0))
             * min(1.0, max(0.0, float(score_components.get(name, 0.0))))
-            for name, _base_weight in COMPOSITE_SCORE_WEIGHT_ITEMS
+            for name, _base_weight in GENERIC_ASSOCIATION_SCORE_WEIGHT_ITEMS
         )
     )
 
@@ -278,7 +284,7 @@ def _observed_isolation_hills(row, scan_point_index, source_to_local, ppm):
         lookup = (selected_mz - delta, selected_mz + delta)
     else:
         # A hill median can sit just outside a narrow isolation boundary while
-        # its scan-local centroid lies inside it.  Expand only by the seed ppm
+        # its scan-local centroid lies inside it. Expand only by the association ppm
         # before validating the actual point below.
         delta = max(abs(window[0]), abs(window[1])) * ppm * 1e-6
         lookup = (window[0] - delta, window[1] + delta)
@@ -297,9 +303,17 @@ def _observed_isolation_hills(row, scan_point_index, source_to_local, ppm):
     return observed
 
 
-def prepare_seed_context(hills_dict, spectra, ms2_rows, ms1_metadata, faims_val,
-                         rt_by_local, args, faims_group_count):
-    """Build a local mono-hill seed index for one already processed FAIMS group."""
+def prepare_association_context(
+    hills_dict,
+    spectra,
+    ms2_rows,
+    ms1_metadata,
+    faims_val,
+    rt_by_local,
+    args,
+    faims_group_count,
+):
+    """Build a precursor-association index for one processed FAIMS group."""
 
     source_to_local = {int(spectrum["scan_index"]): index
                        for index, spectrum in enumerate(spectra)}
@@ -309,16 +323,16 @@ def prepare_seed_context(hills_dict, spectra, ms2_rows, ms1_metadata, faims_val,
     )
     ordered_mz = [float(hills_dict["hills_mz_median"][index]) for index in ordered]
     scan_point_index = _build_scan_point_index(hills_dict, len(spectra))
+    association_local_hills = set()
     context = {
         "events": {}, "events_by_mono": {},
         "events_by_observed_hill": {}, "event_edges": {},
-        "ordered": ordered, "seed_local": set(), "next_candidate_id": 0,
-        "faims_val": faims_val, "source_to_local": source_to_local,
-        "rt_by_local": rt_by_local, "summary": {"eligible_seed_count": 0,
-        "seed_local_hill_count": 0, "local_candidate_counts": []},
+        "next_candidate_id": 0, "source_to_local": source_to_local,
+        "rt_by_local": rt_by_local, "summary": {"eligible_event_count": 0,
+        "association_local_hill_count": 0, "local_candidate_counts": []},
     }
-    ppm = float(args["ms2_seed_ppm"])
-    tolerance = float(args["ms2_seed_rt_tolerance_sec"])
+    ppm = float(args["generic_ms2_ppm"])
+    tolerance = float(args["ms2_rt_tolerance_sec"])
     for row in ms2_rows:
         flags = 0
         mz = _finite(row.get("selected_ion_mz"), positive=True)
@@ -340,9 +354,9 @@ def prepare_seed_context(hills_dict, spectra, ms2_rows, ms1_metadata, faims_val,
             continue
         event = {"row": row, "eligible": True, "flags": FLAG_ELIGIBLE,
                  "mz": mz, "charge": int(charge), "rt": rt,
-                 "offsets": tuple(args["ms2_seed_isotope_errors"])}
+                 "offsets": tuple(args["generic_ms2_isotope_errors"])}
         context["events"][row["ms2_event_id"]] = event
-        context["summary"]["eligible_seed_count"] += 1
+        context["summary"]["eligible_event_count"] += 1
         observed_isolation_hills = _observed_isolation_hills(
             row, scan_point_index, source_to_local, ppm
         )
@@ -354,7 +368,7 @@ def prepare_seed_context(hills_dict, spectra, ms2_rows, ms1_metadata, faims_val,
                 context["events_by_observed_hill"].setdefault(
                     hill_index, []
                 ).append(event)
-        seed_local_matches = set()
+        association_local_matches = set()
         support_lookup_matches = set()
         for offset in event["offsets"]:
             mono_mz = mz - offset * C13_C12_MASS_DIFF / event["charge"]
@@ -369,42 +383,38 @@ def prepare_seed_context(hills_dict, spectra, ms2_rows, ms1_metadata, faims_val,
                     hills_dict, [hill_index], row.get("precursor_ms1_index"), source_to_local
                 )
                 if row.get("precursor_ms1_index") is None or scan_support:
-                    seed_local_matches.add(hill_index)
+                    association_local_matches.add(hill_index)
                 if event["observed_isolation_hills"] is None:
                     # Missing window/precursor metadata cannot use the precise
                     # observed-hill reverse index, so retain the mono fallback.
                     support_lookup_matches.add(hill_index)
         context["summary"]["local_candidate_counts"].append(
-            len(seed_local_matches)
+            len(association_local_matches)
         )
         for hill_index in support_lookup_matches:
             context["events_by_mono"].setdefault(hill_index, []).append(event)
-        for hill_index in seed_local_matches:
-            context["seed_local"].add(hill_index)
-    context["summary"]["seed_local_hill_count"] = len(context["seed_local"])
+        for hill_index in association_local_matches:
+            association_local_hills.add(hill_index)
+    context["summary"]["association_local_hill_count"] = len(
+        association_local_hills
+    )
     return context
 
 
-def partition_mono_indices(sorted_indices, context):
-    seeded = [index for index in sorted_indices if index in context["seed_local"]]
-    remaining = [index for index in sorted_indices if index not in context["seed_local"]]
-    return seeded, remaining
-
-
-def annotate_candidate_support(candidate, hills_dict, context, args):
+def annotate_candidate_association(candidate, hills_dict, context, args):
     """Attach the best bounded MS2 evidence to one standard-valid candidate."""
 
-    for edge in candidate.get("_ms2_seed_edges", ()):
+    for edge in candidate.get("_generic_association_edges", ()):
         event_edges = context["event_edges"].get(edge["event_id"])
         if event_edges is not None:
             context["event_edges"][edge["event_id"]] = [
                 value for value in event_edges if value is not edge
             ]
-    candidate_id = candidate.get("_ms2_seed_id")
+    candidate_id = candidate.get("_generic_association_id")
     if candidate_id is None:
         candidate_id = context["next_candidate_id"]
         context["next_candidate_id"] += 1
-        candidate["_ms2_seed_id"] = candidate_id
+        candidate["_generic_association_id"] = candidate_id
     mono_index = int(candidate["monoisotope idx"])
     edges = []
     hill_indices = [mono_index] + [int(item["isotope_idx"]) for item in candidate["isotopes"]]
@@ -426,14 +436,14 @@ def annotate_candidate_support(candidate, hills_dict, context, args):
             expected = float(candidate["hill_mz_1"]) + offset * C13_C12_MASS_DIFF / event["charge"]
             ppm_errors.append((abs(event["mz"] - expected) * 1e6 / expected, offset))
         ppm_error, offset = min(ppm_errors, key=lambda value: (value[0], abs(value[1]), value[1]))
-        if ppm_error > args["ms2_seed_ppm"]:
+        if ppm_error > args["generic_ms2_ppm"]:
             continue
         diagnostic_flags = FLAG_MZ_MATCH | FLAG_STANDARD_CANDIDATE
         event["diagnostic_flags"] = (
             event.get("diagnostic_flags", 0) | diagnostic_flags
         )
         distance_rt = _rt_distance(event["rt"], mono_rt)
-        if distance_rt > args["ms2_seed_rt_tolerance_sec"]:
+        if distance_rt > args["ms2_rt_tolerance_sec"]:
             continue
         if distance_rt == 0:
             diagnostic_flags |= FLAG_RT_INSIDE
@@ -483,16 +493,18 @@ def annotate_candidate_support(candidate, hills_dict, context, args):
             flags |= FLAG_ISOLATION_INTERSECTS
             diagnostic_flags |= FLAG_ISOLATION_INTERSECTS
         event["diagnostic_flags"] |= diagnostic_flags
-        mz_support = max(0.0, 1.0 - ppm_error / args["ms2_seed_ppm"])
+        mz_support = max(0.0, 1.0 - ppm_error / args["generic_ms2_ppm"])
         if distance_rt == 0:
             rt_support = 1.0
             flags |= FLAG_RT_INSIDE
-        elif args["ms2_seed_rt_tolerance_sec"]:
-            rt_support = max(0.0, 1.0 - distance_rt / args["ms2_seed_rt_tolerance_sec"])
+        elif args["ms2_rt_tolerance_sec"]:
+            rt_support = max(
+                0.0, 1.0 - distance_rt / args["ms2_rt_tolerance_sec"]
+            )
             flags |= FLAG_RT_TOLERANCE
         else:
             rt_support = 0.0
-        if args.get("ms2_seed_composite_score", False):
+        if args.get("generic_ms2_composite_score", False):
             precursor = row.get("precursor_ms1_index")
             local_scan = (
                 context["source_to_local"].get(int(precursor))
@@ -527,7 +539,7 @@ def annotate_candidate_support(candidate, hills_dict, context, args):
             score_components["precursor_joint_support"] = (
                 precursor_joint_support(score_components)
             )
-            support = composite_seed_support(score_components)
+            support = composite_association_support(score_components)
         else:
             score_components = None
             support = mz_support * rt_support * scan_support * isolation_support
@@ -538,23 +550,15 @@ def annotate_candidate_support(candidate, hills_dict, context, args):
                 "flags": flags, "score_components": score_components}
         edges.append(edge)
         context["event_edges"].setdefault(row["ms2_event_id"], []).append(edge)
-    candidate["_ms2_seed_edges"] = edges
-    if edges:
-        best = max(edges, key=lambda edge: (edge["support"], -abs(edge["offset"]), -edge["offset"], -edge["event_id"]))
-        candidate["_ms2_seed_support"] = best["support"]
-        candidate["_ms2_seed_contributor"] = best["event_id"]
-    else:
-        candidate["_ms2_seed_support"] = 0.0
-        candidate["_ms2_seed_contributor"] = None
+    candidate["_generic_association_edges"] = edges
 
 
-def candidate_bonus(candidate):
-    return min(SEED_BONUS_CAP, SEED_BONUS_CAP * float(candidate.get("_ms2_seed_support", 0.0)))
-
-
-def build_link_rows(ms2_rows, context, final_candidates):
-    selected = {candidate["_ms2_seed_id"]: candidate for candidate in final_candidates
-                if "_ms2_seed_id" in candidate}
+def build_association_rows(ms2_rows, context, final_candidates):
+    selected = {
+        candidate["_generic_association_id"]: candidate
+        for candidate in final_candidates
+        if "_generic_association_id" in candidate
+    }
     rows = []
     summary = context["summary"]
     statuses = {}
@@ -562,19 +566,20 @@ def build_link_rows(ms2_rows, context, final_candidates):
         event_id = source["ms2_event_id"]
         event = context["events"].get(event_id, {"eligible": False, "flags": 0})
         result = {"run_id": source["run_id"], "ms2_event_id": event_id,
-                  "feature_id": None, "status": "ineligible_seed",
-                  "seed_eligible": bool(event.get("eligible")),
-                  "seed_used_in_selection": False,
+                  "feature_id": None, "status": "ineligible_association",
                   "selected_ion_isotope_offset": None, "isolated_isotope_index": None,
                   "mz_error_ppm": None, "rt_distance_sec": None,
-                  "precursor_scan_distance": None, "seed_support": None,
+                  "precursor_scan_distance": None, "association_support": None,
                   "_score_components": None,
                   "reason_flags": int(
                       event.get("flags", 0) | event.get("diagnostic_flags", 0)
                   )}
         if event.get("eligible"):
             edges = context["event_edges"].get(event_id, [])
-            final_edges = [edge for edge in edges if edge["candidate"]["_ms2_seed_id"] in selected]
+            final_edges = [
+                edge for edge in edges
+                if edge["candidate"]["_generic_association_id"] in selected
+            ]
             if final_edges:
                 final_edges.sort(key=lambda edge: (-edge["support"], abs(edge["offset"]), edge["offset"], edge["candidate"]["feature_idx"]))
                 best = final_edges[0]
@@ -584,21 +589,20 @@ def build_link_rows(ms2_rows, context, final_candidates):
                     candidate = best["candidate"]
                     result.update({
                         "feature_id": candidate["feature_idx"],
-                        "status": "matched_seeded_feature" if candidate.get("_ms2_seed_contributor") == event_id else "matched_existing_feature",
-                        "seed_used_in_selection": candidate.get("_ms2_seed_contributor") == event_id,
+                        "status": "matched_existing_feature",
                         "selected_ion_isotope_offset": best["offset"],
                         "isolated_isotope_index": best["isolated_index"],
                         "mz_error_ppm": best["ppm_error"], "rt_distance_sec": best["rt_distance"],
-                        "precursor_scan_distance": best["scan_distance"], "seed_support": best["support"],
+                        "precursor_scan_distance": best["scan_distance"], "association_support": best["support"],
                         "_score_components": best.get("score_components"),
                         "reason_flags": result["reason_flags"] | best["flags"] | FLAG_SELECTED_CANDIDATE,
                     })
             elif edges:
                 best = max(edges, key=lambda edge: edge["support"])
-                result.update({"status": "seed_candidate_lost_conflict", "selected_ion_isotope_offset": best["offset"],
+                result.update({"status": "association_candidate_lost_conflict", "selected_ion_isotope_offset": best["offset"],
                                "isolated_isotope_index": best["isolated_index"], "mz_error_ppm": best["ppm_error"],
                                "rt_distance_sec": best["rt_distance"], "precursor_scan_distance": best["scan_distance"],
-                               "seed_support": best["support"], "_score_components": best.get("score_components"),
+                               "association_support": best["support"], "_score_components": best.get("score_components"),
                                "reason_flags": result["reason_flags"] | best["flags"]})
             else:
                 result["status"] = "no_standard_candidate"

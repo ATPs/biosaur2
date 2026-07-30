@@ -9,7 +9,7 @@ from biosaur2.generic_local import (
     evaluate_generic_local_candidate_pairs,
     generic_local_width_limit,
 )
-from biosaur2.ms2_seed import C13_C12_MASS_DIFF
+from biosaur2.generic_association import C13_C12_MASS_DIFF
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
 
 

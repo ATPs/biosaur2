@@ -11,7 +11,7 @@ import shutil
 import tempfile
 
 from .raw_ms1 import source_fingerprint
-from .ms2_seed import C13_C12_MASS_DIFF
+from .generic_association import C13_C12_MASS_DIFF
 
 
 LOCAL_CANDIDATE_CACHE_VERSION = 1
@@ -23,6 +23,7 @@ def _implementation_signature():
     package = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for name in (
+        "generic_association.py",
         "generic_local.py",
         "local_refinement.py",
         "optimization.py",

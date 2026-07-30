@@ -12,7 +12,7 @@ import numpy as np
 from .chemistry import PROTON_MASS
 from .confidence import TargetDecoyCompetition, target_decoy_q_values
 from .local_refinement import SegmentEdit, refine_local_isotope_components
-from .ms2_seed import C13_C12_MASS_DIFF
+from .generic_association import C13_C12_MASS_DIFF
 from .parallel import balanced_ranges, run_process_tasks
 from .raw_ms1 import ExtractedTrace, RawMS1Store, event_position_in_trace
 

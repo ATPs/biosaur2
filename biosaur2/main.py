@@ -27,13 +27,6 @@ from .stage_cache import (
     load_strict_stage_cache,
     save_strict_stage_cache,
 )
-from .ms2_seed import (
-    annotate_candidate_support,
-    build_link_rows,
-    candidate_bonus,
-    partition_mono_indices,
-    prepare_seed_context,
-)
 from .hybrid import AssayBuildResult, build_direct_assays, run_hybrid_postprocessing
 from .direct_competitors import capture_direct_processed_hill_competitors
 from .identifications import map_identifications_to_ms2, read_percolator_tsv
@@ -188,7 +181,6 @@ def _detect_final_residual_strict(
 
     detector_args = dict(args)
     detector_args["use_hill_calib"] = False
-    detector_args["ms2_seed"] = False
     contexts = []
     next_hill_id = 1
     md_correction_int = {"Orbi": 1, "Tof": 2, "Icr": 3}.get(
@@ -256,7 +248,6 @@ def _detect_final_residual_strict(
                 detector_args,
                 next_feature_idx=int(next_feature_id),
                 data_for_analyse_tmp=group,
-                seed_context=None,
             )
         )
         calibration_boundary_guard["candidate_count_before_guard"] += len(
@@ -310,7 +301,7 @@ def _candidate_hill_ids(candidate):
     )
 
 
-def _candidate_conflict_key(candidate, hills_dict, seed_enabled=False):
+def _candidate_conflict_key(candidate, hills_dict):
     mono_index = int(candidate['monoisotope idx'])
     _, apex_intensity, _ = get_and_calc_apex_intensity_and_scan(
         hills_dict, mono_index
@@ -319,9 +310,8 @@ def _candidate_conflict_key(candidate, hills_dict, seed_enabled=False):
     mean_absolute_error = float(np.mean(mass_errors)) if mass_errors else float('inf')
     isotope_count = int(candidate['nIsotopes'])
     isotope_cosine = float(candidate['cos_cor_isotopes'])
-    bonus = candidate_bonus(candidate) if seed_enabled else 0.0
     return (
-        -(isotope_count + isotope_cosine + bonus),
+        -(isotope_count + isotope_cosine),
         -isotope_count,
         -isotope_cosine,
         -float(apex_intensity),
@@ -347,7 +337,7 @@ def _final_feature_key(candidate, hills_dict, RT_dict, data_start_id):
         _candidate_hill_ids(candidate),
     )
 
-def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1, data_for_analyse_tmp=None, seed_context=None, direct_assays=(), direct_events_by_id=None, direct_competitor_sink=None):
+def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1, data_for_analyse_tmp=None, direct_assays=(), direct_events_by_id=None, direct_competitor_sink=None):
     if not len(hills_dict.get('hills_idx_array_unique', ())):
         utils.write_output([], args, write_header)
         return set(), {}, next_feature_idx, []
@@ -424,27 +414,7 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                 generated.extend(worker_result)
         return generated
 
-    if seed_context is None:
-        ready = generate(sorted_idx_full)
-    else:
-        seeded_indices, remaining_indices = partition_mono_indices(
-            sorted_idx_full, seed_context
-        )
-        ready = generate(seeded_indices) + generate(remaining_indices)
-        rank = {index: position for position, index in enumerate(sorted_idx_full)}
-        ready.sort(key=lambda candidate: rank[int(candidate['monoisotope idx'])])
-        unique_ready = []
-        seen_candidate_keys = set()
-        for candidate in ready:
-            key = (
-                int(candidate['monoisotope hill idx']), int(candidate['charge']),
-                tuple((int(item['isotope_number']), int(item['isotope_hill_idx']))
-                      for item in candidate['isotopes']),
-            )
-            if key not in seen_candidate_keys:
-                seen_candidate_keys.add(key)
-                unique_ready.append(candidate)
-        ready = unique_ready
+    ready = generate(sorted_idx_full)
 
     for candidate in ready:
         candidate['FAIMS'] = faims_val
@@ -591,7 +561,7 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                 direct_events_by_id or {},
                 ppm=float(args['itol']),
                 rt_tolerance_sec=float(
-                    args.get('ms2_seed_rt_tolerance_sec', 120.0)
+                    args.get('ms2_rt_tolerance_sec', 120.0)
                 ),
                 # Accepted representations are removed after the greedy pass;
                 # retain a small oversampled set so they cannot consume all
@@ -603,11 +573,8 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
     max_l = len(ready)
     cur_l = 0
 
-    if seed_context is not None:
-        for candidate in ready:
-            annotate_candidate_support(candidate, hills_dict, seed_context, args)
     func_for_sort = lambda candidate: _candidate_conflict_key(
-        candidate, hills_dict, seed_enabled=seed_context is not None
+        candidate, hills_dict
     )
 
     ready_final = []
@@ -659,10 +626,6 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
                             ready[cur_l]['isotopes'] = tmp
                             ready[cur_l]['nIsotopes'] = tmp_n_isotopes + 1
                             ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
-                            if seed_context is not None:
-                                annotate_candidate_support(
-                                    ready[cur_l], hills_dict, seed_context, args
-                                )
                             cur_l -= 1
                         else:
                             del ready[cur_l]
@@ -735,7 +698,7 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
 
     # Hybrid retains strict candidates/hills until targeted and residual
     # conflict decisions are complete.  Final strict rows are emitted by
-    # run_hybrid_postprocessing; legacy and weak-MS2 streaming is unchanged.
+    # run_hybrid_postprocessing; legacy streaming is unchanged.
     if args.get('feature_mode') != 'hybrid':
         negative_mode = args['nm']
         isotopes_for_intensity = args['iuse']
@@ -981,8 +944,6 @@ def process_file(args):
             logger.info('Detected FAIMS values: %s', [value for value, _ in faims_groups])
 
         data_start_id = 0
-        seed_contexts = []
-        seed_final_candidates = []
         strict_contexts = []
 
         for faims_val, data_for_analyse_tmp in faims_groups:
@@ -1093,18 +1054,6 @@ def process_file(args):
                 write_header = False
                 continue
 
-            seed_context = None
-            if args.get('ms2_seed'):
-                seed_context = prepare_seed_context(
-                    hills_dict,
-                    data_for_analyse_tmp,
-                    ingestion.ms2_rows,
-                    ingestion.ms1_metadata,
-                    faims_val,
-                    RT_dict,
-                    args,
-                    len(faims_groups),
-                )
             direct_competitors = []
             _, hill_to_feature_idx, next_feature_idx, ready_final = process_features_iteration(
                 hills_dict,
@@ -1117,14 +1066,10 @@ def process_file(args):
                 args,
                 next_feature_idx=next_feature_idx,
                 data_for_analyse_tmp=data_for_analyse_tmp,
-                seed_context=seed_context,
                 direct_assays=assay_result.assays,
                 direct_events_by_id=direct_events_by_id,
                 direct_competitor_sink=direct_competitors,
             )
-            if seed_context is not None:
-                seed_contexts.append(seed_context)
-                seed_final_candidates.extend(ready_final)
             if args.get('feature_mode') == 'hybrid':
                 strict_contexts.append({
                     'hills': hills_dict,
@@ -1201,32 +1146,6 @@ def process_file(args):
                 args=args,
                 final_strict_detector=_detect_final_residual_strict,
             )
-
-        if args.get('ms2_seed'):
-            aggregate = {
-                'events': {}, 'event_edges': {},
-                'summary': {'eligible_seed_count': 0, 'seed_local_hill_count': 0,
-                            'local_candidate_counts': []},
-            }
-            for context in seed_contexts:
-                for event_id, event in context['events'].items():
-                    if event.get('eligible') or event_id not in aggregate['events']:
-                        aggregate['events'][event_id] = event
-                for event_id, edges in context['event_edges'].items():
-                    aggregate['event_edges'].setdefault(event_id, []).extend(edges)
-                for key in ('eligible_seed_count', 'seed_local_hill_count'):
-                    aggregate['summary'][key] += context['summary'][key]
-                aggregate['summary']['local_candidate_counts'].extend(
-                    context['summary']['local_candidate_counts']
-                )
-            manager = args.get('_output_manager')
-            if manager is None:
-                raise RuntimeError('Output manager is required.')
-            link_rows = build_link_rows(
-                ingestion.ms2_rows, aggregate, seed_final_candidates
-            )
-            args['_ms2_seed_summary'] = aggregate['summary']
-            manager.append_ms2_feature_links(link_rows)
 
     elif (
         input_file_path.lower().endswith('.hills.tsv')

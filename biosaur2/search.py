@@ -71,18 +71,6 @@ def _positive_integer(value):
     return parsed
 
 
-def _parse_isotope_offsets(value):
-    try:
-        offsets = tuple(int(item.strip()) for item in value.split(","))
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a comma-separated list of integers") from exc
-    if not offsets or len(offsets) != len(set(offsets)):
-        raise argparse.ArgumentTypeError("must be a nonempty list of distinct integers")
-    if any(offset < -128 or offset > 127 for offset in offsets):
-        raise argparse.ArgumentTypeError("offsets must fit in INT8")
-    return offsets
-
-
 def _option_was_supplied(*spellings):
     return any(value in sys.argv[1:] for value in spellings)
 
@@ -367,14 +355,10 @@ algorithm, and updates/2026-07-30.md for validation results.
         action='store_true',
     )
     parser.add_argument(
-        '--ms2-seed', '--ms2_seed', dest='ms2_seed', action='store_true',
-        help='compatibility alias for --feature-mode weak-ms2; use eligible DDA precursor metadata as bounded ordering evidence',
-    )
-    parser.add_argument(
         '--feature-mode',
-        choices=('legacy', 'weak-ms2', 'hybrid'),
+        choices=('legacy', 'hybrid'),
         default='legacy',
-        help='legacy=strict untargeted; weak-ms2=compatibility precursor seed; hybrid=direct/generic MS2 residual workflow',
+        help='legacy=strict untargeted; hybrid=direct/generic MS2 residual workflow',
     )
     parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM TSV (optionally compressed); empty runs hybrid without direct PSM assays')
     parser.add_argument('--psm-q-value-max', type=float, default=0.01, help='maximum Percolator PSM q-value accepted before direct-assay construction')
@@ -442,19 +426,14 @@ algorithm, and updates/2026-07-30.md for validation results.
         ),
     )
     parser.add_argument(
-        '--ms2-seed-ppm', '--ms2_seed_ppm', dest='ms2_seed_ppm', type=float,
-        default=10.0, help='selected-ion precursor tolerance in ppm for weak/generic MS2 hypotheses',
+        '--generic-ms2-ppm', dest='generic_ms2_ppm', type=float,
+        default=10.0,
+        help='selected-ion precursor tolerance in ppm for generic MS2 hypotheses',
     )
     parser.add_argument(
-        '--ms2-seed-rt-tolerance-sec', '--ms2_seed_rt_tolerance_sec',
-        dest='ms2_seed_rt_tolerance_sec', type=float, default=120.0,
+        '--ms2-rt-tolerance-sec', dest='ms2_rt_tolerance_sec',
+        type=float, default=120.0,
         help='initial RT search tolerance in seconds around an MS2 event; calibrated retries may tighten it',
-    )
-    parser.add_argument(
-        '--ms2-seed-isotope-errors', '--ms2_seed_isotope_errors',
-        dest='ms2_seed_isotope_errors', type=_parse_isotope_offsets,
-        default=(-1, 0, 1, 2, 3),
-        help='comma-separated selected-ion isotope offsets evaluated jointly',
     )
     parser.add_argument(
         '--ms1_format', '--ms1-format',
@@ -524,10 +503,10 @@ algorithm, and updates/2026-07-30.md for validation results.
         parser.error('-combine_every greater than 1 is incompatible with area_sum output.')
     if args['iuse'] < -1:
         parser.error('-iuse must be -1 or a nonnegative integer.')
-    if not math.isfinite(args['ms2_seed_ppm']) or args['ms2_seed_ppm'] <= 0:
-        parser.error('--ms2-seed-ppm must be a finite positive number.')
-    if not math.isfinite(args['ms2_seed_rt_tolerance_sec']) or args['ms2_seed_rt_tolerance_sec'] < 0:
-        parser.error('--ms2-seed-rt-tolerance-sec must be a finite nonnegative number.')
+    if not math.isfinite(args['generic_ms2_ppm']) or args['generic_ms2_ppm'] <= 0:
+        parser.error('--generic-ms2-ppm must be a finite positive number.')
+    if not math.isfinite(args['ms2_rt_tolerance_sec']) or args['ms2_rt_tolerance_sec'] < 0:
+        parser.error('--ms2-rt-tolerance-sec must be a finite nonnegative number.')
     if not math.isfinite(args['psm_q_value_max']) or not 0 <= args['psm_q_value_max'] <= 1:
         parser.error('--psm-q-value-max must be finite and in [0, 1].')
     if args['psm_pep_max'] is not None and (
@@ -536,13 +515,6 @@ algorithm, and updates/2026-07-30.md for validation results.
         parser.error('--psm-pep-max must be finite and in [0, 1].')
     if not math.isfinite(args['generic_q_value_max']) or not 0 <= args['generic_q_value_max'] <= 1:
         parser.error('--generic-q-value-max must be finite and in [0, 1].')
-    feature_mode_supplied = _option_was_supplied('--feature-mode')
-    if args['ms2_seed'] and feature_mode_supplied and args['feature_mode'] != 'weak-ms2':
-        parser.error('--ms2-seed is a compatibility alias for --feature-mode weak-ms2 and conflicts with the selected mode.')
-    if args['ms2_seed']:
-        args['feature_mode'] = 'weak-ms2'
-    elif args['feature_mode'] == 'weak-ms2':
-        args['ms2_seed'] = True
     if args['feature_mode'] == 'hybrid':
         args['write_ms2'] = True
         args['feature_baseline'] = args['feature_baseline'] or 'edge_linear'
@@ -559,8 +531,6 @@ algorithm, and updates/2026-07-30.md for validation results.
             '--hybrid-stage-cache-dir requires --raw-ms1-cache-dir so local '
             'post-processing can reuse the fingerprinted raw MS1 store.'
         )
-    if args['ms2_seed']:
-        args['write_ms2'] = True
     if args['parquet_compression'] not in {'zstd', 'brotli'} and _option_was_supplied(
         '--parquet-compression-level', '--parquet_compression_level'
     ):
@@ -569,7 +539,7 @@ algorithm, and updates/2026-07-30.md for validation results.
         (not args['stop_after_hills'] and args['feature_format'] == 'parquet')
         or ((args['write_hills'] or args['stop_after_hills']) and args['hills_format'] == 'parquet')
         or (args['write_ms1'] and args['ms1_format'] == 'parquet')
-        or args['write_ms2'] or args['ms2_seed']
+        or args['write_ms2']
     )
     if _option_was_supplied('--parquet-engine', '--parquet_engine') and (
         not parquet_requested and not args['duckdb_output']
@@ -593,7 +563,6 @@ algorithm, and updates/2026-07-30.md for validation results.
                 (args['write_hills'], '--write-hills'),
                 (args['write_ms1'], '--write-ms1'),
                 (args['write_ms2'], '--write-ms2'),
-                (args['ms2_seed'], '--ms2-seed'),
             )
             if enabled
         ]
@@ -606,10 +575,6 @@ algorithm, and updates/2026-07-30.md for validation results.
         args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
     ):
         parser.error('--write-ms2 is supported only for the normal mzML feature workflow.')
-    if args['ms2_seed'] and (
-        args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
-    ):
-        parser.error('--ms2-seed is supported only for the normal mzML feature workflow.')
     if args['run_workers'] > 1 and (
         args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
     ):
