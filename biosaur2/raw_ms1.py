@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 import hashlib
 import json
 import math
@@ -124,6 +125,35 @@ class RawMS1Store:
         end = int(self.offsets[local_index + 1])
         return self.mz[start:end], self.intensity[start:end]
 
+    @cached_property
+    def _rt_is_monotonic(self):
+        return bool(np.all(np.diff(self.rt_sec) >= 0.0))
+
+    def select_local_indices(self, rt_start_sec, rt_end_sec, *, faims_cv=None):
+        """Select one RT/FAIMS grid without scanning all MS1 RT values."""
+
+        if self._rt_is_monotonic:
+            start = int(np.searchsorted(self.rt_sec, rt_start_sec, side="left"))
+            end = int(np.searchsorted(self.rt_sec, rt_end_sec, side="right"))
+            candidates = np.arange(start, end, dtype=np.int64)
+            faims = self.faims_cv[start:end]
+            if faims_cv is None:
+                keep = np.isnan(faims)
+            else:
+                keep = np.isfinite(faims) & np.isclose(
+                    faims, float(faims_cv), atol=1e-6, rtol=0.0
+                )
+            return candidates if np.all(keep) else candidates[keep]
+
+        selected = (self.rt_sec >= rt_start_sec) & (self.rt_sec <= rt_end_sec)
+        if faims_cv is None:
+            selected &= np.isnan(self.faims_cv)
+        else:
+            selected &= np.isfinite(self.faims_cv) & np.isclose(
+                self.faims_cv, float(faims_cv), atol=1e-6, rtol=0.0
+            )
+        return np.flatnonzero(selected).astype(np.int64, copy=False)
+
     def detector_spectra(
         self,
         *,
@@ -200,14 +230,9 @@ class RawMS1Store:
             raise ValueError("ppm must be finite and positive")
         if rt_end_sec < rt_start_sec:
             raise ValueError("RT end must not precede RT start")
-        selected = (self.rt_sec >= rt_start_sec) & (self.rt_sec <= rt_end_sec)
-        if faims_cv is None:
-            selected &= np.isnan(self.faims_cv)
-        else:
-            selected &= np.isfinite(self.faims_cv) & np.isclose(
-                self.faims_cv, float(faims_cv), atol=1e-6, rtol=0.0
-            )
-        local_indices = np.flatnonzero(selected)
+        local_indices = self.select_local_indices(
+            rt_start_sec, rt_end_sec, faims_cv=faims_cv
+        )
         intensities, observed = extract_traces_values(
             np.asarray(self.offsets, dtype=np.int64),
             np.asarray(self.mz, dtype=np.float64),

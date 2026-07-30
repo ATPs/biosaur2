@@ -208,6 +208,20 @@ def test_trace_extraction_respects_rt_and_faims_and_zero_fills():
     np.testing.assert_array_equal(trace.intensity, [10.0, 0.0])
 
 
+def test_trace_selection_falls_back_for_nonmonotonic_rt_store():
+    builder = preprocessing.RawMS1StoreBuilder()
+    builder.append([500.0], [10.0], source_scan_index=1, scan_number=101, rt_sec=2.0, faims_cv=None)
+    builder.append([500.0], [20.0], source_scan_index=2, scan_number=102, rt_sec=1.0, faims_cv=None)
+    store = builder.finalize()
+
+    np.testing.assert_array_equal(
+        store.select_local_indices(0.5, 1.5), [1]
+    )
+    np.testing.assert_array_equal(
+        store.extract_trace(500.0, 5.0, 0.5, 1.5).intensity, [20.0]
+    )
+
+
 def test_persisted_and_mmap_raw_stores_are_identical_and_fingerprint_safe(tmp_path):
     source = tmp_path / "run.mzML.gz"
     source.write_bytes(b"mzML-prefix" + b"x" * 100 + b"mzML-suffix")

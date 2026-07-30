@@ -115,20 +115,9 @@ class ResidualMS1Ledger:
             raise ValueError("ppm must be finite and positive")
         if rt_end_sec < rt_start_sec:
             raise ValueError("RT end must not precede RT start")
-        selected = (
-            (self.store.rt_sec >= rt_start_sec)
-            & (self.store.rt_sec <= rt_end_sec)
+        local_indices = self.store.select_local_indices(
+            rt_start_sec, rt_end_sec, faims_cv=faims_cv
         )
-        if faims_cv is None:
-            selected &= np.isnan(self.store.faims_cv)
-        else:
-            selected &= np.isfinite(self.store.faims_cv) & np.isclose(
-                self.store.faims_cv,
-                float(faims_cv),
-                atol=1e-6,
-                rtol=0.0,
-            )
-        local_indices = np.flatnonzero(selected)
         intensities = np.zeros(local_indices.size, dtype=np.float64)
         observed = np.full(local_indices.size, np.nan, dtype=np.float64)
         tolerance = float(target_mz) * float(ppm) * 1e-6
