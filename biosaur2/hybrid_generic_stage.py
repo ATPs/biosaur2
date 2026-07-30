@@ -141,6 +141,7 @@ def _run_generic_enabled_stage(**kwargs):
         ],
         workers=local_workers,
         options=standard_local_options,
+        backend=args.get("_resolved_hybrid_backend", "cython"),
         telemetry=local_candidate_cache_telemetry,
     )
     local_competitions, local_q_family_counts = (
@@ -466,6 +467,7 @@ def _run_relaxed_generic_recovery(state):
                 ],
                 workers=local_workers,
                 options=relaxed_local_options,
+                backend=args.get("_resolved_hybrid_backend", "cython"),
                 telemetry=local_candidate_cache_telemetry,
             )
         )

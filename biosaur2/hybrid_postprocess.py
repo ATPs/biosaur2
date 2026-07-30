@@ -40,6 +40,7 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
             recovered_feature_rows + generic_recovered_feature_rows
         )
     args["_hybrid_summary"] = {
+        "hybrid_backend": args.get("_resolved_hybrid_backend", "cython"),
         "relaxed_ms2_feature_enabled": bool(
             args.get("relaxed_ms2_feature", False)
         ),

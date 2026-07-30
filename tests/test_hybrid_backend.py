@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from biosaur2 import hybrid_backend
 from biosaur2.hybrid_backend import configure_backend, resolved_backend
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
 
@@ -60,11 +61,22 @@ def test_cython_batch_trace_matches_scalar_reference():
         np.testing.assert_allclose(trace.observed_mz, observed, equal_nan=True)
 
 
-def test_auto_backend_falls_back_to_cython_without_optional_extension():
-    assert configure_backend("auto") == "cython"
-    assert resolved_backend() == "cython"
+def test_auto_backend_resolves_an_available_accelerator():
+    assert configure_backend("auto") in {"cython", "rust"}
+    assert resolved_backend() in {"cython", "rust"}
 
 
-def test_explicit_missing_rust_backend_is_actionable():
+def test_explicit_missing_rust_backend_is_actionable(monkeypatch):
+    monkeypatch.setattr(hybrid_backend, "_rust_module", lambda: None)
     with pytest.raises(RuntimeError, match="biosaur2-rust-core"):
         configure_backend("rust")
+
+
+def test_rust_trace_matches_scalar_reference_when_installed():
+    if configure_backend("auto") != "rust":
+        pytest.skip("optional Rust backend is not installed")
+    store = _store()
+    trace = store.extract_traces((500.0,), 5.0, 0.0, 3.0)[0]
+    intensity, observed = _scalar_trace(store, 500.0, 5.0, 0.0, 3.0)
+    np.testing.assert_allclose(trace.intensity, intensity)
+    np.testing.assert_allclose(trace.observed_mz, observed, equal_nan=True)
