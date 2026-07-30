@@ -342,8 +342,12 @@ def _evaluate_cached_generic_pair_stage(
         )
         return targets, decoys
 
+    # Candidate evaluation is read-only.  Materializing once lets workers use
+    # RawMS1Store's indexed and native batch extraction while later accepted
+    # candidates still allocate against the authoritative sparse ledger.
+    residual_store = residual_ledger.materialize()
     targets, decoys = evaluate_generic_local_candidate_pairs(
-        residual_ledger,
+        residual_store,
         target_events,
         decoy_events,
         workers=workers,

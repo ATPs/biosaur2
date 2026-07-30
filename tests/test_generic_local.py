@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from biosaur2.generic_local import (
@@ -11,6 +12,7 @@ from biosaur2.generic_local import (
 )
 from biosaur2.generic_association import C13_C12_MASS_DIFF
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
+from biosaur2.residual import ResidualMS1Ledger
 
 
 def _event(event_id=1):
@@ -157,6 +159,50 @@ def test_generic_local_paired_parallel_evaluation_is_ordered_and_deterministic()
     assert [value.status for value in parallel_decoy] == [
         value.status for value in serial_decoy
     ]
+
+
+def test_generic_local_residual_snapshot_matches_ledger_candidates():
+    target = _event(11)
+    decoy = {
+        **target,
+        "selected_ion_mz": 520.0,
+        "isolation_target_mz": 520.0,
+    }
+    ledger = ResidualMS1Ledger(_store(target))
+    trace = ledger.extract_trace(500.0, 2.0, 0.0, 4.0)
+    assert ledger.allocate_component(
+        "existing-feature", (trace,), 0, [trace.intensity * 0.2]
+    ).accepted
+    options = {"width_limit_sec": 20.0, "rt_tolerance_sec": 10.0}
+
+    ledger_targets, ledger_decoys = evaluate_generic_local_candidate_pairs(
+        ledger, (target,), (decoy,), workers=1, **options
+    )
+    snapshot_targets, snapshot_decoys = evaluate_generic_local_candidate_pairs(
+        ledger.materialize(), (target,), (decoy,), workers=1, **options
+    )
+    for ledger_candidate, snapshot_candidate in zip(
+        ledger_targets + ledger_decoys, snapshot_targets + snapshot_decoys
+    ):
+        assert snapshot_candidate.status == ledger_candidate.status
+        assert snapshot_candidate.score == pytest.approx(ledger_candidate.score)
+        assert snapshot_candidate.segment_slice == ledger_candidate.segment_slice
+        assert [name for name, _value in snapshot_candidate.score_components] == [
+            name for name, _value in ledger_candidate.score_components
+        ]
+        assert [value for _name, value in snapshot_candidate.score_components] == pytest.approx(
+            [value for _name, value in ledger_candidate.score_components]
+        )
+        assert len(snapshot_candidate.traces) == len(ledger_candidate.traces)
+        for snapshot_trace, ledger_trace in zip(
+            snapshot_candidate.traces, ledger_candidate.traces
+        ):
+            assert snapshot_trace.intensity == pytest.approx(ledger_trace.intensity)
+            np.testing.assert_allclose(
+                snapshot_trace.observed_mz,
+                ledger_trace.observed_mz,
+                equal_nan=True,
+            )
 
 
 def test_generic_local_target_decoy_q_values_remain_event_level():
