@@ -96,6 +96,7 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
     position = command.index("--max-charge")
     assert command[position + 1] == "8"
     assert "--relaxed-ms2-feature" in command
+    assert "--write-ms2" in command
     assert "--workers" not in command
     assert "--cache-dir" not in command
 

@@ -152,6 +152,8 @@ def _command_for_run(run, paths, options):
     if options["overwrite"]:
         command.append("--overwrite")
     if options["mode"] == "hybrid":
+        # Project validation and resume tracking include the normalized MS2 audit input.
+        command.append("--write-ms2")
         if run.psm_path is not None:
             command.extend(("--psm-path", str(run.psm_path)))
         q_value = run.q_value_max if run.q_value_max is not None else options["psm_q_value_max"]
