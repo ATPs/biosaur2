@@ -333,7 +333,9 @@ def ingest_mzml(args):
         logger.info("Combining every %s MS1 scans.", combine_every)
 
     collect_ms1 = bool(args.get("write_ms1"))
-    collect_ms2 = bool(args.get("write_ms2"))
+    # Hybrid association needs MS2 metadata internally even though --write-ms2
+    # remains a legacy diagnostic output option.
+    collect_ms2 = bool(args.get("write_ms2")) or args.get("feature_mode") == "hybrid"
     iterator = (
         iter_ms1_and_ms2_metadata(args["file"])
         if collect_ms2

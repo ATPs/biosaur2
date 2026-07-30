@@ -29,6 +29,31 @@ def _spectrum(native_id, rt, mz, intensity, faims=None):
     return result
 
 
+def _ms2_spectrum(native_id, rt, spectrum_ref):
+    return {
+        "id": native_id,
+        "ms level": 2,
+        "scanList": {"scan": [{"scan start time": rt}]},
+        "precursorList": {
+            "precursor": [
+                {
+                    "spectrumRef": spectrum_ref,
+                    "selectedIonList": {
+                        "selectedIon": [
+                            {"selected ion m/z": 500.0, "charge state": 2}
+                        ]
+                    },
+                    "isolationWindow": {
+                        "isolation window target m/z": 500.0,
+                        "isolation window lower offset": 1.0,
+                        "isolation window upper offset": 1.0,
+                    },
+                }
+            ]
+        },
+    }
+
+
 def test_final_residual_calibration_uses_accepted_strict_reference():
     rng = np.random.default_rng(7)
     candidates = []
@@ -144,6 +169,33 @@ def test_hybrid_ingestion_retains_subthreshold_raw_points_from_one_reader(monkey
     np.testing.assert_array_equal(trace.intensity, [5.0, 8.0, 12.0])
     np.testing.assert_array_equal(trace.point_present, [True, True, True])
     assert result.raw_ms1_store.scan_count == 3
+
+
+def test_hybrid_ingestion_reads_ms2_metadata_without_legacy_ms2_output(monkeypatch):
+    spectra = [
+        _spectrum("scan=1", 10.0, [500.0], [100.0]),
+        _ms2_spectrum("scan=2", 10.5, "scan=1"),
+    ]
+
+    monkeypatch.setattr(
+        utils, "iter_ms1_and_ms2_metadata", lambda _path: iter(spectra)
+    )
+    result = preprocessing.ingest_mzml(
+        {
+            "file": "run.mzML",
+            "combine_every": 1,
+            "mini": 10.0,
+            "minmz": 350.0,
+            "maxmz": 1500.0,
+            "input_rt_unit": "seconds",
+            "write_ms1": False,
+            "write_ms2": False,
+            "feature_mode": "hybrid",
+        }
+    )
+
+    assert len(result.ms2_rows) == 1
+    assert result.ms2_rows[0]["precursor_ms1_index"] == 0
 
 
 def test_trace_extraction_respects_rt_and_faims_and_zero_fills():
