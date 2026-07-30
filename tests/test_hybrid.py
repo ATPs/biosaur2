@@ -1041,6 +1041,29 @@ def test_final_generic_recheck_preserves_specific_failure_when_not_accepted():
     assert competition_counts["target_winner_count"] == 1
 
 
+def test_quant_method_all_reports_three_values_with_envelope_primary():
+    row = _quant_row(
+        "run",
+        1,
+        "strict_untargeted",
+        "strict",
+        [0.0, 1.0, 2.0],
+        [[0.0, 4.0, 0.0], [0.0, 2.0, 0.0]],
+        method="all",
+        baseline="none",
+        quality_score=1.0,
+        isotope_cosine=1.0,
+        mass_error=0.0,
+        supporting_psm_count=0,
+        supporting_ms2_count=0,
+    )
+    assert row["quant_method"] == "all"
+    assert row["quant_value"] == pytest.approx(6.0)
+    assert row["quant_envelope_area"] == pytest.approx(6.0)
+    assert row["quant_mono_area"] == pytest.approx(4.0)
+    assert row["quant_envelope_apex"] == pytest.approx(6.0)
+
+
 def test_generic_support_updates_metadata_without_duplicating_quant_rows():
     quant_rows = [
         {

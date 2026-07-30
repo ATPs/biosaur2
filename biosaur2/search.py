@@ -11,9 +11,15 @@ import time
 import traceback
 from .output import input_stem
 from .output import planned_output_paths
+from .cache_runtime import CacheWorkspace, default_cache_dir
 from .duckdb_output import DuckDBOutputManager, uses_duckdb
 from .legacy_output import CompactOutputManager
-from .parallel import WorkerFailure, run_bounded_process_tasks
+from .parallel import (
+    WorkerFailure,
+    effective_worker_budget,
+    run_budgeted_process_tasks,
+    worker_slot_allocations,
+)
 
 
 class _HelpFormatter(
@@ -151,7 +157,7 @@ def _run_file_worker(run_args):
         }
 
 
-def _run_args_for_file(args, filename, multiple_inputs):
+def _run_args_for_file(args, filename, multiple_inputs, allocated_workers=None):
     run_args = {
         key: value
         for key, value in args.items()
@@ -167,10 +173,27 @@ def _run_args_for_file(args, filename, multiple_inputs):
         if not run_args.get("duckdb_output"):
             run_args["_ms2_output_directory"] = str(output_directory)
     run_args["_multiple_inputs"] = multiple_inputs
-    run_args["_requested_nprocs"] = args["nprocs"]
-    if args["run_workers"] > 1:
-        run_args["nprocs"] = 1
+    workers = args["workers"] if allocated_workers is None else allocated_workers
+    run_args["nprocs"] = workers
+    run_args["_requested_workers"] = args["workers"]
+    run_args["_allocated_workers"] = workers
+    cache_workspace = args.get("_cache_workspace")
+    if run_args.get("feature_mode") == "hybrid" and cache_workspace:
+        cache_paths = CacheWorkspace(
+            root=Path(args["cache_dir"]).resolve(),
+            workspace=Path(cache_workspace),
+            keep=bool(args.get("keep_cache")),
+        ).paths_for(filename)
+        run_args["raw_ms1_cache_dir"] = cache_paths["raw_ms1_cache"]
+        run_args["hybrid_stage_cache_dir"] = cache_paths["strict_stage_cache"]
+        run_args["hybrid_candidate_cache_dir"] = cache_paths["candidate_cache"]
     return run_args
+
+
+def _run_file_worker_budgeted(run_args, allocated_workers):
+    run_args["nprocs"] = allocated_workers
+    run_args["_allocated_workers"] = allocated_workers
+    return _run_file_worker(run_args)
 
 
 def _log_batch_report(logger, files, results):
@@ -194,6 +217,107 @@ def _log_batch_report(logger, files, results):
         )
         if result.get("traceback"):
             logger.error("File failed: %s\n%s", filename, result["traceback"])
+
+
+def _execute_inputs(args, parser, logger):
+    multiple_inputs = len(args['files']) > 1
+    if multiple_inputs:
+        stems = [input_stem(filename) for filename in args['files']]
+        if len(stems) != len(set(stems)):
+            parser.error('Multiple inputs resolve to duplicate output stems.')
+        if args['o']:
+            output_directory = Path(args['o'])
+            if output_directory.exists() and not output_directory.is_dir():
+                parser.error('-o must be a directory when multiple inputs are supplied.')
+            output_directory.mkdir(parents=True, exist_ok=True)
+        if args['duckdb_output']:
+            duckdb_directory = Path(args['duckdb_output'])
+            if duckdb_directory.suffix.lower() == '.duckdb':
+                parser.error('--duckdb-output must be a directory for multiple inputs.')
+            if duckdb_directory.exists() and not duckdb_directory.is_dir():
+                parser.error('--duckdb-output must be a directory for multiple inputs.')
+            duckdb_directory.mkdir(parents=True, exist_ok=True)
+
+    planned_paths = []
+    for filename in args['files']:
+        run_args = _run_args_for_file(args, filename, multiple_inputs)
+        planned_paths.extend(planned_output_paths(run_args))
+    if len(planned_paths) != len(set(planned_paths)):
+        parser.error('Output paths collide.')
+    existing = [path for path in planned_paths if path.exists()]
+    if existing and not args['overwrite']:
+        parser.error(
+            'Output already exists; use --overwrite: %s'
+            % ', '.join(map(str, existing))
+        )
+
+    effective_workers = effective_worker_budget(args['workers'])
+    args['_effective_workers'] = effective_workers
+    normal_parallel = not (args['dia'] or args['dia2']) and all(
+        _is_mzml_input(path) for path in args['files']
+    )
+    allocations = (
+        worker_slot_allocations(effective_workers, len(args['files']))
+        if multiple_inputs and normal_parallel
+        else [effective_workers]
+    )
+    logger.info(
+        'Effective worker budget: requested=%d effective=%d run_slots=%d allocations=%s',
+        args['workers'],
+        effective_workers,
+        len(allocations),
+        allocations,
+    )
+
+    results = {}
+    if not multiple_inputs or not normal_parallel:
+        for index, filename in enumerate(args['files']):
+            logger.info('Starting file with %d workers: %s', effective_workers, filename)
+            result = _run_file_worker(
+                _run_args_for_file(
+                    args, filename, multiple_inputs, effective_workers
+                )
+            )
+            results[index] = result
+            if result['status'] == 'failed' and not args['continue_on_error']:
+                break
+    else:
+        def task_arguments():
+            for filename in args['files']:
+                yield (_run_args_for_file(args, filename, multiple_inputs),)
+
+        raw_results, _started, _allocations = run_budgeted_process_tasks(
+            _run_file_worker_budgeted,
+            task_arguments(),
+            effective_workers,
+            (
+                None
+                if args['continue_on_error']
+                else lambda result: (
+                    isinstance(result, WorkerFailure)
+                    or result.get('status') == 'failed'
+                )
+            ),
+        )
+        for index, result in raw_results.items():
+            if isinstance(result, WorkerFailure):
+                results[index] = {
+                    'file': args['files'][index],
+                    'status': 'failed',
+                    'runtime_sec': None,
+                    'error': '%s: %s' % (result.exception_type, result.message),
+                    'traceback': result.traceback_text,
+                }
+            else:
+                results[index] = result
+
+    if multiple_inputs or any(
+        result['status'] == 'failed' for result in results.values()
+    ):
+        _log_batch_report(logger, args['files'], results)
+    failed = [result for result in results.values() if result['status'] == 'failed']
+    if failed:
+        raise RuntimeError('%d input file(s) failed; see batch report for details.' % len(failed))
 
 
 def run():
@@ -253,13 +377,11 @@ Examples:
   biosaur2 input.mzML.gz --feature-mode hybrid \\
     --psm-path input.percolator.target.psms.tsv \\
     --psm-q-value-max 0.01 --fixed-mod C=UNIMOD:4 \\
-    --quant-method envelope_area --feature-format parquet
+    --quant-method all --feature-format parquet
 
-  # Repeated hybrid tuning: raw cache is required by strict-stage cache
+  # Keep all cache layers so a later compatible command can reuse them
   biosaur2 input.mzML.gz --feature-mode hybrid \\
-    --raw-ms1-cache-dir cache/input.raw \\
-    --hybrid-stage-cache-dir cache/input.strict \\
-    --hybrid-candidate-cache-dir cache/input.candidates \\
+    --cache-dir .biosaur2_cache --keep-cache \\
     --feature-format parquet
 
   # Smaller feature payload when point arrays are not needed
@@ -307,11 +429,13 @@ algorithm, and updates/2026-07-30.md for validation results.
         default=7,
         type=int,
     )
-    parser.add_argument('-nprocs', help='internal worker-process count for one file', default=4, type=int)
     parser.add_argument(
-        '--run-workers',
-        help='bounded file-level worker count; each file uses one detection worker when greater than one',
-        default=1,
+        '--workers',
+        help=(
+            'total CPU worker-process budget; multiple files share this budget '
+            'with a target of about four workers per active run'
+        ),
+        default=4,
         type=_positive_integer,
     )
     parser.add_argument(
@@ -366,9 +490,9 @@ algorithm, and updates/2026-07-30.md for validation results.
     parser.add_argument('--fixed-mod', action='append', default=[], help='explicit hybrid fixed modification SITE=MOD; repeatable')
     parser.add_argument(
         '--quant-method',
-        choices=('envelope_area', 'mono_area', 'envelope_apex'),
-        default='envelope_area',
-        help='hybrid feature abundance: assigned envelope area, monoisotopic area, or common-scan envelope apex',
+        choices=('all', 'envelope_area', 'mono_area', 'envelope_apex'),
+        default='all',
+        help='hybrid abundance columns to report; all keeps envelope area as the primary quant_value',
     )
     parser.add_argument(
         '--feature-baseline', choices=('none', 'edge_linear'), default=None,
@@ -391,7 +515,11 @@ algorithm, and updates/2026-07-30.md for validation results.
     )
     parser.add_argument(
         '--generic-q-value-max', type=float, default=0.01,
-        help='maximum extraction q-value for generic MS2 target/decoy families; independent of the PSM q-value',
+        help=(
+            'estimated false-discovery limit for unidentified-MS2 associations '
+            'from target/decoy (real-versus-shifted precursor) competition; '
+            'not the PSM q-value'
+        ),
     )
     parser.add_argument(
         '--relaxed-ms2-feature',
@@ -404,26 +532,14 @@ algorithm, and updates/2026-07-30.md for validation results.
         ),
     )
     parser.add_argument(
-        '--raw-ms1-cache-dir',
-        default='',
-        help='optional persisted mmap-compatible raw MS1 cache directory for hybrid mode',
+        '--cache-dir',
+        default=str(default_cache_dir()),
+        help='root for all raw, strict-stage, candidate, and project caches',
     )
     parser.add_argument(
-        '--hybrid-stage-cache-dir',
-        default='',
-        help=(
-            'optional fingerprinted strict-stage cache; a valid existing '
-            'cache skips mzML ingestion, hill detection and strict candidate '
-            'generation, otherwise the completed strict stage is saved here'
-        ),
-    )
-    parser.add_argument(
-        '--hybrid-candidate-cache-dir',
-        default='',
-        help=(
-            'optional fingerprinted cache root for expensive hybrid local '
-            'target/decoy candidate extraction on a specific residual state'
-        ),
+        '--keep-cache',
+        action='store_true',
+        help='retain fingerprinted caches for reuse; otherwise remove this job cache when it finishes',
     )
     parser.add_argument(
         '--generic-ms2-ppm', dest='generic_ms2_ppm', type=float,
@@ -433,7 +549,10 @@ algorithm, and updates/2026-07-30.md for validation results.
     parser.add_argument(
         '--ms2-rt-tolerance-sec', dest='ms2_rt_tolerance_sec',
         type=float, default=120.0,
-        help='initial RT search tolerance in seconds around an MS2 event; calibrated retries may tighten it',
+        help=(
+            'initial same-run MS1 search distance before/after an MS2 event in '
+            'seconds; this is not cross-run RT alignment'
+        ),
     )
     parser.add_argument(
         '--ms1_format', '--ms1-format',
@@ -489,12 +608,9 @@ algorithm, and updates/2026-07-30.md for validation results.
     parser.add_argument('--parquet-row-group-size', '--parquet_row_group_size', dest='parquet_row_group_size', type=_positive_integer, default=122880, help='positive Parquet row-group size')
     parser.add_argument('--parquet-sort', '--parquet_sort', dest='parquet_sort', choices=['none', 'mz_rt', 'rt_mz'], default='mz_rt', help='deterministic physical feature order')
     parser.add_argument('--parquet-temp-dir', '--parquet_temp_dir', dest='parquet_temp_dir', default='', help='DuckDB staging workspace; final files remain staged beside their targets')
-    parser.add_argument('--intensity-decimals', '--intensity_decimals', dest='intensity_decimals', type=_nonnegative_or('none'), default='0', help='output-only half-away-from-zero intensity rounding; use none to preserve fractional values')
     parser.add_argument('--duckdb-output', '--duckdb_output', dest='duckdb_output', default='', help='write one compact .duckdb database instead of ordinary feature output')
     parser.add_argument('--overwrite', action='store_true', help='atomically replace existing output targets')
     args = vars(parser.parse_args())
-    if args['nprocs'] < 1:
-        parser.error('-nprocs must be a positive integer.')
     if args['cmin'] < 1 or args['cmax'] < args['cmin']:
         parser.error('-cmin must be positive and -cmax/--max-charge must be at least -cmin.')
     if args['combine_every'] < 1:
@@ -520,17 +636,6 @@ algorithm, and updates/2026-07-30.md for validation results.
         args['feature_baseline'] = args['feature_baseline'] or 'edge_linear'
     else:
         args['feature_baseline'] = args['feature_baseline'] or 'none'
-    if args['raw_ms1_cache_dir'] and args['feature_mode'] != 'hybrid':
-        parser.error('--raw-ms1-cache-dir requires --feature-mode hybrid.')
-    if args['hybrid_stage_cache_dir'] and args['feature_mode'] != 'hybrid':
-        parser.error('--hybrid-stage-cache-dir requires --feature-mode hybrid.')
-    if args['hybrid_candidate_cache_dir'] and args['feature_mode'] != 'hybrid':
-        parser.error('--hybrid-candidate-cache-dir requires --feature-mode hybrid.')
-    if args['hybrid_stage_cache_dir'] and not args['raw_ms1_cache_dir']:
-        parser.error(
-            '--hybrid-stage-cache-dir requires --raw-ms1-cache-dir so local '
-            'post-processing can reuse the fingerprinted raw MS1 store.'
-        )
     if args['parquet_compression'] not in {'zstd', 'brotli'} and _option_was_supplied(
         '--parquet-compression-level', '--parquet_compression_level'
     ):
@@ -575,10 +680,6 @@ algorithm, and updates/2026-07-30.md for validation results.
         args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
     ):
         parser.error('--write-ms2 is supported only for the normal mzML feature workflow.')
-    if args['run_workers'] > 1 and (
-        args['dia'] or args['dia2'] or any(not _is_mzml_input(path) for path in args['files'])
-    ):
-        parser.error('--run-workers greater than 1 is supported only for normal mzML inputs.')
     forced_write_hills = args['stop_after_hills'] and not args['write_hills']
     if forced_write_hills:
         args['write_hills'] = True
@@ -591,95 +692,25 @@ algorithm, and updates/2026-07-30.md for validation results.
     logger.debug('Starting with args: %s', args)
 
     if os.name == 'nt':
-        # logger.info('Turning off multiprocessing for Windows system')
-        args['nprocs'] = 1
+        logger.info('Using one worker on Windows.')
+        args['workers'] = 1
 
-    multiple_inputs = len(args['files']) > 1
-    if multiple_inputs:
-        stems = [input_stem(filename) for filename in args['files']]
-        if len(stems) != len(set(stems)):
-            parser.error('Multiple inputs resolve to duplicate output stems.')
-        if args['o']:
-            output_directory = Path(args['o'])
-            if output_directory.exists() and not output_directory.is_dir():
-                parser.error('-o must be a directory when multiple inputs are supplied.')
-            output_directory.mkdir(parents=True, exist_ok=True)
-        if args['duckdb_output']:
-            duckdb_directory = Path(args['duckdb_output'])
-            if duckdb_directory.suffix.lower() == '.duckdb':
-                parser.error('--duckdb-output must be a directory for multiple inputs.')
-            if duckdb_directory.exists() and not duckdb_directory.is_dir():
-                parser.error('--duckdb-output must be a directory for multiple inputs.')
-            duckdb_directory.mkdir(parents=True, exist_ok=True)
-
-    planned_paths = []
-    for filename in args['files']:
-        run_args = _run_args_for_file(args, filename, multiple_inputs)
-        planned_paths.extend(planned_output_paths(run_args))
-    if len(planned_paths) != len(set(planned_paths)):
-        parser.error('Output paths collide.')
-    existing = [path for path in planned_paths if path.exists()]
-    if existing and not args['overwrite']:
-        parser.error(
-            'Output already exists; use --overwrite: %s'
-            % ', '.join(map(str, existing))
+    cache_workspace = None
+    if args['feature_mode'] == 'hybrid':
+        cache_workspace = CacheWorkspace.create(
+            args['cache_dir'], keep=args['keep_cache']
         )
-
-    requested_nprocs = args['nprocs']
-    effective_nprocs = 1 if args['run_workers'] > 1 else requested_nprocs
-    logger.info(
-        'Effective parallel configuration: run_workers=%d, nprocs=%d (requested nprocs=%d)',
-        args['run_workers'],
-        effective_nprocs,
-        requested_nprocs,
-    )
-    results = {}
-    if args['run_workers'] == 1:
-        for index, filename in enumerate(args['files']):
-            logger.info('Starting file: %s', filename)
-            result = _run_file_worker(
-                _run_args_for_file(args, filename, multiple_inputs)
-            )
-            results[index] = result
-            if result['status'] == 'failed' and not args['continue_on_error']:
-                break
-    else:
-        def task_arguments():
-            for filename in args['files']:
-                yield (_run_args_for_file(args, filename, multiple_inputs),)
-
-        raw_results, _started = run_bounded_process_tasks(
-            _run_file_worker,
-            task_arguments(),
-            args['run_workers'],
-            (
-                None
-                if args['continue_on_error']
-                else lambda result: (
-                    isinstance(result, WorkerFailure)
-                    or result.get('status') == 'failed'
-                )
-            ),
+        args['_cache_workspace'] = str(cache_workspace.workspace)
+        logger.info(
+            'Hybrid cache workspace: %s (%s)',
+            cache_workspace.workspace,
+            'retained' if cache_workspace.keep else 'temporary',
         )
-        for index, result in raw_results.items():
-            if isinstance(result, WorkerFailure):
-                results[index] = {
-                    'file': args['files'][index],
-                    'status': 'failed',
-                    'runtime_sec': None,
-                    'error': '%s: %s' % (result.exception_type, result.message),
-                    'traceback': result.traceback_text,
-                }
-            else:
-                results[index] = result
-
-    if multiple_inputs or any(
-        result['status'] == 'failed' for result in results.values()
-    ):
-        _log_batch_report(logger, args['files'], results)
-    failed = [result for result in results.values() if result['status'] == 'failed']
-    if failed:
-        raise RuntimeError('%d input file(s) failed; see batch report for details.' % len(failed))
+    try:
+        _execute_inputs(args, parser, logger)
+    finally:
+        if cache_workspace is not None:
+            cache_workspace.cleanup()
 
 if __name__ == '__main__':
     run()

@@ -1346,7 +1346,7 @@ def _quant_row(
         envelope = np.sum(selected_matrix, axis=0, dtype=np.float64)
         apex_index = int(np.argmax(envelope))
         apex_value = float(envelope[apex_index])
-        if method == "envelope_area":
+        if method in {"all", "envelope_area"}:
             selected_value = float(np.sum(corrected_areas if baseline == "edge_linear" else raw_areas))
         elif method == "mono_area":
             selected_value = float((corrected_areas if baseline == "edge_linear" else raw_areas)[0])
@@ -1358,7 +1358,7 @@ def _quant_row(
             envelope = np.sum(matrix, axis=0, dtype=np.float64)
             apex_index = int(np.argmax(envelope))
             apex_value = float(envelope[apex_index])
-            if method == "envelope_area":
+            if method in {"all", "envelope_area"}:
                 selected_value = float(np.sum(raw_areas))
             elif method == "mono_area":
                 selected_value = float(raw_areas[0])
@@ -1391,6 +1391,15 @@ def _quant_row(
         "area_mono_raw": float(raw_areas[0]) if raw_areas.size else None,
         "area_mono_corrected": float(corrected_areas[0]) if corrected_areas.size else None,
         "envelope_apex": apex_value,
+        "quant_envelope_area": (
+            float(np.sum(corrected_areas if baseline == "edge_linear" and quant_status != "raw_fallback" else raw_areas))
+            if raw_areas.size else None
+        ),
+        "quant_mono_area": (
+            float((corrected_areas if baseline == "edge_linear" and quant_status != "raw_fallback" else raw_areas)[0])
+            if raw_areas.size else None
+        ),
+        "quant_envelope_apex": apex_value,
         "feature_quality_score": quality_score,
         "quality_flags": int(quality_flags),
         "extraction_q_value": extraction_q_value,

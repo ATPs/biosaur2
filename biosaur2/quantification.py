@@ -8,7 +8,7 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 
-QUANTIFICATION_METHODS = ("envelope_area", "mono_area", "envelope_apex")
+QUANTIFICATION_METHODS = ("all", "envelope_area", "mono_area", "envelope_apex")
 BASELINE_METHODS = ("none", "edge_linear")
 
 
@@ -208,7 +208,7 @@ def quantify_feature_traces(
     envelope = np.sum(np.stack(processed), axis=0, dtype=np.float64)
     apex = int(np.argmax(envelope)) if envelope.size else None
     areas = tuple(float(trapezoid_area(NormalizedTrace(rt, values, set())) or 0.0) for values in processed)
-    if method == "envelope_area":
+    if method in {"all", "envelope_area"}:
         value = float(sum(areas))
         isotope_values = areas
     elif method == "mono_area":
@@ -224,7 +224,7 @@ def quantify_feature_traces(
             float(trapezoid_area(NormalizedTrace(rt, values, set())) or 0.0)
             for values in raw_processed
         )
-        if method == "envelope_area":
+        if method in {"all", "envelope_area"}:
             value = float(sum(raw_areas))
             isotope_values = raw_areas
         elif method == "mono_area":

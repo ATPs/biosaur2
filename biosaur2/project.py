@@ -13,7 +13,13 @@ import time
 import pyarrow.parquet as pq
 
 from .output import input_stem, publish_staged_files, _temporary_neighbor
-from .parallel import WorkerFailure, run_bounded_process_tasks
+from .cache_runtime import run_cache_paths
+from .parallel import (
+    WorkerFailure,
+    effective_worker_budget,
+    run_bounded_process_tasks,
+    run_budgeted_process_tasks,
+)
 from .project_manifest import read_manifest
 from .raw_ms1 import source_fingerprint
 from .external import (
@@ -29,14 +35,34 @@ from .external import (
 logger = logging.getLogger(__name__)
 
 
+def _scientific_command(command):
+    """Remove scheduling/cache-location arguments from a run command."""
+
+    normalized = []
+    index = 0
+    while index < len(command):
+        option = command[index]
+        if option in {"--workers", "--cache-dir"}:
+            index += 2
+            continue
+        if option == "--keep-cache":
+            index += 1
+            continue
+        normalized.append(option)
+        index += 1
+    return normalized
+
+
 def _resume_option_signature(options):
     """Return science/output options while ignoring scheduling-only controls."""
 
     ignored = {
         "resume",
         "continue_on_error",
-        "run_workers",
-        "allow_nested_parallelism",
+        "workers",
+        "cache_dir",
+        "keep_cache",
+        "_cache_workspace",
     }
     return {
         key: value
@@ -45,17 +71,9 @@ def _resume_option_signature(options):
     }
 
 
-def _effective_nprocs(options):
-    if options["run_workers"] == 1 or options.get(
-        "allow_nested_parallelism", False
-    ):
-        return options["nprocs"]
-    return 1
-
-
 def _project_worker(task):
     started = time.monotonic()
-    command = task["command"]
+    command = task.get("execution_command", task["command"])
     usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     completed = subprocess.run(command, text=True, capture_output=True)
     usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -77,10 +95,30 @@ def _project_worker(task):
     }
 
 
-def _run_paths(run, output_dir):
+def _project_worker_budgeted(task, allocated_workers):
+    execution_task = dict(task)
+    execution_command = list(task["command"]) + [
+        "--workers",
+        str(allocated_workers),
+    ]
+    if task.get("cache_root"):
+        execution_command.extend(
+            ("--cache-dir", task["cache_root"], "--keep-cache")
+        )
+    execution_task["execution_command"] = execution_command
+    result = _project_worker(execution_task)
+    result["allocated_workers"] = allocated_workers
+    return result
+
+
+def _run_paths(run, output_dir, cache_workspace=None):
     directory = output_dir / run.run_id
     stem = input_stem(str(run.mzml_path))
-    return {
+    cache_paths = run_cache_paths(
+        cache_workspace or (output_dir / ".biosaur2_cache"),
+        run.mzml_path,
+    )
+    paths = {
         "run_dir": str(directory),
         "features": str(directory / (run.run_id + ".features.parquet")),
         "ms2": str(directory / (stem + ".ms2.parquet")),
@@ -91,20 +129,17 @@ def _run_paths(run, output_dir):
         "external_evidence": str(
             directory / (stem + ".external_id_evidence.parquet")
         ),
-        "raw_ms1_cache": str(directory / "raw_ms1_cache"),
-        "strict_stage_cache": str(directory / "strict_stage_cache"),
-        "candidate_cache": str(directory / "candidate_cache"),
     }
+    paths.update(cache_paths)
+    return paths
 
 
-def _command_for_run(run, paths, options, effective_nprocs):
+def _command_for_run(run, paths, options):
     command = [
         sys.executable,
         "-m",
         "biosaur2.search",
         str(run.mzml_path),
-        "-nprocs",
-        str(effective_nprocs),
         "-o",
         paths["features"],
         "--feature-format",
@@ -149,21 +184,6 @@ def _command_for_run(run, paths, options, effective_nprocs):
                 str(options.get("ms2_rt_tolerance_sec", 120.0)),
             )
         )
-        command.extend(("--raw-ms1-cache-dir", paths["raw_ms1_cache"]))
-        if paths.get("candidate_cache"):
-            command.extend(
-                (
-                    "--hybrid-candidate-cache-dir",
-                    paths["candidate_cache"],
-                )
-            )
-        if options.get("hybrid_stage_cache", False):
-            command.extend(
-                (
-                    "--hybrid-stage-cache-dir",
-                    paths["strict_stage_cache"],
-                )
-            )
     return command
 
 
@@ -355,10 +375,7 @@ def _write_project_database(
                     [run.run_id, cache_status, paths["raw_ms1_cache"]],
                 )
                 strict_cache_path = paths.get("strict_stage_cache")
-                if not options.get("hybrid_stage_cache", False):
-                    strict_cache_status = "disabled"
-                    strict_cache_detail = strict_cache_path
-                else:
+                if strict_cache_path:
                     manifest_path = (
                         None
                         if not strict_cache_path
@@ -397,6 +414,9 @@ def _write_project_database(
                     else:
                         strict_cache_status = "missing"
                         strict_cache_detail = strict_cache_path
+                else:
+                    strict_cache_status = "missing"
+                    strict_cache_detail = strict_cache_path
                 connection.execute(
                     "INSERT INTO stage_status VALUES "
                     "(?, 'strict_stage_cache', ?, ?)",
@@ -580,7 +600,10 @@ def _run_external_stage(runs, results, options):
     raw, _started = run_bounded_process_tasks(
         run_external_recipient,
         ((task,) for task in tasks),
-        min(int(options["run_workers"]), max(1, len(tasks))),
+        min(
+            int(options.get("_effective_workers", options.get("workers", 4))),
+            max(1, len(tasks)),
+        ),
         lambda result: isinstance(result, WorkerFailure),
     )
     summaries = {}
@@ -620,6 +643,13 @@ def run_project(manifest, output_dir, project_db, **options):
     runs = read_manifest(manifest)
     output_dir = Path(output_dir).resolve()
     database = Path(project_db).resolve()
+    cache_workspace = Path(
+        options.get("_cache_workspace")
+        or options.get("cache_dir")
+        or ".biosaur2_cache"
+    ).resolve()
+    effective_workers = effective_worker_budget(int(options.get("workers", 4)))
+    options["_effective_workers"] = effective_workers
     output_dir.mkdir(parents=True, exist_ok=True)
     for run in runs:
         if not run.mzml_path.is_file():
@@ -632,10 +662,9 @@ def run_project(manifest, output_dir, project_db, **options):
     successful = _read_successful_runs(database) if options["resume"] else {}
     tasks = []
     skipped = {}
-    effective_nprocs = _effective_nprocs(options)
     for index, run in enumerate(runs):
-        paths = _run_paths(run, output_dir)
-        command = _command_for_run(run, paths, options, effective_nprocs)
+        paths = _run_paths(run, output_dir, cache_workspace)
+        command = _command_for_run(run, paths, options)
         resume_record = successful.get(run.run_id)
         required_paths = [paths["features"]]
         if options["mode"] == "hybrid":
@@ -645,7 +674,7 @@ def run_project(manifest, output_dir, project_db, **options):
         resume_valid = (
             resume_record is not None
             and resume_record["input_fingerprint"] == _input_fingerprint(run)
-            and resume_record["command"] == command
+            and _scientific_command(resume_record["command"]) == command
             and resume_record.get("project_option_signature")
             == _resume_option_signature(options)
             and all(Path(path).is_file() for path in required_paths)
@@ -661,7 +690,7 @@ def run_project(manifest, output_dir, project_db, **options):
                 "cpu_system_sec": resume_record.get("cpu_system_sec"),
                 "peak_rss_kib": resume_record.get("peak_rss_kib"),
                 "paths": paths,
-                "command": command,
+                "command": resume_record["command"],
             }
             continue
         tasks.append(
@@ -671,6 +700,11 @@ def run_project(manifest, output_dir, project_db, **options):
                     "run_id": run.run_id,
                     "paths": paths,
                     "command": command,
+                    "cache_root": (
+                        str(Path(paths["cache_run_dir"]).parent.parent)
+                        if options["mode"] == "hybrid"
+                        else None
+                    ),
                 },
             )
         )
@@ -679,13 +713,19 @@ def run_project(manifest, output_dir, project_db, **options):
         for _index, task in tasks:
             yield (task,)
 
-    raw, _started = run_bounded_process_tasks(
-        _project_worker,
+    raw, _started, allocations = run_budgeted_process_tasks(
+        _project_worker_budgeted,
         task_arguments(),
-        options["run_workers"],
+        effective_workers,
         None if options["continue_on_error"] else lambda result: (
             isinstance(result, WorkerFailure) or result.get("status") == "failed"
         ),
+    )
+    logger.info(
+        "Project worker budget: requested=%d effective=%d allocations=%s",
+        int(options.get("workers", 4)),
+        effective_workers,
+        allocations,
     )
     results = dict(skipped)
     for task_position, value in raw.items():
@@ -710,7 +750,7 @@ def run_project(manifest, output_dir, project_db, **options):
                 "runtime_sec": None,
                 "returncode": None,
                 "error": "not scheduled after an earlier failure",
-                "paths": _run_paths(run, output_dir),
+                "paths": _run_paths(run, output_dir, cache_workspace),
                 "command": [],
             }
         logger.info(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import math
 import os
 import queue
 import traceback
@@ -64,6 +65,34 @@ def balanced_ranges(
         ranges.append((start, end))
         start = end
     return ranges
+
+
+def effective_worker_budget(requested_workers, cpu_count_value=None):
+    """Return a positive CPU-bounded worker budget."""
+
+    if requested_workers < 1:
+        raise ValueError("requested_workers must be a positive integer")
+    available = cpu_count_value if cpu_count_value is not None else os.cpu_count()
+    return min(requested_workers, max(1, available or 1))
+
+
+def worker_slot_allocations(total_workers, task_count, target_per_task=4):
+    """Split a total budget across reusable run slots."""
+
+    if total_workers < 1:
+        raise ValueError("total_workers must be a positive integer")
+    if task_count < 0:
+        raise ValueError("task_count must be nonnegative")
+    if target_per_task < 1:
+        raise ValueError("target_per_task must be a positive integer")
+    if task_count == 0:
+        return []
+    slot_count = min(
+        task_count,
+        max(1, int(math.ceil(total_workers / target_per_task))),
+    )
+    base, remainder = divmod(total_workers, slot_count)
+    return [base + (1 if index < remainder else 0) for index in range(slot_count)]
 
 
 def _worker_entry(
@@ -237,6 +266,100 @@ def run_bounded_process_tasks(
         return results, started
     finally:
         for process in active.values():
+            process.join()
+        result_queue.close()
+        result_queue.join_thread()
+
+
+def run_budgeted_process_tasks(
+    function: Callable[..., Any],
+    task_args: Iterable[Sequence[Any]],
+    total_workers: int,
+    stop_on_result: Optional[Callable[[Any], bool]] = None,
+    target_per_task: int = 4,
+    poll_seconds: float = 0.1,
+) -> Tuple[Dict[int, Any], List[int], List[int]]:
+    """Run fresh task processes while sharing one total worker budget.
+
+    The allocated worker count is appended to each task's positional arguments.
+    A completed task's allocation is handed to the next pending task.
+    """
+
+    tasks = list(task_args)
+    allocations = worker_slot_allocations(
+        total_workers, len(tasks), target_per_task=target_per_task
+    )
+    if not tasks:
+        return {}, [], allocations
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    task_iterator = enumerate(tasks)
+    active = {}
+    results = {}
+    started = []
+    stop_submitting = False
+
+    def start_next(allocation):
+        try:
+            worker_id, args = next(task_iterator)
+        except StopIteration:
+            return False
+        process = context.Process(
+            target=_worker_entry,
+            args=(
+                result_queue,
+                worker_id,
+                function,
+                tuple(args) + (allocation,),
+            ),
+        )
+        process.start()
+        active[worker_id] = (process, allocation)
+        started.append(worker_id)
+        return True
+
+    try:
+        for allocation in allocations:
+            if not start_next(allocation):
+                break
+        while active:
+            try:
+                status, worker_id, payload = result_queue.get(timeout=poll_seconds)
+            except queue.Empty:
+                failed = [
+                    (worker_id, process.exitcode)
+                    for worker_id, (process, _allocation) in active.items()
+                    if process.exitcode not in (None, 0)
+                ]
+                if not failed:
+                    continue
+                worker_id, exit_code = failed[0]
+                payload = WorkerFailure(
+                    worker_id=worker_id,
+                    exception_type="ProcessExit",
+                    message="child exited with code %s before reporting" % exit_code,
+                    traceback_text="",
+                )
+                status = "error"
+
+            active_value = active.pop(worker_id, None)
+            if active_value is None:
+                continue
+            process, allocation = active_value
+            process.join()
+            result = payload
+            results[worker_id] = result
+            if status == "error" or (
+                stop_on_result is not None and stop_on_result(result)
+            ):
+                stop_submitting = True
+            if not stop_submitting:
+                start_next(allocation)
+        return results, started, allocations
+    finally:
+        for process, _allocation in active.values():
+            if process.is_alive():
+                process.terminate()
             process.join()
         result_queue.close()
         result_queue.join_thread()

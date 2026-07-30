@@ -6,6 +6,7 @@ import argparse
 import logging
 import math
 
+from .cache_runtime import CacheWorkspace, default_cache_dir
 from .project_manifest import auto_pair_runs, write_manifest
 from .project import run_project, validate_project
 
@@ -84,8 +85,7 @@ def run_project_cli(arguments):
 Examples:
   biosaur2 project run --manifest runs.tsv --output-dir results \\
     --project-db results/project.duckdb --mode hybrid \\
-    --run-workers 4 --nprocs 20 --allow-nested-parallelism \\
-    --hybrid-stage-cache
+    --workers 16 --cache-dir .biosaur2_cache --keep-cache
 
   biosaur2 project validate --project-db results/project.duckdb
 
@@ -96,7 +96,7 @@ README.md and examples/hybrid_project_manifest.tsv.
             formatter_class=_HelpFormatter,
         )
         parser.add_argument("--manifest", required=True, help="input project manifest TSV")
-        parser.add_argument("--output-dir", required=True, help="root directory for per-run atomic outputs and caches")
+        parser.add_argument("--output-dir", required=True, help="root directory for per-run atomic outputs")
         parser.add_argument("--project-db", required=True, help="DuckDB path for run/stage status, resolved options, alignment and validation metadata")
         parser.add_argument(
             "--mode",
@@ -106,19 +106,12 @@ README.md and examples/hybrid_project_manifest.tsv.
                 "legacy=strict untargeted; hybrid=direct/generic residual workflow"
             ),
         )
-        parser.add_argument("--run-workers", type=int, default=1, help="maximum number of mzML runs processed concurrently")
-        parser.add_argument("--nprocs", type=int, default=4, help="internal workers per run; effective value is one with multiple run workers unless nested parallelism is allowed")
+        parser.add_argument("--workers", type=int, default=4, help="total CPU worker-process budget shared dynamically across runs")
+        parser.add_argument("--cache-dir", default=str(default_cache_dir()), help="root for all raw, strict-stage, candidate, and project caches")
+        parser.add_argument("--keep-cache", action="store_true", help="retain fingerprinted caches for later reuse")
         parser.add_argument(
             "--max-charge", "--max_charge", type=int, default=7,
             help="maximum feature/precursor charge hypothesis passed to each run",
-        )
-        parser.add_argument(
-            "--allow-nested-parallelism",
-            action="store_true",
-            help=(
-                "allow each file worker to use --nprocs internal workers; "
-                "total process budget is run-workers times nprocs"
-            ),
         )
         parser.add_argument("--continue-on-error", action="store_true", help="finish independent runs after a failure but retain a failed project status")
         parser.add_argument("--resume", action="store_true", help="reuse successful runs only when input and resolved option signatures still match")
@@ -126,7 +119,7 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument("--psm-q-value-max", type=float, default=0.01, help="default maximum Percolator q-value; manifest q_value_max may override it per run")
         parser.add_argument("--psm-pep-max", type=float, default=None, help="optional maximum PSM posterior error probability; none disables this filter")
         parser.add_argument("--fixed-mod", action="append", default=[], help="explicit repeatable fixed modification SITE=MOD, for example C=UNIMOD:4")
-        parser.add_argument("--quant-method", choices=("envelope_area", "mono_area", "envelope_apex"), default="envelope_area", help="one final feature-level quantitative definition")
+        parser.add_argument("--quant-method", choices=("all", "envelope_area", "mono_area", "envelope_apex"), default="all", help="quantification output; all reports every metric and uses envelope area as quant_value")
         parser.add_argument("--feature-baseline", choices=("none", "edge_linear"), default="edge_linear", help="baseline preprocessing before hybrid feature quantification")
         parser.add_argument("--direct-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable q-filtered same-run direct PSM assays in hybrid mode")
         parser.add_argument("--external-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable aligned external assays inside compatible alignment groups")
@@ -145,16 +138,7 @@ README.md and examples/hybrid_project_manifest.tsv.
             help="minimum theoretical/observed isotope cosine for an external candidate",
         )
         parser.add_argument("--generic-ms2-refine", action=argparse.BooleanOptionalAction, default=True, help="enable/disable unidentified-MS2 hypotheses and residual local recovery")
-        parser.add_argument("--generic-q-value-max", type=float, default=0.01, help="maximum generic target/decoy extraction q-value; independent of PSM q-values")
-        parser.add_argument(
-            "--hybrid-stage-cache",
-            action=argparse.BooleanOptionalAction,
-            default=False,
-            help=(
-                "persist/reuse each run's fingerprinted strict-stage cache "
-                "for downstream hybrid parameter iterations"
-            ),
-        )
+        parser.add_argument("--generic-q-value-max", type=float, default=0.01, help="estimated false-discovery limit for unidentified-MS2 associations from target/decoy (real-versus-shifted precursor) competition; not the PSM q-value")
         parser.add_argument(
             "--relaxed-ms2-feature",
             action=argparse.BooleanOptionalAction,
@@ -166,11 +150,11 @@ README.md and examples/hybrid_project_manifest.tsv.
         )
         parser.add_argument(
             "--ms2-rt-tolerance-sec", type=float, default=120.0,
-            help="initial local RT search tolerance in seconds around each MS2 event",
+            help="initial same-run MS1 search distance around each MS2 event; not cross-run RT alignment",
         )
         args = parser.parse_args(arguments[1:])
-        if args.run_workers < 1 or args.nprocs < 1:
-            parser.error("--run-workers and --nprocs must be positive")
+        if args.workers < 1:
+            parser.error("--workers must be positive")
         if args.max_charge < 1:
             parser.error("--max-charge must be positive")
         if not math.isfinite(args.generic_q_value_max) or not 0 <= args.generic_q_value_max <= 1:
@@ -206,7 +190,14 @@ README.md and examples/hybrid_project_manifest.tsv.
         manifest = options.pop("manifest")
         output_dir = options.pop("output_dir")
         project_db = options.pop("project_db")
-        run_project(manifest, output_dir, project_db, **options)
+        cache_workspace = CacheWorkspace.create(
+            options["cache_dir"], keep=options["keep_cache"]
+        )
+        options["_cache_workspace"] = str(cache_workspace.workspace)
+        try:
+            run_project(manifest, output_dir, project_db, **options)
+        finally:
+            cache_workspace.cleanup()
         return 0
     if arguments and arguments[0] == "validate":
         parser = argparse.ArgumentParser(

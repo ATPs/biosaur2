@@ -83,13 +83,14 @@ MS2_COLUMNS = (
     "metadata_flags",
 )
 
-HYBRID_SCHEMA_VERSION = "3"
+HYBRID_SCHEMA_VERSION = "4"
 
 HYBRID_FEATURE_QUANT_COLUMNS = (
     "run_id", "feature_id", "feature_origin", "confidence_tier",
     "quant_value", "quant_method", "quant_status", "area_envelope_raw",
     "area_envelope_corrected", "area_mono_raw", "area_mono_corrected",
-    "envelope_apex", "feature_quality_score", "quality_flags",
+    "envelope_apex", "quant_envelope_area", "quant_mono_area",
+    "quant_envelope_apex", "feature_quality_score", "quality_flags",
     "extraction_q_value", "supporting_psm_count", "supporting_ms2_count",
     "points_across_peak", "rt_start_sec", "rt_apex_sec", "rt_end_sec",
     "isotope_cosine", "mass_error_ppm_median",
@@ -271,6 +272,8 @@ def _hybrid_feature_quant_schema(use64=False):
         "quant_status": category, "area_envelope_raw": pa.float64(),
         "area_envelope_corrected": pa.float64(), "area_mono_raw": pa.float64(),
         "area_mono_corrected": pa.float64(), "envelope_apex": pa.float64(),
+        "quant_envelope_area": pa.float64(), "quant_mono_area": pa.float64(),
+        "quant_envelope_apex": pa.float64(),
         "feature_quality_score": pa.float32(), "quality_flags": pa.uint32(),
         "extraction_q_value": pa.float32(), "supporting_psm_count": pa.int32(),
         "supporting_ms2_count": pa.int32(), "points_across_peak": pa.int32(),

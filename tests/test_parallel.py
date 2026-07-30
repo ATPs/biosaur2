@@ -5,7 +5,9 @@ import pytest
 from biosaur2.parallel import (
     WorkerProcessError,
     balanced_ranges,
+    effective_worker_budget,
     run_bounded_process_tasks,
+    worker_slot_allocations,
     run_process_tasks,
 )
 
@@ -44,6 +46,13 @@ def test_balanced_ranges_cover_every_item_once(item_count, workers, expected):
 
 def test_balanced_ranges_cap_cpu_count():
     assert balanced_ranges(10, 8, cpu_count_value=2) == [(0, 5), (5, 10)]
+
+
+def test_total_worker_budget_and_run_slot_allocations():
+    assert effective_worker_budget(8, cpu_count_value=6) == 6
+    assert worker_slot_allocations(4, 10) == [4]
+    assert worker_slot_allocations(10, 10) == [4, 3, 3]
+    assert worker_slot_allocations(10, 2) == [5, 5]
 
 
 @pytest.mark.parametrize("workers", [0, -1])

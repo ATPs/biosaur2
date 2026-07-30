@@ -339,16 +339,19 @@ regions are mathematically underdetermined from the observed MS1 data.
 
 ## Feature quantification
 
-Hybrid mode exposes three feature-level methods:
+Hybrid mode calculates three feature-level measurements:
 
 | Method | Definition |
 |---|---|
-| `envelope_area` | Trapezoidal integration of the sum of final assigned isotope traces over actual RT seconds; default. |
+| `envelope_area` | Trapezoidal integration of the sum of final assigned isotope traces over actual RT seconds. |
 | `mono_area` | Trapezoidal integration of the final monoisotopic contribution. |
 | `envelope_apex` | Maximum summed assigned isotope intensity at one common MS1 scan. |
 
-`edge_linear` or `none` is optional baseline preprocessing, not a fourth
-quantification method. Raw and corrected areas are retained. If baseline
+The default `--quant-method all` writes these values as
+`quant_envelope_area`, `quant_mono_area`, and `quant_envelope_apex`, while
+keeping envelope area as the primary `quant_value`. Selecting one named method
+changes the primary scalar but does not remove the three explicit columns.
+`edge_linear` or `none` is optional baseline preprocessing. Raw and corrected areas are retained. If baseline
 correction would be unreliable, the raw value is retained with an explicit
 status/quality flag.
 
@@ -409,13 +412,17 @@ unnecessarily invalidate upstream caches. A stale or partially published cache
 is rejected rather than reused. Outputs and cache directories use staging plus
 atomic publication.
 
-Parallelism is bounded at two visible levels:
+`--cache-dir` defines one root for all three layers in single-run and project
+processing. The default root is `.biosaur2_cache` in the current directory.
+Without `--keep-cache`, each command uses an isolated invocation namespace and
+removes it after all run and project stages finish. With `--keep-cache`, stable
+source-keyed run directories allow later compatible commands to reuse layers.
 
-- `run_workers`: files processed concurrently;
-- `nprocs`: internal detection/local-extraction workers per file.
-
-Nested parallelism requires explicit permission because the total process budget
-is approximately `run_workers * nprocs`.
+`--workers` is one total CPU worker-process budget. For multiple files, the
+scheduler targets roughly four workers per active run, divides the budget
+evenly over run slots, and hands a completed slot's allocation to the next
+pending run. The budget is capped by detected available CPUs and running
+process pools are not resized.
 
 ## Output contract
 
@@ -424,7 +431,7 @@ Hybrid mode publishes a single de-duplicated population and sidecars:
 | Output | Contract |
 |---|---|
 | `<stem>.features.parquet` | One row per accepted MS1 feature. |
-| `<stem>.feature_quant.parquet` | Exactly one positive quantitative row per accepted feature ID. |
+| `<stem>.feature_quant.parquet` | Exactly one positive quantitative row per accepted feature ID, including all three named abundance columns. |
 | `<stem>.ms2.parquet` | One normalized precursor metadata row per MS2 event. |
 | `<stem>.ms2_feature_links.parquet` | Exactly one audit/association row per MS2 event, including null outcomes. |
 | `<stem>.identifications.parquet` | PSM parsing, mapping and assay status. |

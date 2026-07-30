@@ -194,8 +194,7 @@ def test_hybrid_stage_cache_cold_and_replay_are_logically_equal(tmp_path):
     replay = tmp_path / "replay"
     cold.mkdir()
     replay.mkdir()
-    raw_cache = tmp_path / "raw-ms1"
-    strict_cache = tmp_path / "strict-stage"
+    cache_root = tmp_path / "cache"
 
     def run(output_directory):
         feature_path = output_directory / "features.parquet"
@@ -212,11 +211,10 @@ def test_hybrid_stage_cache_cold_and_replay_are_logically_equal(tmp_path):
                 "--feature-mode",
                 "hybrid",
                 "--no-generic-ms2-refine",
-                "--raw-ms1-cache-dir",
-                str(raw_cache),
-                "--hybrid-stage-cache-dir",
-                str(strict_cache),
-                "-nprocs",
+                "--cache-dir",
+                str(cache_root),
+                "--keep-cache",
+                "--workers",
                 "2",
             ],
             text=True,
@@ -269,15 +267,14 @@ def test_hybrid_stage_cache_rejects_existing_file_path(tmp_path):
             "parquet",
             "--feature-mode",
             "hybrid",
-            "--raw-ms1-cache-dir",
-            str(tmp_path / "raw-ms1"),
-            "--hybrid-stage-cache-dir",
+            "--cache-dir",
             str(cache_path),
-            "-nprocs",
+            "--keep-cache",
+            "--workers",
             "1",
         ],
         text=True,
         capture_output=True,
     )
     assert result.returncode != 0
-    assert "exists but is not a directory" in result.stderr
+    assert "File exists" in result.stderr

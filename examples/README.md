@@ -31,16 +31,16 @@ cycle, so every MS2 precursor reference remains inside the example.
 
 ## Generating the outputs
 
-The examples were generated in the conda base environment with one process for
+The examples were generated in the conda base environment with one worker for
 reproducibility:
 
 ```bash
 biosaur2 PXD010154_1554451_middle.mzML.gz \
-  -nprocs 1 -write_hills --hills_format tsv \
+  --workers 1 -write_hills --hills_format tsv \
   --write_ms1 --ms1_format tsv --feature_format tsv
 
 biosaur2 PXD010154_1554451_middle.mzML.gz \
-  -nprocs 1 -write_hills --hills_format parquet \
+  --workers 1 -write_hills --hills_format parquet \
   --write_ms1 --ms1_format parquet --feature_format parquet
 ```
 

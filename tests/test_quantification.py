@@ -102,12 +102,13 @@ def test_raw_area_sum_is_null_when_a_selected_trace_cannot_be_integrated():
 @pytest.mark.parametrize(
     ("method", "expected"),
     [
+        ("all", 9.0),
         ("envelope_area", 9.0),
         ("mono_area", 6.0),
         ("envelope_apex", 6.0),
     ],
 )
-def test_exactly_three_feature_quantification_methods(method, expected):
+def test_feature_quantification_methods(method, expected):
     result = quantify_feature_traces(
         [0.0, 1.0, 3.0],
         [[0.0, 4.0, 0.0], [0.0, 2.0, 0.0]],

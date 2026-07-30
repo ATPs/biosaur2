@@ -9,11 +9,11 @@ import pyarrow.parquet as pq
 from biosaur2 import project_cli
 from biosaur2.project import (
     _command_for_run,
-    _effective_nprocs,
     _input_fingerprint,
     _project_worker,
     _read_successful_runs,
     _resume_option_signature,
+    _scientific_command,
     _write_project_database,
     validate_project,
 )
@@ -90,44 +90,43 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
         "relaxed_ms2_feature": True,
         "ms2_rt_tolerance_sec": 90.0,
     }
-    command = _command_for_run(run, paths, options, 1)
+    command = _command_for_run(run, paths, options)
     position = command.index("--ms2-rt-tolerance-sec")
     assert command[position + 1] == "90.0"
     position = command.index("--max-charge")
     assert command[position + 1] == "8"
     assert "--relaxed-ms2-feature" in command
-    position = command.index("--hybrid-candidate-cache-dir")
-    assert command[position + 1] == paths["candidate_cache"]
-
-
-def test_project_nested_parallelism_requires_explicit_opt_in():
-    options = {"run_workers": 12, "nprocs": 6}
-    assert _effective_nprocs(options) == 1
-    options["allow_nested_parallelism"] = True
-    assert _effective_nprocs(options) == 6
-
-    options["run_workers"] = 1
-    options["allow_nested_parallelism"] = False
-    assert _effective_nprocs(options) == 6
+    assert "--workers" not in command
+    assert "--cache-dir" not in command
 
 
 def test_resume_signature_ignores_scheduling_but_tracks_external_science():
     previous = {
         "mode": "hybrid",
         "resume": False,
-        "run_workers": 4,
-        "allow_nested_parallelism": False,
+        "workers": 4,
+        "cache_dir": "cache-a",
+        "keep_cache": False,
         "external_q_value_max": 0.01,
     }
     resumed = {
         **previous,
         "resume": True,
-        "run_workers": 12,
-        "allow_nested_parallelism": True,
+        "workers": 12,
+        "cache_dir": "cache-b",
+        "keep_cache": True,
     }
     assert _resume_option_signature(previous) == _resume_option_signature(resumed)
     resumed["external_q_value_max"] = 0.02
     assert _resume_option_signature(previous) != _resume_option_signature(resumed)
+
+
+def test_resume_command_ignores_worker_and_cache_location():
+    base = ["python", "-m", "biosaur2.search", "run.mzML"]
+    executed = base + [
+        "--workers", "8", "--cache-dir", "/tmp/cache", "--keep-cache"
+    ]
+    assert _scientific_command(executed) == base
 
 
 def test_project_worker_captures_cpu_and_peak_rss(tmp_path):
@@ -275,7 +274,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert external == (10, 9, 2)
     assert alignment == ("explicit:g", "run", "run", "other", "accepted")
     assert schema_version == "3"
-    assert strict_cache_stage == "disabled"
+    assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")
     assert successful["run"]["input_fingerprint"] != _input_fingerprint(run)

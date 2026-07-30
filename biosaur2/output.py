@@ -300,15 +300,15 @@ def build_provenance(args: Mapping[str, Any]):
             else "exact_point_rt"
         ),
         "combine_every": args.get("combine_every", 1),
-        "run_workers": args.get("run_workers", 1),
-        "requested_nprocs": args.get("_requested_nprocs", args.get("nprocs")),
-        "effective_nprocs": args.get("nprocs"),
+        "requested_workers": args.get("_requested_workers", args.get("workers", 4)),
+        "effective_workers": args.get("_effective_workers", args.get("workers", 4)),
+        "allocated_workers": args.get("_allocated_workers", args.get("nprocs", 1)),
         "calibration": {
             "hill": args.get("hill_calibration", {"status": "not_requested"}),
             "isotope": args.get("isotope_calibration", {}),
         },
         "quantification": "raw_selected_isotope_area_sum_v1",
-        "intensity_decimals": args.get("intensity_decimals", "0"),
+        "intensity_decimals": 0,
         "rounding_policy": "half_away_from_zero_output_only",
         "numeric_storage": (
             "64-bit" if args.get("use64") else "compact float32/narrow integers"

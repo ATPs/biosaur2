@@ -46,7 +46,7 @@ def _minutes(value):
 
 
 def compact_feature(row: Mapping[str, Any], args: Mapping[str, Any]):
-    decimals = args.get("intensity_decimals", "0")
+    decimals = "0"
     result = {
         "massCalib": row.get("massCalib"),
         "rtApex": _minutes(row.get("rtApex")),
@@ -87,7 +87,7 @@ def compact_feature(row: Mapping[str, Any], args: Mapping[str, Any]):
 
 
 def compact_hill(row: Mapping[str, Any], args: Mapping[str, Any]):
-    decimals = args.get("intensity_decimals", "0")
+    decimals = "0"
     result = {
         "rtApex": _minutes(row.get("rtApex")),
         "intensityApex": _round_nested(row.get("intensityApex"), decimals),
@@ -129,7 +129,7 @@ def compact_ms1(row: Mapping[str, Any], args: Mapping[str, Any]):
         "scan_id": scan_id,
         "RT": row.get("rt_sec"),
         "total_intensity": round_intensity(
-            row.get("total_intensity"), args.get("intensity_decimals", "0")
+            row.get("total_intensity"), "0"
         ),
     }
 
