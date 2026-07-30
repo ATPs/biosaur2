@@ -95,15 +95,15 @@ def extract_local_feature(
         if rt_center_sec is None
         else float(rt_center_sec)
     )
-    traces = tuple(
-        store.extract_trace(
-            peak.mz * (1.0 + float(mz_shift_ppm) * 1e-6),
-            ppm,
-            extraction_rt_center - rt_tolerance_sec,
-            extraction_rt_center + rt_tolerance_sec,
-            faims_cv=assay.faims_cv,
-        )
-        for peak in selected_peaks
+    traces = store.extract_traces(
+        tuple(
+            peak.mz * (1.0 + float(mz_shift_ppm) * 1e-6)
+            for peak in selected_peaks
+        ),
+        ppm,
+        extraction_rt_center - rt_tolerance_sec,
+        extraction_rt_center + rt_tolerance_sec,
+        faims_cv=assay.faims_cv,
     )
     if not traces or traces[0].rt_sec.size == 0:
         return LocalFeatureCandidate(

@@ -166,6 +166,18 @@ class ResidualMS1Ledger:
             ppm=float(ppm),
         )
 
+    def extract_traces(
+        self, target_mzs, ppm, rt_start_sec, rt_end_sec, *, faims_cv=None
+    ):
+        """Compatibility batch API; sparse claims currently require per-trace scans."""
+
+        return tuple(
+            self.extract_trace(
+                target_mz, ppm, rt_start_sec, rt_end_sec, faims_cv=faims_cv
+            )
+            for target_mz in target_mzs
+        )
+
     def _trace_point_distribution(
         self,
         trace: ExtractedTrace,

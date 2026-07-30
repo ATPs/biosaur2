@@ -14,6 +14,8 @@ from typing import Optional
 
 import numpy as np
 
+from .hybrid_backend import extract_traces_values
+
 
 RAW_MS1_CACHE_VERSION = 1
 _CACHE_ARRAYS = (
@@ -176,8 +178,24 @@ class RawMS1Store:
     ) -> ExtractedTrace:
         """Extract one zero-filled centroid XIC on the real MS1 scan grid."""
 
-        if not math.isfinite(target_mz) or target_mz <= 0:
-            raise ValueError("target_mz must be finite and positive")
+        return self.extract_traces(
+            (target_mz,), ppm, rt_start_sec, rt_end_sec, faims_cv=faims_cv
+        )[0]
+
+    def extract_traces(
+        self,
+        target_mzs,
+        ppm: float,
+        rt_start_sec: float,
+        rt_end_sec: float,
+        *,
+        faims_cv: Optional[float] = None,
+    ) -> tuple[ExtractedTrace, ...]:
+        """Extract several zero-filled XICs that share one real MS1 scan grid."""
+
+        targets = np.asarray(tuple(target_mzs), dtype=np.float64)
+        if targets.ndim != 1 or not targets.size or np.any(~np.isfinite(targets)) or np.any(targets <= 0):
+            raise ValueError("target m/z values must be finite and positive")
         if not math.isfinite(ppm) or ppm <= 0:
             raise ValueError("ppm must be finite and positive")
         if rt_end_sec < rt_start_sec:
@@ -190,36 +208,26 @@ class RawMS1Store:
                 self.faims_cv, float(faims_cv), atol=1e-6, rtol=0.0
             )
         local_indices = np.flatnonzero(selected)
-        intensities = np.zeros(local_indices.size, dtype=np.float64)
-        observed = np.full(local_indices.size, np.nan, dtype=np.float64)
-        tolerance = target_mz * ppm * 1e-6
-        lower = target_mz - tolerance
-        upper = target_mz + tolerance
-        for output_index, local_index in enumerate(local_indices):
-            mz_values, intensity_values = self.scan(int(local_index))
-            start = int(np.searchsorted(mz_values, lower, side="left"))
-            end = int(np.searchsorted(mz_values, upper, side="right"))
-            if end <= start:
-                continue
-            local_intensity = np.asarray(intensity_values[start:end], dtype=np.float64)
-            positive = local_intensity > 0
-            if not np.any(positive):
-                continue
-            local_mz = np.asarray(mz_values[start:end], dtype=np.float64)[positive]
-            local_intensity = local_intensity[positive]
-            total = float(np.sum(local_intensity, dtype=np.float64))
-            intensities[output_index] = total
-            observed[output_index] = float(np.average(local_mz, weights=local_intensity))
-        present = intensities > 0
-        return ExtractedTrace(
-            scan_index=self.source_scan_index[local_indices].copy(),
-            scan_number=self.scan_number[local_indices].copy(),
-            rt_sec=self.rt_sec[local_indices].copy(),
-            intensity=intensities,
-            observed_mz=observed,
-            point_present=present,
-            target_mz=float(target_mz),
-            ppm=float(ppm),
+        intensities, observed = extract_traces_values(
+            np.asarray(self.offsets, dtype=np.int64),
+            np.asarray(self.mz, dtype=np.float64),
+            np.asarray(self.intensity, dtype=np.float64),
+            np.asarray(local_indices, dtype=np.int64),
+            targets,
+            float(ppm),
+        )
+        return tuple(
+            ExtractedTrace(
+                scan_index=self.source_scan_index[local_indices].copy(),
+                scan_number=self.scan_number[local_indices].copy(),
+                rt_sec=self.rt_sec[local_indices].copy(),
+                intensity=intensities[index],
+                observed_mz=observed[index],
+                point_present=intensities[index] > 0,
+                target_mz=float(target_mz),
+                ppm=float(ppm),
+            )
+            for index, target_mz in enumerate(targets)
         )
 
 

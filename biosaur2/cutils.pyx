@@ -1,12 +1,151 @@
 cimport cython
 import numpy as np
 cimport numpy as np
+from libc.math cimport NAN
 import itertools
 import math
 from collections import Counter, defaultdict
 from copy import copy
 
 np.import_array()
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def extract_trace_values(
+    np.ndarray[np.int64_t, ndim=1] offsets,
+    np.ndarray[np.float64_t, ndim=1] mz,
+    np.ndarray[np.float64_t, ndim=1] intensity,
+    np.ndarray[np.int64_t, ndim=1] local_indices,
+    double target_mz,
+    double ppm,
+):
+    """Extract one centroid XIC without allocating a Python slice per scan."""
+
+    cdef Py_ssize_t output_index, local_index, start, end, left, right, middle
+    cdef Py_ssize_t point_index, count = local_indices.shape[0]
+    cdef double tolerance = target_mz * ppm * 1e-6
+    cdef double lower = target_mz - tolerance
+    cdef double upper = target_mz + tolerance
+    cdef double total, weighted_mz, value
+    cdef np.ndarray[np.float64_t, ndim=1] values = np.zeros(count, dtype=np.float64)
+    cdef np.ndarray[np.float64_t, ndim=1] observed = np.empty(count, dtype=np.float64)
+    cdef long long[::1] offsets_view = offsets
+    cdef double[::1] mz_view = mz
+    cdef double[::1] intensity_view = intensity
+    cdef long long[::1] local_indices_view = local_indices
+    cdef double[::1] values_view = values
+    cdef double[::1] observed_view = observed
+
+    with nogil:
+        for output_index in range(count):
+            local_index = local_indices_view[output_index]
+            start = offsets_view[local_index]
+            end = offsets_view[local_index + 1]
+            left = start
+            right = end
+            while left < right:
+                middle = left + (right - left) // 2
+                if mz_view[middle] < lower:
+                    left = middle + 1
+                else:
+                    right = middle
+            point_index = left
+            left = point_index
+            right = end
+            while left < right:
+                middle = left + (right - left) // 2
+                if mz_view[middle] <= upper:
+                    left = middle + 1
+                else:
+                    right = middle
+            end = left
+            total = 0.0
+            weighted_mz = 0.0
+            while point_index < end:
+                value = intensity_view[point_index]
+                if value > 0.0:
+                    total += value
+                    weighted_mz += mz_view[point_index] * value
+                point_index += 1
+            values_view[output_index] = total
+            observed_view[output_index] = weighted_mz / total if total > 0.0 else NAN
+    return values, observed
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def extract_traces_values(
+    np.ndarray[np.int64_t, ndim=1] offsets,
+    np.ndarray[np.float64_t, ndim=1] mz,
+    np.ndarray[np.float64_t, ndim=1] intensity,
+    np.ndarray[np.int64_t, ndim=1] local_indices,
+    np.ndarray[np.float64_t, ndim=1] target_mzs,
+    double ppm,
+):
+    """Extract several XICs sharing one selected MS1 scan grid."""
+
+    cdef Py_ssize_t output_index, target_index, local_index, start, end, scan_end, left, right, middle
+    cdef Py_ssize_t point_index, scan_count = local_indices.shape[0]
+    cdef Py_ssize_t target_count = target_mzs.shape[0]
+    cdef double target_mz, tolerance, lower, upper, total, weighted_mz, value
+    cdef np.ndarray[np.float64_t, ndim=2] values = np.zeros(
+        (target_count, scan_count), dtype=np.float64
+    )
+    cdef np.ndarray[np.float64_t, ndim=2] observed = np.empty(
+        (target_count, scan_count), dtype=np.float64
+    )
+    cdef long long[::1] offsets_view = offsets
+    cdef double[::1] mz_view = mz
+    cdef double[::1] intensity_view = intensity
+    cdef long long[::1] local_indices_view = local_indices
+    cdef double[::1] target_mzs_view = target_mzs
+    cdef double[:, ::1] values_view = values
+    cdef double[:, ::1] observed_view = observed
+
+    with nogil:
+        for output_index in range(scan_count):
+            local_index = local_indices_view[output_index]
+            start = offsets_view[local_index]
+            scan_end = offsets_view[local_index + 1]
+            for target_index in range(target_count):
+                target_mz = target_mzs_view[target_index]
+                tolerance = target_mz * ppm * 1e-6
+                lower = target_mz - tolerance
+                upper = target_mz + tolerance
+                left = start
+                right = scan_end
+                while left < right:
+                    middle = left + (right - left) // 2
+                    if mz_view[middle] < lower:
+                        left = middle + 1
+                    else:
+                        right = middle
+                point_index = left
+                left = point_index
+                right = scan_end
+                while left < right:
+                    middle = left + (right - left) // 2
+                    if mz_view[middle] <= upper:
+                        left = middle + 1
+                    else:
+                        right = middle
+                end = left
+                total = 0.0
+                weighted_mz = 0.0
+                while point_index < end:
+                    value = intensity_view[point_index]
+                    if value > 0.0:
+                        total += value
+                        weighted_mz += mz_view[point_index] * value
+                    point_index += 1
+                values_view[target_index, output_index] = total
+                observed_view[target_index, output_index] = (
+                    weighted_mz / total if total > 0.0 else NAN
+                )
+    return values, observed
 
 
 @cython.cdivision(True)

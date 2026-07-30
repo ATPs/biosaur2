@@ -158,18 +158,17 @@ def evaluate_generic_local_candidate(
     isotope_errors = tuple(sorted({int(value) for value in isotope_errors if int(value) >= 0}))
     if not isotope_errors:
         return GenericLocalCandidate(event, "no_nonnegative_isotope_errors", None)
-    relative_traces = {}
     relative_min = min(-value for value in isotope_errors)
     relative_max = max(isotope_count - value - 1 for value in isotope_errors)
-    for relative in range(relative_min, relative_max + 1):
-        mz = selected + relative * C13_C12_MASS_DIFF / charge
-        relative_traces[relative] = store.extract_trace(
-            mz,
-            ppm,
-            rt - rt_tolerance_sec,
-            rt + rt_tolerance_sec,
-            faims_cv=event.get("faims_cv"),
-        )
+    relatives = tuple(range(relative_min, relative_max + 1))
+    traces = store.extract_traces(
+        tuple(selected + relative * C13_C12_MASS_DIFF / charge for relative in relatives),
+        ppm,
+        rt - rt_tolerance_sec,
+        rt + rt_tolerance_sec,
+        faims_cv=event.get("faims_cv"),
+    )
+    relative_traces = dict(zip(relatives, traces))
     reference = relative_traces[0]
     if reference.rt_sec.size == 0:
         return GenericLocalCandidate(event, "no_ms1_scans_in_window", None)
