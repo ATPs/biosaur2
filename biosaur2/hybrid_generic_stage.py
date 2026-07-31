@@ -119,11 +119,11 @@ def _run_generic_enabled_stage(**kwargs):
         "ppm": local_ppm,
         "rt_tolerance_sec": local_rt_tolerance,
         "isotope_count": int(args.get("generic_local_isotope_count", 5)),
-        "isotope_errors": tuple(
+        "isotope_errors": [
             value
             for value in args.get("generic_ms2_isotope_errors", (0, 1, 2, 3))
             if int(value) >= 0
-        ),
+        ],
         "min_mono_points": int(args.get("generic_local_min_mono_points", 3)),
         "min_channel_points": int(args.get("generic_local_min_channel_points", 3)),
         "min_supported_channels": int(args.get("generic_local_min_supported_channels", 2)),
@@ -456,11 +456,11 @@ def _run_relaxed_generic_recovery(state):
             "ppm": local_ppm,
             "rt_tolerance_sec": local_rt_tolerance,
             "isotope_count": int(args.get("generic_local_isotope_count", 5)),
-            "isotope_errors": tuple(
+            "isotope_errors": [
                 value
                 for value in args.get("generic_ms2_isotope_errors", (0, 1, 2, 3))
                 if int(value) >= 0
-            ),
+            ],
             "min_mono_points": int(args.get("generic_relaxed_min_mono_points", 2)),
             "min_channel_points": int(args.get("generic_relaxed_min_channel_points", 2)),
             "min_supported_channels": int(args.get("generic_relaxed_min_supported_channels", 2)),
