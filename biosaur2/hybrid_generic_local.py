@@ -310,7 +310,6 @@ def _evaluate_cached_generic_pair_stage(
     decoy_events,
     workers,
     options,
-    backend,
     telemetry,
 ):
     fingerprint = local_candidate_fingerprint(
@@ -318,7 +317,7 @@ def _evaluate_cached_generic_pair_stage(
         stage=stage,
         target_events=target_events,
         decoy_events=decoy_events,
-        options={**options, "hybrid_backend": backend},
+        options={**options, "trace_extractor": "cython"},
         residual_state=residual_ledger.state_fingerprint(),
         raw_scan_count=residual_ledger.store.scan_count,
         raw_point_count=residual_ledger.store.point_count,

@@ -20,7 +20,6 @@ from .parallel import (
     run_budgeted_process_tasks,
     worker_slot_allocations,
 )
-from .hybrid_backend import configure_backend
 
 
 _LOG_LEVELS = {
@@ -220,14 +219,6 @@ def _run_file_worker(run_args):
         run_args.get('raw_ms1_cache_dir'),
     )
     try:
-        if run_args.get('feature_mode') == 'hybrid':
-            resolved_backend = configure_backend(run_args['hybrid_backend'])
-            run_args['_resolved_hybrid_backend'] = resolved_backend
-            logger.debug(
-                'Hybrid numerical backend: requested=%s resolved=%s',
-                run_args['hybrid_backend'],
-                resolved_backend,
-            )
         manager = _create_output_manager(run_args)
         if manager is not None:
             run_args["_output_manager"] = manager
@@ -560,12 +551,6 @@ Advanced output notes:
         choices=('legacy', 'hybrid'),
         default='legacy',
         help='legacy=strict untargeted; hybrid=direct/generic MS2 residual workflow',
-    )
-    parser.add_argument(
-        '--hybrid-backend',
-        choices=('auto', 'cython'),
-        default='auto',
-        help='hybrid numerical accelerator; auto resolves to Cython',
     )
     parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM TSV (optionally compressed); empty runs hybrid without direct PSM assays')
     parser.add_argument('--psm-q-value-max', type=float, default=0.01, help='maximum Percolator PSM q-value accepted before direct-assay construction')

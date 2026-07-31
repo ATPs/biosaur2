@@ -126,15 +126,6 @@ README.md and examples/hybrid_project_manifest.tsv.
             ),
         )
         parser.add_argument(
-            "--hybrid-backend",
-            choices=("auto", "cython"),
-            default="auto",
-            help=(
-                "hybrid numerical accelerator passed to every run; "
-                "auto resolves to Cython"
-            ),
-        )
-        parser.add_argument(
             "--format", choices=("tsv", "parquet", "duckdb"), default=None,
             help="per-run output format (default: automatic: tsv in legacy mode, parquet in hybrid mode)",
         )

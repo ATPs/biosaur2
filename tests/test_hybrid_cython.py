@@ -1,5 +1,5 @@
 import numpy as np
-from biosaur2.hybrid_backend import configure_backend, resolved_backend
+
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
 
 
@@ -48,7 +48,6 @@ def _store():
 
 
 def test_cython_batch_trace_matches_scalar_reference():
-    configure_backend("cython")
     store = _store()
     targets = (500.0, 501.0)
     traces = store.extract_traces(targets, 5.0, 0.0, 3.0)
@@ -56,15 +55,3 @@ def test_cython_batch_trace_matches_scalar_reference():
         intensity, observed = _scalar_trace(store, target, 5.0, 0.0, 3.0)
         np.testing.assert_allclose(trace.intensity, intensity)
         np.testing.assert_allclose(trace.observed_mz, observed, equal_nan=True)
-
-
-def test_auto_backend_always_resolves_cython():
-    assert configure_backend("auto") == "cython"
-    assert resolved_backend() == "cython"
-
-
-def test_rust_backend_is_not_supported():
-    with np.testing.assert_raises_regex(
-        ValueError, "only Cython is available"
-    ):
-        configure_backend("rust")

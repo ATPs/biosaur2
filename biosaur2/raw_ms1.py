@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 
-from .hybrid_backend import extract_traces_values
+from .cutils import extract_traces_values
 
 
 RAW_MS1_CACHE_VERSION = 1
