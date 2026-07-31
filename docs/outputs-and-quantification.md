@@ -19,7 +19,7 @@ legacy mode and Parquet in Hybrid mode.
 | `--write-hills` | `sample.hills.<format>` | One chromatographic hill. |
 | `--write-ms1` | `sample.ms1.<format>` | One MS1 scan summary. |
 | Legacy `--write-ms2` | `sample.ms2.<format>` | One normalized precursor entry from an MS2 spectrum. |
-| Project Hybrid external stage | `sample.external_id_evidence.<format>` or DuckDB table | One donor-assay attempt in a recipient run. |
+| Project Hybrid external stage only | `sample.external_id_evidence.<format>` or DuckDB table | One cross-run donor-assay attempt in a recipient run. |
 | Project index | `project.duckdb` | Run status, QC, alignment and stage summaries. |
 | Experimental `-dia`/`-dia2` | requested `.mgf` | One text block per exported spectrum. |
 
@@ -156,8 +156,12 @@ inside `features.ms2_events`, while PSM-bearing events remain in
 
 ## Cross-run external evidence
 
-A Hybrid project may create `sample.external_id_evidence.parquet` (or TSV), or
-an `external_id_evidence` table in the per-run DuckDB. Each row is one
+This is a project-only output, not a sidecar of a single-file
+`biosaur2 sample.mzML.gz --feature-mode hybrid` command. `biosaur2 project run
+--mode hybrid` writes `sample.external_id_evidence.parquet` (or TSV), or an
+`external_id_evidence` table in the per-run DuckDB, after every scheduled run
+succeeds and the external-ID stage is enabled. It is enabled by default for
+Hybrid projects and can be disabled with `--no-external-id`. Each row is one
 donor-assay attempt evaluated against the recipient's own MS1 data.
 
 ```text
@@ -169,7 +173,10 @@ run_b       run_c       MPEPTIDE               3       901.3             11.8   
 
 The donor provides identity and RT guidance only. Accepted intensity is
 extracted from the recipient run. Rejected attempts remain in this evidence
-table for audit, but do not become features.
+table for audit, but do not become features. A successfully completed
+project-level stage can write an empty evidence table when no compatible
+cross-run donor assay is available; that is distinct from a single-file run,
+which has no external-evidence output at all.
 
 ## Per-input DuckDB
 

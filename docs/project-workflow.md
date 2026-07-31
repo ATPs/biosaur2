@@ -73,10 +73,12 @@ biosaur2 project validate --project-db results/project.duckdb
 and the per-file allocation without exceeding it.
 
 For Parquet or TSV, every run directory contains its own `features` and
-`identifications` files. Hybrid projects may add an
-`external_id_evidence` file. With `--format duckdb`, every run instead receives
-one `<run_id>.biosaur2.duckdb` containing `features`, `identifications`, `runs`
-and, after cross-run processing, `external_id_evidence`. The separate
+`identifications` files. A single-file Hybrid command stops there. A successful
+Hybrid project also runs cross-run external-ID processing by default and writes
+one `external_id_evidence` file per run; use `--no-external-id` to disable that
+stage. With `--format duckdb`, every run instead receives one
+`<run_id>.biosaur2.duckdb` containing `features`, `identifications`, `runs` and,
+after cross-run processing, `external_id_evidence`. The separate
 `project.duckdb` is an index and status database, not a replacement for those
 per-run outputs.
 

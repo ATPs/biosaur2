@@ -156,6 +156,24 @@ def test_duckdb_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     assert provenance["hybrid_schema_version"] == "5"
     assert json.loads(provenance["hybrid_summary_json"]) == args["_hybrid_summary"]
     assert (tmp_path / "result.identifications.parquet").is_file()
+    assert not (tmp_path / "result.identifications.tsv").exists()
+
+
+def test_hybrid_duckdb_writes_no_parquet_or_tsv_sidecars(tmp_path):
+    args = _args(tmp_path, database=True, feature_mode="hybrid")
+    manager = DuckDBOutputManager(args)
+    manager.finalize()
+
+    database_path = tmp_path / "result.duckdb"
+    assert database_path.is_file()
+    assert not list(tmp_path.glob("*.parquet"))
+    assert not list(tmp_path.glob("*.tsv"))
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        assert {row[0] for row in connection.execute("show tables").fetchall()} == {
+            "features",
+            "identifications",
+            "runs",
+        }
 
 
 def test_unified_tsv_format_does_not_select_duckdb(tmp_path):

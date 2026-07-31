@@ -144,7 +144,10 @@ class DuckDBOutputManager:
                 self.overwrite,
                 decimals=self.args.get("tsv_float_decimals", "roundtrip"),
             )
-        if self.args.get("feature_mode") == "hybrid":
+        if (
+            self.args.get("feature_mode") == "hybrid"
+            and self.args.get("format") == "tsv"
+        ):
             sinks["identifications"] = _TsvSink(
                 self._target("identifications", "tsv"),
                 MERGED_IDENTIFICATION_COLUMNS,

@@ -210,6 +210,23 @@ def test_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     assert (tmp_path / "hybrid.identifications.parquet").is_file()
 
 
+def test_hybrid_tsv_writes_only_tsv_feature_and_identification_tables(tmp_path):
+    args = _args(
+        tmp_path,
+        o=str(tmp_path / "hybrid.features.tsv"),
+        feature_mode="hybrid",
+    )
+    manager = CompactOutputManager(args)
+    manager.finalize()
+
+    feature_path = tmp_path / "hybrid.features.tsv"
+    identification_path = tmp_path / "hybrid.identifications.tsv"
+    assert feature_path.is_file()
+    assert identification_path.is_file()
+    assert "canonical_peptidoform" in identification_path.read_text().splitlines()[0]
+    assert not list(tmp_path.glob("*.parquet"))
+
+
 def test_write_extra_details_stays_in_same_feature_file(tmp_path):
     args = _args(
         tmp_path,
