@@ -563,9 +563,9 @@ Advanced output notes:
     )
     parser.add_argument(
         '--hybrid-backend',
-        choices=('auto', 'cython', 'rust'),
+        choices=('auto', 'cython'),
         default='auto',
-        help='hybrid numerical accelerator; auto uses Rust when installed and otherwise Cython',
+        help='hybrid numerical accelerator; auto resolves to Cython',
     )
     parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM TSV (optionally compressed); empty runs hybrid without direct PSM assays')
     parser.add_argument('--psm-q-value-max', type=float, default=0.01, help='maximum Percolator PSM q-value accepted before direct-assay construction')
