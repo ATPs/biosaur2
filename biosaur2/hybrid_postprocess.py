@@ -4,6 +4,7 @@ from .hybrid_runtime import *
 from .hybrid_direct_stage import run_direct_stage
 from .hybrid_generic_stage import run_generic_stage
 from .hybrid_residual_stage import run_final_residual_stage
+from .residual import save_residual_ownership_cache
 
 
 def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts, manager, args, direct, generic, residual):
@@ -111,6 +112,20 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         assay_result.audit,
         assay_rows,
     )
+    ownership_cache = args.get("residual_ownership_cache_dir")
+    if ownership_cache:
+        source_path = args.get("file")
+        if not source_path:
+            raise RuntimeError("cannot persist residual ownership without input path")
+        cache_path = save_residual_ownership_cache(
+            residual_ledger, ownership_cache, source_path
+        )
+        args["_residual_ownership_cache"] = {
+            "status": "created",
+            "path": str(cache_path),
+            "claim_count": residual_ledger.claimed_point_count,
+            "state_fingerprint": residual_ledger.state_fingerprint(),
+        }
     logger.debug(
         'Hybrid output append complete: runtime_sec=%.3f feature_rows=%d quant_rows=%d audit_rows=%d',
         time.monotonic() - output_started,

@@ -420,6 +420,7 @@ def _write_project_database(
             "output_format VARCHAR, run_output_path VARCHAR, "
             "features_path VARCHAR, identification_path VARCHAR, "
             "external_evidence_path VARCHAR, raw_ms1_cache_path VARCHAR, "
+            "residual_ownership_cache_path VARCHAR, "
             "input_fingerprint_json VARCHAR, command_json VARCHAR)"
         )
         connection.execute(
@@ -454,14 +455,15 @@ def _write_project_database(
         connection.execute(
             "CREATE TABLE external_summary (run_id VARCHAR, "
             "planned_assay_count BIGINT, evaluated_assay_count BIGINT, "
-            "new_external_feature_count BIGINT, status_counts_json VARCHAR)"
+            "new_external_feature_count BIGINT, new_strict_external_feature_count BIGINT, "
+            "new_weak_external_feature_count BIGINT, status_counts_json VARCHAR)"
         )
         for index, run in enumerate(runs):
             result = results[index]
             paths = result["paths"]
             summary = _summary_for_result(result)
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     index,
                     run.run_id,
@@ -479,6 +481,7 @@ def _write_project_database(
                     paths["identifications"],
                     paths.get("external_evidence"),
                     paths["raw_ms1_cache"],
+                    paths.get("residual_ownership_cache"),
                     json.dumps(_input_fingerprint(run), sort_keys=True),
                     json.dumps(result.get("command", [])),
                 ],
@@ -547,6 +550,19 @@ def _write_project_database(
                         run.run_id,
                         strict_cache_status,
                         strict_cache_detail,
+                    ],
+                )
+                ownership_cache_path = paths.get("residual_ownership_cache")
+                ownership_manifest = (
+                    Path(ownership_cache_path, "manifest.json")
+                    if ownership_cache_path else None
+                )
+                connection.execute(
+                    "INSERT INTO stage_status VALUES (?, 'residual_ownership_cache', ?, ?)",
+                    [
+                        run.run_id,
+                        "success" if ownership_manifest and ownership_manifest.is_file() else "missing",
+                        ownership_cache_path,
                     ],
                 )
                 external_summary = (external_stage or {}).get(
@@ -631,12 +647,14 @@ def _write_project_database(
                 run.run_id, {}
             )
             connection.execute(
-                "INSERT INTO external_summary VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO external_summary VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                     run.run_id,
                     external.get("planned_assay_count"),
                     external.get("evaluated_assay_count"),
                     external.get("new_external_feature_count"),
+                    external.get("new_strict_external_feature_count"),
+                    external.get("new_weak_external_feature_count"),
                     json.dumps(
                         external.get("status_counts", {}), sort_keys=True
                     ),
@@ -662,7 +680,7 @@ def _write_project_database(
                 ],
             )
         connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', '4')"
+            "INSERT INTO project_metadata VALUES ('project_schema_version', '5')"
         )
         connection.execute(
             "INSERT INTO project_metadata VALUES ('resolved_options', ?)",
@@ -707,7 +725,7 @@ def _run_external_stage(runs, results, options):
                 "options": {
                     "ppm": options.get("external_ppm", 8.0),
                     "rt_tolerance_sec": options.get(
-                        "ms2_rt_tolerance_sec", 120.0
+                        "external_rt_tolerance_sec", 120.0
                     ),
                     "min_isotope_cosine": options.get(
                         "external_min_isotope_cosine", 0.8
@@ -717,6 +735,13 @@ def _run_external_stage(runs, results, options):
                     ),
                     "quant_method": options["quant_method"],
                     "baseline": options["feature_baseline"],
+                    "weak_feature": options.get("external_weak_feature", True),
+                    "weak_q_value_max": options.get(
+                        "external_weak_q_value_max", 0.05
+                    ),
+                    "weak_overlap_max": options.get(
+                        "external_weak_overlap_max", 0.20
+                    ),
                 },
             }
         )
@@ -814,6 +839,11 @@ def run_project(manifest, output_dir, project_db, **options):
         required_paths = [paths["run_output"] or paths["features"]]
         if options["mode"] == "hybrid":
             required_paths.append(paths["run_output"] or paths["identifications"])
+        required_cache_paths = []
+        if options["mode"] == "hybrid" and options.get("external_id", False):
+            required_cache_paths = [
+                paths["raw_ms1_cache"], paths["residual_ownership_cache"]
+            ]
         resume_valid = (
             resume_record is not None
             and resume_record["input_fingerprint"] == _input_fingerprint(run)
@@ -821,6 +851,7 @@ def run_project(manifest, output_dir, project_db, **options):
             and resume_record.get("project_option_signature")
             == _resume_option_signature(options)
             and all(Path(path).is_file() for path in required_paths)
+            and all(Path(path).is_dir() for path in required_cache_paths)
         )
         if resume_valid:
             logger.debug("Project run %s: resume signature and outputs match", run.run_id)
@@ -1010,7 +1041,7 @@ def validate_project(project_db):
                 try:
                     with duckdb.connect(str(external), read_only=True) as connection:
                         external_rows = connection.execute(
-                            "SELECT status, feature_id, extraction_q_value "
+                            "SELECT status, feature_id, acceptance_q_value, extraction_q_value "
                             "FROM external_id_evidence"
                         ).fetch_arrow_table().to_pylist()
                 except Exception:
@@ -1018,7 +1049,10 @@ def validate_project(project_db):
             elif Path(external).suffix.lower() == ".parquet":
                 external_rows = pq.read_table(
                     external,
-                    columns=["status", "feature_id", "extraction_q_value"],
+                    columns=[
+                        "status", "feature_id", "acceptance_q_value",
+                        "extraction_q_value",
+                    ],
                 ).to_pylist()
             elif Path(external).suffix.lower() == ".tsv":
                 with Path(external).open(
@@ -1026,10 +1060,13 @@ def validate_project(project_db):
                 ) as handle:
                     external_rows = list(csv.DictReader(handle, delimiter="\t"))
         for row in external_rows:
+            accepted_q_value = row.get("acceptance_q_value")
+            if accepted_q_value in {None, ""}:
+                accepted_q_value = row.get("extraction_q_value")
             if row["status"].startswith("accepted_") and (
                 row["feature_id"] in {None, ""}
                 or int(row["feature_id"]) <= 0
-                or row["extraction_q_value"] in {None, ""}
+                or accepted_q_value in {None, ""}
             ):
                 problems.append(
                     "%s has an invalid accepted external-ID evidence row"

@@ -2,7 +2,11 @@ import numpy as np
 import pytest
 
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
-from biosaur2.residual import ResidualMS1Ledger
+from biosaur2.residual import (
+    ResidualMS1Ledger,
+    load_residual_ownership_cache,
+    save_residual_ownership_cache,
+)
 
 
 def _store():
@@ -47,6 +51,33 @@ def test_residual_ledger_supports_rt_split_and_revert():
     )
     assert ledger.allocation_count == 0
     assert ledger.claimed_point_count == 0
+
+
+def test_residual_ownership_cache_round_trip_preserves_fractional_claims(tmp_path):
+    source = tmp_path / "input.mzML"
+    source.write_bytes(b"synthetic mzML fingerprint")
+    store = _store()
+    ledger = ResidualMS1Ledger(store)
+    trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
+    assert ledger.allocate_component("feature", (trace,), 0, [trace.intensity * 0.4]).accepted
+    cache = save_residual_ownership_cache(
+        ledger, tmp_path / "residual-ownership", source
+    )
+    restored = load_residual_ownership_cache(cache, source, store)
+    assert restored.state_fingerprint() == ledger.state_fingerprint()
+    np.testing.assert_allclose(
+        restored.extract_trace(500.0, 2.0, 0.0, 2.0).intensity,
+        trace.intensity * 0.6,
+    )
+
+
+def test_component_overlap_uses_claimed_intensity_fraction():
+    ledger = ResidualMS1Ledger(_store())
+    trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
+    assert ledger.allocate_component("existing", (trace,), 0, [trace.intensity * 0.21]).accepted
+    overlap = ledger.component_overlap((trace,), 0, [trace.intensity])
+    assert overlap.status == "accepted"
+    assert overlap.fraction == pytest.approx(0.21)
 
 
 def test_residual_ledger_supports_conserved_intensity_split():

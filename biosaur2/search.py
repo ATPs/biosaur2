@@ -287,6 +287,9 @@ def _run_args_for_file(args, filename, multiple_inputs, allocated_workers=None):
         run_args["raw_ms1_cache_dir"] = cache_paths["raw_ms1_cache"]
         run_args["hybrid_stage_cache_dir"] = cache_paths["strict_stage_cache"]
         run_args["hybrid_candidate_cache_dir"] = cache_paths["candidate_cache"]
+        run_args["residual_ownership_cache_dir"] = cache_paths[
+            "residual_ownership_cache"
+        ]
     return run_args
 
 

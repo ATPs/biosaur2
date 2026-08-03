@@ -178,6 +178,15 @@ project-level stage can write an empty evidence table when no compatible
 cross-run donor assay is available; that is distinct from a single-file run,
 which has no external-evidence output at all.
 
+When a standard aligned extraction fails, Project Hybrid can recover a weaker
+recipient feature from a two-point mono hill plus a two-point secondary isotope
+hill. These rows have `acceptance_family=weak_external`, feature origin
+`aligned_external_weak`, and confidence tier `external_id_weak`. Their
+`weak_extraction_q_value` belongs to a separate q-value family (default <=
+0.05). The evidence table records the weak target/decoy gates and
+`weak_overlap_fraction`; accepted weak quantification uses only recipient
+intensity not already assigned to another feature.
+
 ## Per-input DuckDB
 
 `--format duckdb` writes one `sample.biosaur2.duckdb` for each input. A Hybrid

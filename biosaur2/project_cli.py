@@ -149,6 +149,10 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument("--external-q-value-max", type=float, default=0.01, help=_advanced_help(show_all, "maximum target/decoy q-value for aligned recipient extraction"))
         parser.add_argument("--external-ppm", type=float, default=8.0, help=_advanced_help(show_all, "recipient-run m/z tolerance in ppm for aligned external assays"))
         parser.add_argument(
+            "--external-rt-tolerance-sec", type=float, default=120.0,
+            help=_advanced_help(show_all, "maximum recipient apex distance from aligned donor RT in seconds"),
+        )
+        parser.add_argument(
             "--external-alignment-min-anchors", type=int, default=5,
             help=_advanced_help(show_all, "minimum shared direct peptide/charge anchors required for RT alignment"),
         )
@@ -159,6 +163,19 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument(
             "--external-min-isotope-cosine", type=float, default=0.8,
             help=_advanced_help(show_all, "minimum theoretical/observed isotope cosine for an external candidate"),
+        )
+        parser.add_argument(
+            "--external-weak-feature", action=argparse.BooleanOptionalAction,
+            default=True,
+            help=_advanced_help(show_all, "enable/disable donor-guided 2+2 isotope weak-feature recovery"),
+        )
+        parser.add_argument(
+            "--external-weak-q-value-max", type=float, default=0.05,
+            help=_advanced_help(show_all, "maximum independent target/decoy q-value for weak external recovery"),
+        )
+        parser.add_argument(
+            "--external-weak-overlap-max", type=float, default=0.20,
+            help=_advanced_help(show_all, "maximum fraction of weak candidate intensity already explained by existing features"),
         )
         parser.add_argument("--generic-ms2-refine", action=argparse.BooleanOptionalAction, default=True, help="enable/disable unidentified-MS2 hypotheses and residual local recovery")
         parser.add_argument("--generic-q-value-max", type=float, default=0.01, help="estimated false-discovery limit for unidentified-MS2 associations from target/decoy (real-versus-shifted precursor) competition; not the PSM q-value")
@@ -217,6 +234,8 @@ README.md and examples/hybrid_project_manifest.tsv.
             parser.error("--external-q-value-max must be finite and in [0, 1]")
         if not math.isfinite(args.external_ppm) or args.external_ppm <= 0:
             parser.error("--external-ppm must be finite and positive")
+        if not math.isfinite(args.external_rt_tolerance_sec) or args.external_rt_tolerance_sec < 0:
+            parser.error("--external-rt-tolerance-sec must be finite and nonnegative")
         if args.external_alignment_min_anchors < 1:
             parser.error("--external-alignment-min-anchors must be positive")
         if (
@@ -233,6 +252,16 @@ README.md and examples/hybrid_project_manifest.tsv.
             parser.error(
                 "--external-min-isotope-cosine must be finite and in [0, 1]"
             )
+        if (
+            not math.isfinite(args.external_weak_q_value_max)
+            or not 0 <= args.external_weak_q_value_max <= 1
+        ):
+            parser.error("--external-weak-q-value-max must be finite and in [0, 1]")
+        if (
+            not math.isfinite(args.external_weak_overlap_max)
+            or not 0 <= args.external_weak_overlap_max <= 1
+        ):
+            parser.error("--external-weak-overlap-max must be finite and in [0, 1]")
         if (
             not math.isfinite(args.ms2_rt_tolerance_sec)
             or args.ms2_rt_tolerance_sec < 0

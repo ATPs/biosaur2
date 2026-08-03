@@ -391,16 +391,24 @@ For compatible alignment groups, the project stage then:
 2. builds shared high-confidence peptide/charge anchors;
 3. fits robust monotonic RT mappings with minimum-anchor and MAD checks;
 4. plans missing exact assays in recipient runs;
-5. extracts and quantifies recipient-run MS1 signal;
-6. applies separate target/decoy and isotope-quality controls;
+5. extracts and quantifies recipient-run MS1 signal; predicted RT is a local
+   centre rather than a required exact event scan;
+6. applies separate target/decoy and isotope-quality controls; a separate
+   donor-guided weak family can accept a 2-point mono plus 2-point secondary
+   isotope component at q <= 0.05 after residual-overlap control;
 7. writes external evidence and project summaries.
 
 Donor intensity is never copied into a recipient. An external assay may add no
-feature when the recipient lacks defensible MS1 evidence.
+feature when the recipient lacks defensible MS1 evidence. Weak recovery rejects
+candidates whose intensity is more than 20% already explained by accepted
+recipient features, subtracts the remaining assigned intensity, and quantifies
+only the residual recipient component. Weak transferred features never become
+donors themselves.
 
 ## Caching and performance design
 
-Three cache layers accelerate repeated development without changing scientific
+Four cache layers accelerate repeated development without changing scientific
+results:
 results:
 
 1. **Raw MS1 cache**: compact memory-mappable original centroids and scan
@@ -409,6 +417,8 @@ results:
    bounded direct processed-hill competitors. Current format is cache v2.
 3. **Candidate cache**: expensive generic target/decoy local candidates keyed
    by the residual ownership state.
+4. **Residual-ownership cache**: final sparse raw-point intensity claims used
+   by project external recovery to prevent double quantification.
 
 Cache keys include source fingerprints, scientific parameters and relevant
 implementation signatures. Scheduling-only/downstream options do not

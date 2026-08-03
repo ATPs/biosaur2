@@ -55,6 +55,7 @@ q-value:
 | `--psm-q-value-max` | Is the supplied peptide-spectrum assignment reliable enough to build a direct assay? |
 | `--generic-q-value-max` | Does an unidentified-MS2 precursor associate with MS1 evidence more convincingly than shifted decoys? |
 | `--external-q-value-max` | Does a donor-guided recipient-run extraction beat its project-level decoy? |
+| `--external-weak-q-value-max` | Does a two-point donor-guided weak recovery beat its separate project-level decoy family? |
 
 Passing one threshold does not imply passing another.
 

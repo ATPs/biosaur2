@@ -203,7 +203,7 @@ def test_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     metadata = pq.ParquetFile(
         tmp_path / "hybrid.features.parquet"
     ).metadata.metadata
-    assert metadata[b"biosaur2_hybrid_schema_version"] == b"5"
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"6"
     assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
         "_hybrid_summary"
     ]

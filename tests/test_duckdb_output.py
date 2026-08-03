@@ -153,7 +153,7 @@ def test_duckdb_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     manager.finalize()
     metadata = pq.ParquetFile(tmp_path / "result.features.parquet").metadata.metadata
     provenance = json.loads(metadata[b"biosaur2_provenance_json"])
-    assert provenance["hybrid_schema_version"] == "5"
+    assert provenance["hybrid_schema_version"] == "6"
     assert json.loads(provenance["hybrid_summary_json"]) == args["_hybrid_summary"]
     assert (tmp_path / "result.identifications.parquet").is_file()
     assert not (tmp_path / "result.identifications.tsv").exists()

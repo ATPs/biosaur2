@@ -326,7 +326,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert json.loads(persisted[1]) == hybrid_summary["generic_summary"]
     assert external == (10, 9, 2)
     assert alignment == ("explicit:g", "run", "run", "other", "accepted")
-    assert schema_version == "4"
+    assert schema_version == "5"
     assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")

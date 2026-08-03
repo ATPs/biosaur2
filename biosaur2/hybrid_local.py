@@ -82,6 +82,7 @@ def extract_local_feature(
     allow_partial_envelope: bool = False,
     mz_shift_ppm: float = 0.0,
     rt_center_sec: Optional[float] = None,
+    require_event_scan: bool = True,
 ) -> LocalFeatureCandidate:
     """Extract, repair and jointly segment a bounded exact-assay region."""
 
@@ -213,6 +214,7 @@ def extract_local_feature(
         assay, selected_peaks, traces, theoretical, refinement, component,
         event_position, mono_points, all_points, min_mono_points, quant_method,
         baseline, allow_two_point_exception, allow_partial_envelope,
+        require_event_scan,
     )
 
 
@@ -220,6 +222,7 @@ def _finalize_local_component(
     assay, selected_peaks, traces, theoretical, refinement, component,
     event_position, mono_points, all_points, min_mono_points, quant_method,
     baseline, allow_two_point_exception, allow_partial_envelope,
+    require_event_scan,
 ):
     start, end = component.start, component.end
     segment_rt = traces[0].rt_sec[start:end]
@@ -240,7 +243,9 @@ def _finalize_local_component(
         event_inside_component
         and segment_values[selected_trace_position][event_position - start] > 0
     )
-    if not event_inside_component or not selected_allocated_at_event:
+    if require_event_scan and (
+        not event_inside_component or not selected_allocated_at_event
+    ):
         return LocalFeatureCandidate(
             assay=assay,
             status=(
