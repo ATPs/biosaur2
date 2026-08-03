@@ -62,6 +62,21 @@ class ComponentOverlap:
         return self.overlapping_intensity / self.requested_intensity
 
 
+@dataclass(frozen=True)
+class ComponentFootprint:
+    """Compact raw-point representation of a fitted component.
+
+    Footprints deliberately use raw, rather than residual, intensity when
+    distributing each fitted trace value.  They can therefore be built by a
+    spawned raw-extraction worker and compared against the recipient's later,
+    current ownership ledger without transferring candidate traces.
+    """
+
+    status: str
+    requested_intensity: float
+    allocations: tuple[RawPointAllocation, ...]
+
+
 class ResidualMS1Ledger:
     """Sparse reversible ownership ledger over one immutable RawMS1Store."""
 
@@ -152,6 +167,19 @@ class ResidualMS1Ledger:
         re-extracted on residual signal.
         """
 
+        footprint = self.component_footprint(
+            traces, segment_start, allocated_trace_values
+        )
+        return self.footprint_overlap(footprint)
+
+    def component_footprint(
+        self,
+        traces: Sequence[ExtractedTrace],
+        segment_start: int,
+        allocated_trace_values,
+    ) -> ComponentFootprint:
+        """Build a serializable raw-point footprint for one component."""
+
         matrix = np.asarray(allocated_trace_values, dtype=np.float64)
         if matrix.ndim != 2 or matrix.shape[0] != len(traces):
             raise ValueError("allocated component must be channels by scans")
@@ -159,14 +187,14 @@ class ResidualMS1Ledger:
             raise ValueError("allocated component intensity must be finite and nonnegative")
         requested = float(np.sum(matrix, dtype=np.float64))
         if requested <= self.tolerance:
-            return ComponentOverlap("no_candidate_intensity", requested, 0.0)
+            return ComponentFootprint("no_candidate_intensity", requested, ())
         proposed = {}
         for channel, trace in enumerate(traces):
             for local_position in np.flatnonzero(matrix[channel] > self.tolerance):
                 position = segment_start + int(local_position)
                 local_scan = self._local_scan_index(int(trace.scan_index[position]))
                 if local_scan is None:
-                    return ComponentOverlap("source_scan_not_found", requested, 0.0)
+                    return ComponentFootprint("source_scan_not_found", requested, ())
                 scan_start = int(self.store.offsets[local_scan])
                 scan_end = int(self.store.offsets[local_scan + 1])
                 mz_values = self.store.mz[scan_start:scan_end]
@@ -174,26 +202,46 @@ class ResidualMS1Ledger:
                 start = int(np.searchsorted(mz_values, float(trace.target_mz) - tolerance, side="left"))
                 end = int(np.searchsorted(mz_values, float(trace.target_mz) + tolerance, side="right"))
                 if end <= start:
-                    return ComponentOverlap("candidate_point_not_found", requested, 0.0)
+                    return ComponentFootprint("candidate_point_not_found", requested, ())
                 indices = np.arange(scan_start + start, scan_start + end, dtype=np.int64)
                 raw = np.asarray(self.store.intensity[indices], dtype=np.float64)
                 positive = raw > self.tolerance
                 if not np.any(positive):
-                    return ComponentOverlap("candidate_point_not_found", requested, 0.0)
+                    return ComponentFootprint("candidate_point_not_found", requested, ())
                 indices = indices[positive]
                 raw = raw[positive]
                 available = float(np.sum(raw, dtype=np.float64))
                 amount = float(matrix[channel, local_position])
                 if amount > available + max(self.tolerance, self.tolerance * available):
-                    return ComponentOverlap("candidate_raw_overallocation", requested, 0.0)
+                    return ComponentFootprint("candidate_raw_overallocation", requested, ())
                 distributed = amount * raw / available
                 distributed[-1] += amount - float(np.sum(distributed, dtype=np.float64))
                 for point_index, value in zip(indices, distributed):
                     proposed[int(point_index)] = proposed.get(int(point_index), 0.0) + float(value)
-        overlap = float(
-            sum(min(value, self._claimed.get(index, 0.0)) for index, value in proposed.items())
+        return ComponentFootprint(
+            "accepted",
+            requested,
+            tuple(
+                RawPointAllocation(int(point_index), float(value))
+                for point_index, value in sorted(proposed.items())
+                if value > self.tolerance
+            ),
         )
-        return ComponentOverlap("accepted", requested, overlap)
+
+    def footprint_overlap(self, footprint: ComponentFootprint) -> ComponentOverlap:
+        """Measure a raw footprint against this ledger's current claims."""
+
+        if footprint.status != "accepted":
+            return ComponentOverlap(
+                footprint.status, footprint.requested_intensity, 0.0
+            )
+        overlap = float(
+            sum(
+                min(value.intensity, self._claimed.get(value.point_index, 0.0))
+                for value in footprint.allocations
+            )
+        )
+        return ComponentOverlap("accepted", footprint.requested_intensity, overlap)
 
     def _local_scan_index(self, source_scan_index: int):
         values = self.store.source_scan_index

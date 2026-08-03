@@ -1,9 +1,13 @@
+import csv
+import os
 from types import SimpleNamespace
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
+from biosaur2 import external
 from biosaur2.alignment import RTAlignmentModel
 from biosaur2.chemistry import isotope_library, parse_peptidoform
 from biosaur2.external import (
@@ -140,6 +144,8 @@ def test_external_target_decoy_extraction_adds_one_feature_idempotently(tmp_path
     assert evidence[0]["status"] == "accepted_new_external_feature"
     assert evidence[0]["feature_id"] == 1
     assert evidence[0]["target_mono_points"] == 7
+    metadata = pq.read_schema(paths["external_evidence"]).metadata
+    assert metadata[b"biosaur2_external_evidence_schema_version"] == b"3"
 
     second = run_external_recipient(task, workers=2)
     assert second["new_external_feature_count"] == 0
@@ -147,6 +153,70 @@ def test_external_target_decoy_extraction_adds_one_feature_idempotently(tmp_path
     evidence = pq.read_table(paths["external_evidence"]).to_pylist()
     assert evidence[0]["status"] == "accepted_matched_existing_feature"
     assert evidence[0]["feature_id"] == 1
+    assert pq.read_table(paths["features"]).to_pylist()[0] == feature
+    with pytest.raises(RuntimeError, match="cannot deterministically restore"):
+        run_external_recipient({**task, "plans": ()}, workers=2)
+    assert pq.read_table(paths["features"]).to_pylist()[0] == feature
+
+    tsv_paths = {**paths, "external_evidence": str(tmp_path / "external.tsv")}
+    assert run_external_recipient(
+        {**task, "paths": tsv_paths}, workers=2
+    )["new_external_feature_count"] == 0
+    with open(tsv_paths["external_evidence"], newline="", encoding="utf-8") as handle:
+        tsv_columns = next(csv.reader(handle, delimiter="\t"))
+
+    import duckdb
+
+    database = tmp_path / "recipient.biosaur2.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            "CREATE TABLE features AS SELECT * FROM read_parquet(?)",
+            [paths["features"]],
+        )
+    duckdb_paths = {
+        **paths,
+        "features": str(database),
+        "external_evidence": str(database),
+        "run_output": str(database),
+        "format": "duckdb",
+    }
+    assert run_external_recipient(
+        {**task, "paths": duckdb_paths}, workers=2
+    )["new_external_feature_count"] == 0
+    with duckdb.connect(str(database), read_only=True) as connection:
+        duckdb_columns = [
+            row[0] for row in connection.execute(
+                "DESCRIBE external_id_evidence"
+            ).fetchall()
+        ]
+    parquet_columns = pq.read_table(paths["external_evidence"]).schema.names
+    assert tsv_columns == parquet_columns == duckdb_columns
+
+
+def test_raw_workers_cap_native_threads_and_restore_parent_environment(monkeypatch):
+    seen = {}
+
+    class FailingExecutor:
+        def __init__(self, *args, **kwargs):
+            seen.update({name: os.environ.get(name) for name in external._NATIVE_THREAD_ENVIRONMENT})
+
+        def __enter__(self):
+            raise RuntimeError("stop before worker startup")
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(external, "ProcessPoolExecutor", FailingExecutor)
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "7")
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    with pytest.raises(RuntimeError, match="stop before worker startup"):
+        external._parallel_raw_extract(
+            [(None, None, 0.0), (None, None, 0.0)], 2,
+            store=None, raw_ms1_cache="unused", mzml_path="unused", options={},
+        )
+    assert set(seen.values()) == {"1"}
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "7"
+    assert "OMP_NUM_THREADS" not in os.environ
 
 
 def test_external_weak_recovery_accepts_two_point_mono_and_secondary(tmp_path):
@@ -221,6 +291,8 @@ def test_external_weak_recovery_accepts_two_point_mono_and_secondary(tmp_path):
     assert accepted[0]["weak_target_mono_points"] == 2
     assert accepted[0]["weak_target_secondary_channels"] >= 1
     assert accepted[0]["weak_extraction_q_value"] == 0.05
+    assert accepted[0]["weak_residual_target_evaluated"] is True
+    assert accepted[0]["weak_raw_target_overlap_fraction"] == accepted[0]["weak_overlap_fraction"]
 
 
 def test_external_weak_recovery_rejects_component_claimed_by_existing_feature(tmp_path):
@@ -304,3 +376,6 @@ def test_external_weak_recovery_rejects_component_claimed_by_existing_feature(tm
     evidence = pq.read_table(paths["external_evidence"]).to_pylist()
     assert all(row["status"] == "weak_target_overlap_above_limit" for row in evidence)
     assert all(row["weak_overlap_fraction"] > 0.20 for row in evidence)
+    assert all(row["weak_residual_target_evaluated"] is False for row in evidence)
+    assert all(row["weak_target_extraction_status"] is None for row in evidence)
+    assert all(row["weak_raw_target_extraction_status"] is not None for row in evidence)

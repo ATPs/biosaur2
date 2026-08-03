@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import json
 import logging
 import math
+import os
 from multiprocessing import get_context
 from pathlib import Path
 import shutil
@@ -30,6 +31,10 @@ from .confidence import (
     TargetDecoyCompetition,
     deterministic_decoy_shift,
     target_decoy_q_values,
+)
+from .external_evidence import (
+    EXTERNAL_EVIDENCE_SCHEMA_VERSION,
+    evidence_schema as _evidence_schema,
 )
 from .hybrid import (
     DirectAssay,
@@ -54,7 +59,6 @@ from .residual import (
 from .schema import compact_schemas
 
 
-EXTERNAL_EVIDENCE_SCHEMA_VERSION = "2"
 logger = logging.getLogger(__name__)
 
 
@@ -62,8 +66,16 @@ logger = logging.getLogger(__name__)
 # The arrays are NumPy memmaps, so workers share the kernel page cache without
 # pickling the 200+ MiB MS1 store for every assay.
 _EXTERNAL_RAW_STORE = None
-_EXTERNAL_RAW_LEDGER = None
 _EXTERNAL_RAW_OPTIONS = None
+
+_NATIVE_THREAD_ENVIRONMENT = (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
 
 
 @dataclass(frozen=True)
@@ -89,9 +101,10 @@ class ExternalPlan:
     alignment: RTAlignmentModel
 
 
-def _external_raw_summary(store, ledger, assay, decoy_assay, predicted_rt_sec, options):
+def _external_raw_summary(store, assay, decoy_assay, predicted_rt_sec, options):
     """Extract one raw pair and retain only data needed before re-extraction."""
 
+    raw_ledger = ResidualMS1Ledger(store)
     strict_target = _extract_external_candidate(
         store, assay, options, min_mono_points=3
     )
@@ -132,18 +145,18 @@ def _external_raw_summary(store, ledger, assay, decoy_assay, predicted_rt_sec, o
             candidate, predicted_rt_sec, ppm=ppm,
             rt_tolerance_sec=rt_tolerance, min_isotope_cosine=min_cosine,
         )
-        overlap = None
+        footprint = None
         if weak_gate == "passed":
-            preview = ledger.component_overlap(
+            footprint = raw_ledger.component_footprint(
                 candidate.traces, candidate.segment_slice[0],
                 _candidate_segment_values(candidate),
             )
-            overlap = preview.fraction if preview.status == "accepted" else 1.0
         return {
             "weak_gate": weak_gate,
-            "weak_overlap": overlap,
+            "footprint": footprint,
             "status": candidate.status,
             "mono_points": candidate.mono_point_count,
+            "secondary_channels": _candidate_secondary_channel_count(candidate, 2),
             "isotope_cosine": candidate.isotope_cosine,
             "mass_error_ppm": candidate.mono_mz_error_ppm,
             "rt_apex_sec": candidate.rt_apex_sec,
@@ -161,19 +174,11 @@ def _external_raw_summary(store, ledger, assay, decoy_assay, predicted_rt_sec, o
     }
 
 
-def _initialize_external_raw_worker(
-    raw_ms1_cache, mzml_path, residual_ownership_cache, options
-):
+def _initialize_external_raw_worker(raw_ms1_cache, mzml_path, options):
     """Open one recipient's immutable inputs in a spawned extraction worker."""
 
-    global _EXTERNAL_RAW_STORE, _EXTERNAL_RAW_LEDGER, _EXTERNAL_RAW_OPTIONS
+    global _EXTERNAL_RAW_STORE, _EXTERNAL_RAW_OPTIONS
     _EXTERNAL_RAW_STORE = load_raw_ms1_cache(raw_ms1_cache, mzml_path)
-    if residual_ownership_cache:
-        _EXTERNAL_RAW_LEDGER = load_residual_ownership_cache(
-            residual_ownership_cache, mzml_path, _EXTERNAL_RAW_STORE
-        )
-    else:
-        _EXTERNAL_RAW_LEDGER = ResidualMS1Ledger(_EXTERNAL_RAW_STORE)
     _EXTERNAL_RAW_OPTIONS = options
 
 
@@ -182,41 +187,48 @@ def _extract_external_raw_summary_worker(item):
 
     assay, decoy_assay, predicted_rt_sec = item
     return _external_raw_summary(
-        _EXTERNAL_RAW_STORE, _EXTERNAL_RAW_LEDGER, assay, decoy_assay,
+        _EXTERNAL_RAW_STORE, assay, decoy_assay,
         predicted_rt_sec, _EXTERNAL_RAW_OPTIONS,
     )
 
 
 def _parallel_raw_extract(
-    items, workers, *, store, ledger, raw_ms1_cache, mzml_path,
-    residual_ownership_cache, options,
+    items, workers, *, store, raw_ms1_cache, mzml_path, options,
 ):
     """Use spawned processes for Python-bound raw local-feature extraction."""
 
     if int(workers) <= 1 or len(items) < 2:
         return [
             _external_raw_summary(
-                store, ledger, assay, decoy_assay, predicted_rt_sec, options
+                store, assay, decoy_assay, predicted_rt_sec, options
             )
             for assay, decoy_assay, predicted_rt_sec in items
         ]
     worker_count = min(int(workers), len(items))
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        mp_context=get_context("spawn"),
-        initializer=_initialize_external_raw_worker,
-        initargs=(
-            str(raw_ms1_cache), str(mzml_path),
-            None if residual_ownership_cache is None else str(residual_ownership_cache),
-            options,
-        ),
-    ) as executor:
-        return list(
-            executor.map(
-                _extract_external_raw_summary_worker, items,
-                chunksize=max(1, len(items) // (worker_count * 8)),
+    previous_environment = {
+        name: os.environ.get(name) for name in _NATIVE_THREAD_ENVIRONMENT
+    }
+    try:
+        for name in _NATIVE_THREAD_ENVIRONMENT:
+            os.environ[name] = "1"
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=get_context("spawn"),
+            initializer=_initialize_external_raw_worker,
+            initargs=(str(raw_ms1_cache), str(mzml_path), options),
+        ) as executor:
+            return list(
+                executor.map(
+                    _extract_external_raw_summary_worker, items,
+                    chunksize=max(1, len(items) // (worker_count * 8)),
+                )
             )
-        )
+    finally:
+        for name, value in previous_environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _extract_external_residual_pair(item):
@@ -236,6 +248,16 @@ def _extract_external_residual_pair(item):
         else None
     )
     return target, decoy
+
+
+def _weak_raw_overlap(summary, ledger):
+    """Evaluate a raw footprint against ownership after strict allocation."""
+
+    footprint = summary.get("footprint")
+    if summary["weak_gate"] != "passed" or footprint is None:
+        return None
+    preview = ledger.footprint_overlap(footprint)
+    return preview.fraction if preview.status == "accepted" else 1.0
 
 
 def _parallel_extract(function, items, workers):
@@ -733,61 +755,65 @@ def _equivalent_features(candidate, features, ppm):
     return sorted(matches, key=lambda row: int(row["feature_idx"]))
 
 
-def _evidence_schema():
-    return pa.schema(
-        [
-            pa.field("target_run", pa.string(), nullable=False),
-            pa.field("source_run", pa.string(), nullable=False),
-            pa.field("alignment_group", pa.string(), nullable=False),
-            pa.field("ion_key", pa.string(), nullable=False),
-            pa.field("canonical_peptidoform", pa.string(), nullable=False),
-            pa.field("charge", pa.int16(), nullable=False),
-            pa.field("faims_cv", pa.float32()),
-            pa.field("donor_assay_id", pa.int32(), nullable=False),
-            pa.field("donor_psm_id", pa.string(), nullable=False),
-            pa.field("donor_q_value", pa.float64(), nullable=False),
-            pa.field("donor_rt_apex_sec", pa.float64(), nullable=False),
-            pa.field("predicted_rt_sec", pa.float64(), nullable=False),
-            pa.field("alignment_method", pa.string(), nullable=False),
-            pa.field("alignment_anchor_count", pa.int32(), nullable=False),
-            pa.field("alignment_inlier_count", pa.int32(), nullable=False),
-            pa.field("alignment_residual_mad_sec", pa.float64()),
-            pa.field("decoy_neutral_shift", pa.float64(), nullable=False),
-            pa.field("target_score", pa.float64()),
-            pa.field("decoy_score", pa.float64()),
-            pa.field("target_extraction_status", pa.string(), nullable=False),
-            pa.field("target_gate_status", pa.string(), nullable=False),
-            pa.field("decoy_extraction_status", pa.string(), nullable=False),
-            pa.field("decoy_gate_status", pa.string(), nullable=False),
-            pa.field("competition_winner", pa.string(), nullable=False),
-            pa.field("extraction_q_value", pa.float64(), nullable=False),
-            pa.field("status", pa.string(), nullable=False),
-            pa.field("feature_id", pa.int64()),
-            pa.field("target_mono_points", pa.int32(), nullable=False),
-            pa.field("target_isotope_cosine", pa.float32()),
-            pa.field("target_mass_error_ppm", pa.float32()),
-            pa.field("target_rt_error_sec", pa.float64()),
-            pa.field("weak_target_extraction_status", pa.string()),
-            pa.field("weak_target_gate_status", pa.string()),
-            pa.field("weak_decoy_extraction_status", pa.string()),
-            pa.field("weak_decoy_gate_status", pa.string()),
-            pa.field("weak_target_score", pa.float64()),
-            pa.field("weak_decoy_score", pa.float64()),
-            pa.field("weak_competition_winner", pa.string()),
-            pa.field("weak_extraction_q_value", pa.float64()),
-            pa.field("weak_target_mono_points", pa.int32()),
-            pa.field("weak_target_secondary_channels", pa.int16()),
-            pa.field("weak_target_isotope_cosine", pa.float32()),
-            pa.field("weak_target_mass_error_ppm", pa.float32()),
-            pa.field("weak_target_rt_error_sec", pa.float64()),
-            pa.field("weak_overlap_fraction", pa.float64()),
-            pa.field("acceptance_family", pa.string()),
-            pa.field("acceptance_q_value", pa.float64()),
-        ],
-        metadata={
-            b"biosaur2_external_evidence_schema_version": EXTERNAL_EVIDENCE_SCHEMA_VERSION.encode()
-        },
-    )
+def _restore_initial_external_claims(ledger, store, feature_rows, prepared, options, ppm):
+    """Rebuild external ownership omitted from the pre-external cache.
+
+    Hybrid post-processing persists ownership before Project external recovery.
+    A resumed Project run therefore starts with external rows in its feature
+    output but without their claims in the ledger.  Reconstructing those
+    claims before any new competition makes a resume equivalent to the first
+    execution and fails safely if the output cannot be reconstructed.
+    """
+
+    origins = {
+        FEATURE_ORIGIN_ALIGNED_EXTERNAL: ("strict", 3),
+        FEATURE_ORIGIN_ALIGNED_EXTERNAL_WEAK: ("weak", 2),
+    }
+    restored = set()
+    for row in sorted(feature_rows, key=lambda value: int(value["feature_idx"])):
+        origin = row.get("feature_origin")
+        if origin not in origins:
+            continue
+        family, min_mono_points = origins[origin]
+        matching = []
+        for plan, assay, _decoy_assay, _shift in prepared:
+            target_mz = assay.isotope_peaks[0].mz
+            if int(row["charge"]) != assay.charge:
+                continue
+            if not _faims_equal(row.get("FAIMS"), assay.faims_cv):
+                continue
+            if abs(float(row["mz"]) - target_mz) * 1e6 / target_mz > ppm:
+                continue
+            candidate = _extract_external_candidate(
+                store, assay, options, min_mono_points=min_mono_points
+            )
+            if _equivalent_features(candidate, (row,), ppm):
+                matching.append((plan, candidate))
+        if len(matching) != 1:
+            raise RuntimeError(
+                "cannot deterministically restore %s external feature %s "
+                "from current Project plans (matches=%d)"
+                % (family, row["feature_idx"], len(matching))
+            )
+        _plan, raw_candidate = matching[0]
+        residual_candidate = _extract_external_candidate(
+            ledger.materialize(), raw_candidate.assay, options,
+            min_mono_points=min_mono_points,
+        )
+        start, _end = residual_candidate.segment_slice
+        allocation = ledger.allocate_component(
+            ("resume_external_" + family, int(row["feature_idx"])),
+            residual_candidate.traces,
+            start,
+            _candidate_segment_values(residual_candidate),
+        )
+        if not allocation.accepted:
+            raise RuntimeError(
+                "cannot restore %s external feature %s: %s"
+                % (family, row["feature_idx"], allocation.status)
+            )
+        restored.add(int(row["feature_idx"]))
+    return restored
 
 
 def _write_like_existing(table, final_path, *, schema=None):
@@ -915,10 +941,8 @@ def run_external_recipient(task, workers=1):
         ],
         workers,
         store=store,
-        ledger=ledger,
         raw_ms1_cache=paths["raw_ms1_cache"],
         mzml_path=run.mzml_path,
-        residual_ownership_cache=ownership_path,
         options=options,
     )
     raw_extract_sec = time.monotonic() - raw_started
@@ -953,6 +977,14 @@ def run_external_recipient(task, workers=1):
     }
     feature_table = _read_table(paths["features"], "features")
     feature_rows = feature_table.to_pylist()
+    restored_external_feature_ids = _restore_initial_external_claims(
+        ledger, store, feature_rows, prepared, options, ppm
+    )
+    if restored_external_feature_ids:
+        logger.info(
+            "External-ID run %s: restored ownership for %d existing external features",
+            run.run_id, len(restored_external_feature_ids),
+        )
     new_feature_rows = []
     new_quant_rows = []
     evidence_rows = []
@@ -1053,15 +1085,23 @@ def run_external_recipient(task, workers=1):
             raw_decoy = record["raw_weak_decoy"]
             raw_target_gate = raw_target["weak_gate"]
             raw_decoy_gate = raw_decoy["weak_gate"]
-            target_overlap = raw_target["weak_overlap"]
-            decoy_overlap = raw_decoy["weak_overlap"]
+            # Strict external features have now been allocated, including
+            # claims reconstructed for a resumed Project run.  Raw footprints
+            # must be compared against this current ownership state rather
+            # than the stale state seen by spawned extraction workers.
+            target_overlap = _weak_raw_overlap(raw_target, ledger)
+            decoy_overlap = _weak_raw_overlap(raw_decoy, ledger)
             record.update({
                 "weak_raw_target": raw_target, "weak_raw_decoy": raw_decoy,
                 "weak_target": None, "weak_decoy": None,
-                "weak_target_gate": raw_target_gate,
-                "weak_decoy_gate": raw_decoy_gate,
+                "weak_raw_target_gate": raw_target_gate,
+                "weak_raw_decoy_gate": raw_decoy_gate,
+                "weak_target_gate": None,
+                "weak_decoy_gate": None,
                 "weak_target_overlap": target_overlap,
                 "weak_decoy_overlap": decoy_overlap,
+                "weak_residual_target_evaluated": False,
+                "weak_residual_decoy_evaluated": False,
             })
             weak_items.append(
                 (
@@ -1106,6 +1146,7 @@ def run_external_recipient(task, workers=1):
             plan = record["plan"]
             if residual_target is not None:
                 record["weak_target"] = residual_target
+                record["weak_residual_target_evaluated"] = True
                 record["weak_target_gate"] = _weak_candidate_gate_status(
                     residual_target, plan.predicted_rt_sec, ppm=ppm,
                     rt_tolerance_sec=rt_tolerance,
@@ -1113,6 +1154,7 @@ def run_external_recipient(task, workers=1):
                 )
             if residual_decoy is not None:
                 record["weak_decoy"] = residual_decoy
+                record["weak_residual_decoy_evaluated"] = True
                 record["weak_decoy_gate"] = _weak_candidate_gate_status(
                     residual_decoy, plan.predicted_rt_sec, ppm=ppm,
                     rt_tolerance_sec=rt_tolerance,
@@ -1154,6 +1196,11 @@ def run_external_recipient(task, workers=1):
         record["weak_result"] = weak_result
         if weak_result is None:
             continue
+        if record.get("weak_raw_target_gate") != "passed":
+            record["status"] = "weak_target_raw_" + record.get(
+                "weak_raw_target_gate", "not_evaluated"
+            )
+            continue
         if (
             record.get("weak_target_overlap") is not None
             and record["weak_target_overlap"] > weak_overlap_max
@@ -1167,6 +1214,9 @@ def run_external_recipient(task, workers=1):
             record["status"] = "weak_target_q_value_above_limit"
             continue
         target = record["weak_target"]
+        if target is None:
+            record["status"] = "weak_target_residual_not_evaluated"
+            continue
         equivalents = _equivalent_features(target, feature_rows, ppm)
         if len(equivalents) == 1:
             record["feature_id"] = int(equivalents[0]["feature_idx"])
@@ -1217,8 +1267,10 @@ def run_external_recipient(task, workers=1):
         raw_target = record["raw_target"]
         raw_decoy = record["raw_decoy"]
         result = record["strict_result"]
-        weak_target = record.get("weak_target") or record.get("weak_raw_target")
-        weak_decoy = record.get("weak_decoy") or record.get("weak_raw_decoy")
+        raw_weak_target = record["raw_weak_target"]
+        raw_weak_decoy = record["raw_weak_decoy"]
+        weak_target = record.get("weak_target")
+        weak_decoy = record.get("weak_decoy")
         weak_result = record.get("weak_result")
         status = record["status"]
         counts[status] += 1
@@ -1254,14 +1306,32 @@ def run_external_recipient(task, workers=1):
                 "target_isotope_cosine": raw_target["isotope_cosine"],
                 "target_mass_error_ppm": raw_target["mass_error_ppm"],
                 "target_rt_error_sec": None if raw_target["rt_apex_sec"] is None else abs(raw_target["rt_apex_sec"] - plan.predicted_rt_sec),
+                "weak_raw_target_extraction_status": raw_weak_target["status"],
+                "weak_raw_target_gate_status": raw_weak_target["weak_gate"],
+                "weak_raw_decoy_extraction_status": raw_weak_decoy["status"],
+                "weak_raw_decoy_gate_status": raw_weak_decoy["weak_gate"],
+                "weak_raw_target_mono_points": raw_weak_target["mono_points"],
+                "weak_raw_target_secondary_channels": raw_weak_target.get("secondary_channels"),
+                "weak_raw_target_isotope_cosine": raw_weak_target["isotope_cosine"],
+                "weak_raw_target_mass_error_ppm": raw_weak_target["mass_error_ppm"],
+                "weak_raw_target_rt_error_sec": (
+                    None if raw_weak_target["rt_apex_sec"] is None else
+                    abs(raw_weak_target["rt_apex_sec"] - plan.predicted_rt_sec)
+                ),
+                "weak_raw_target_overlap_fraction": record.get("weak_target_overlap"),
+                "weak_raw_decoy_overlap_fraction": record.get("weak_decoy_overlap"),
+                "weak_residual_target_evaluated": bool(
+                    record.get("weak_residual_target_evaluated", False)
+                ),
+                "weak_residual_decoy_evaluated": bool(
+                    record.get("weak_residual_decoy_evaluated", False)
+                ),
                 "weak_target_extraction_status": (
-                    weak_target["status"] if isinstance(weak_target, dict)
-                    else None if weak_target is None else weak_target.status
+                    None if weak_target is None else weak_target.status
                 ),
                 "weak_target_gate_status": record.get("weak_target_gate"),
                 "weak_decoy_extraction_status": (
-                    weak_decoy["status"] if isinstance(weak_decoy, dict)
-                    else None if weak_decoy is None else weak_decoy.status
+                    None if weak_decoy is None else weak_decoy.status
                 ),
                 "weak_decoy_gate_status": record.get("weak_decoy_gate"),
                 "weak_target_score": None if weak_result is None else weak_result.target_score,
@@ -1269,25 +1339,20 @@ def run_external_recipient(task, workers=1):
                 "weak_competition_winner": None if weak_result is None else weak_result.winner,
                 "weak_extraction_q_value": None if weak_result is None else weak_result.q_value,
                 "weak_target_mono_points": (
-                    None if weak_target is None else weak_target["mono_points"]
-                    if isinstance(weak_target, dict) else weak_target.mono_point_count
+                    None if weak_target is None else weak_target.mono_point_count
                 ),
                 "weak_target_secondary_channels": (
-                    None if weak_target is None else None
-                    if isinstance(weak_target, dict) else _candidate_secondary_channel_count(weak_target, 2)
+                    None if weak_target is None else _candidate_secondary_channel_count(weak_target, 2)
                 ),
                 "weak_target_isotope_cosine": (
-                    None if weak_target is None else weak_target["isotope_cosine"]
-                    if isinstance(weak_target, dict) else weak_target.isotope_cosine
+                    None if weak_target is None else weak_target.isotope_cosine
                 ),
                 "weak_target_mass_error_ppm": (
-                    None if weak_target is None else weak_target["mass_error_ppm"]
-                    if isinstance(weak_target, dict) else weak_target.mono_mz_error_ppm
+                    None if weak_target is None else weak_target.mono_mz_error_ppm
                 ),
                 "weak_target_rt_error_sec": (
-                    None if weak_target is None else
-                    None if (weak_target["rt_apex_sec"] if isinstance(weak_target, dict) else weak_target.rt_apex_sec) is None else
-                    abs((weak_target["rt_apex_sec"] if isinstance(weak_target, dict) else weak_target.rt_apex_sec) - plan.predicted_rt_sec)
+                    None if weak_target is None or weak_target.rt_apex_sec is None else
+                    abs(weak_target.rt_apex_sec - plan.predicted_rt_sec)
                 ),
                 "weak_overlap_fraction": record.get("weak_target_overlap"),
                 "acceptance_family": record["acceptance_family"],

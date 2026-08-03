@@ -70,13 +70,16 @@ two points, isotope cosine at least `--external-min-isotope-cosine` (0.8 by
 default), and an independent donor-guided target/decoy q-value at most
 `--external-weak-q-value-max` (0.05 by default).
 
-Before weak recovery, Biosaur2 measures how much of the proposed component is
-already assigned to recipient features. Candidates with more than
+Before weak recovery, Biosaur2 measures how much of the proposed raw component
+is already assigned to recipient features after strict external claims have
+been allocated. Candidates with more than
 `--external-weak-overlap-max` (0.20 by default) explained intensity are
 rejected. For accepted weak features, previously assigned intensity is removed
 and the final recipient quantification uses only the residual signal. Weak
 features are marked `aligned_external_weak` / `external_id_weak`; they are
-never used as new project donors.
+never used as new project donors. On a resumed Project run, Biosaur2 rebuilds
+ownership for already-published external features before considering new ones;
+it stops safely if those claims cannot be reconstructed deterministically.
 
 ## Run a project
 

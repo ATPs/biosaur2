@@ -183,9 +183,14 @@ recipient feature from a two-point mono hill plus a two-point secondary isotope
 hill. These rows have `acceptance_family=weak_external`, feature origin
 `aligned_external_weak`, and confidence tier `external_id_weak`. Their
 `weak_extraction_q_value` belongs to a separate q-value family (default <=
-0.05). The evidence table records the weak target/decoy gates and
-`weak_overlap_fraction`; accepted weak quantification uses only recipient
-intensity not already assigned to another feature.
+0.05). Evidence schema v3 separates raw screening from residual extraction:
+`weak_raw_*` records the raw candidate and its current-ownership overlap,
+while `weak_target_*` and `weak_decoy_*` describe residual candidates only and
+are null when raw screening prunes that side. The boolean
+`weak_residual_*_evaluated` fields make this distinction explicit.
+`weak_overlap_fraction` remains a deprecated compatibility alias for
+`weak_raw_target_overlap_fraction`. Accepted weak quantification uses only
+recipient intensity not already assigned to another feature.
 
 ## Per-input DuckDB
 

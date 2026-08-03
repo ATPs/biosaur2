@@ -395,15 +395,19 @@ For compatible alignment groups, the project stage then:
    centre rather than a required exact event scan;
 6. applies separate target/decoy and isotope-quality controls; a separate
    donor-guided weak family can accept a 2-point mono plus 2-point secondary
-   isotope component at q <= 0.05 after residual-overlap control;
+   isotope component at q <= 0.05 after residual-overlap control computed
+   against strict external claims already accepted for that recipient;
 7. writes external evidence and project summaries.
 
 Donor intensity is never copied into a recipient. An external assay may add no
 feature when the recipient lacks defensible MS1 evidence. Weak recovery rejects
 candidates whose intensity is more than 20% already explained by accepted
 recipient features, subtracts the remaining assigned intensity, and quantifies
-only the residual recipient component. Weak transferred features never become
-donors themselves.
+only the residual recipient component. Raw workers return compact sparse
+raw-point footprints; the recipient process compares them only after current
+strict ownership has been allocated. On resume, it deterministically rebuilds
+claims for published external features from the pre-external ownership cache
+before new recovery. Weak transferred features never become donors themselves.
 
 ## Caching and performance design
 

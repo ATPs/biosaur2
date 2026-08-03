@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pytest
 
@@ -78,6 +80,24 @@ def test_component_overlap_uses_claimed_intensity_fraction():
     overlap = ledger.component_overlap((trace,), 0, [trace.intensity])
     assert overlap.status == "accepted"
     assert overlap.fraction == pytest.approx(0.21)
+
+
+def test_component_footprint_is_compact_and_tracks_later_claims():
+    ledger = ResidualMS1Ledger(_store())
+    trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
+    footprint = ledger.component_footprint((trace,), 0, [trace.intensity])
+
+    assert footprint.status == "accepted"
+    assert footprint.requested_intensity == pytest.approx(400.0)
+    assert footprint.allocations
+    assert not hasattr(footprint, "traces")
+    assert pickle.loads(pickle.dumps(footprint)) == footprint
+    assert ledger.footprint_overlap(footprint).fraction == pytest.approx(0.0)
+    assert ledger.allocate_component(
+        "strict-external", (trace,), 0, [trace.intensity * 0.30]
+    ).accepted
+    assert ledger.footprint_overlap(footprint).fraction == pytest.approx(0.30)
+    assert ledger.component_overlap((trace,), 0, [trace.intensity]).fraction == pytest.approx(0.30)
 
 
 def test_residual_ledger_supports_conserved_intensity_split():
