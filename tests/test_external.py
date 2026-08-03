@@ -130,7 +130,7 @@ def test_external_target_decoy_extraction_adds_one_feature_idempotently(tmp_path
             "baseline": "none",
         },
     }
-    first = run_external_recipient(task)
+    first = run_external_recipient(task, workers=2)
     assert first["new_external_feature_count"] == 1
     assert pq.ParquetFile(paths["features"]).metadata.num_rows == 1
     feature = pq.read_table(paths["features"]).to_pylist()[0]
@@ -141,7 +141,7 @@ def test_external_target_decoy_extraction_adds_one_feature_idempotently(tmp_path
     assert evidence[0]["feature_id"] == 1
     assert evidence[0]["target_mono_points"] == 7
 
-    second = run_external_recipient(task)
+    second = run_external_recipient(task, workers=2)
     assert second["new_external_feature_count"] == 0
     assert pq.ParquetFile(paths["features"]).metadata.num_rows == 1
     evidence = pq.read_table(paths["external_evidence"]).to_pylist()
@@ -207,7 +207,8 @@ def test_external_weak_recovery_accepts_two_point_mono_and_secondary(tmp_path):
                 "quant_method": "envelope_area",
                 "baseline": "none",
             },
-        }
+        },
+        workers=2,
     )
     assert result["new_strict_external_feature_count"] == 0
     assert result["new_weak_external_feature_count"] == 1
@@ -296,7 +297,8 @@ def test_external_weak_recovery_rejects_component_claimed_by_existing_feature(tm
                 "quant_method": "envelope_area",
                 "baseline": "none",
             },
-        }
+        },
+        workers=2,
     )
     assert result["new_weak_external_feature_count"] == 0
     evidence = pq.read_table(paths["external_evidence"]).to_pylist()

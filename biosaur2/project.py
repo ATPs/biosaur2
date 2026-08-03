@@ -158,6 +158,12 @@ def _project_worker_budgeted(task, allocated_workers):
     return result
 
 
+def _external_worker_budgeted(task, allocated_workers):
+    """Use one Project slot's full CPU allocation inside a recipient."""
+
+    return run_external_recipient(task, workers=allocated_workers)
+
+
 def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
     directory = output_dir / run.run_id
     cache_paths = run_cache_paths(
@@ -745,14 +751,16 @@ def _run_external_stage(runs, results, options):
                 },
             }
         )
-    raw, _started = run_bounded_process_tasks(
-        run_external_recipient,
+    raw, _started, allocations = run_budgeted_process_tasks(
+        _external_worker_budgeted,
         ((task,) for task in tasks),
-        min(
-            int(options.get("_effective_workers", options.get("workers", 4))),
-            max(1, len(tasks)),
-        ),
+        int(options.get("_effective_workers", options.get("workers", 4))),
         lambda result: isinstance(result, WorkerFailure),
+    )
+    logger.info(
+        "External-ID worker budget: requested=%d allocations=%s",
+        int(options.get("_effective_workers", options.get("workers", 4))),
+        allocations,
     )
     summaries = {}
     failures = []
