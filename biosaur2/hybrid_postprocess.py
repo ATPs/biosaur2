@@ -5,6 +5,10 @@ from .hybrid_direct_stage import run_direct_stage
 from .hybrid_generic_stage import run_generic_stage
 from .hybrid_residual_stage import run_final_residual_stage
 from .residual import save_residual_ownership_cache
+from .external_observations import (
+    observations_from_hybrid_rows,
+    write_observation_sidecar,
+)
 
 
 def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts, manager, args, direct, generic, residual):
@@ -103,6 +107,19 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         },
         "local_candidate_cache": local_candidate_cache_telemetry,
     }
+    observation_sidecar = args.get("external_observations_cache_path")
+    if args.get("external_id") and observation_sidecar:
+        write_observation_sidecar(
+            args["file"],
+            args.get("psm_path"),
+            observation_sidecar,
+            observations_from_hybrid_rows(
+                run_id,
+                final_quant_rows,
+                audit_by_event.values(),
+                assay_rows,
+            ),
+        )
     output_started = time.monotonic()
     manager.append_hybrid_results(
         final_feature_rows,

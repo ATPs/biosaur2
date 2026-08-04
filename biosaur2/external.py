@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 import csv
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass
+from bisect import bisect_left, bisect_right
 import json
 import logging
 import math
@@ -14,17 +14,21 @@ from multiprocessing import get_context
 from pathlib import Path
 import shutil
 import time
-from typing import Mapping, Optional, Sequence
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .alignment import (
-    AlignmentAnchor,
-    RTAlignmentModel,
-    choose_reference_run,
-    fit_rt_alignment,
+from .external_alignment import (
+    ExternalObservation,
+    ExternalPlan,
+    ReferenceStarAlignment,
+    alignment_group_for_run,
+    build_alignment_models,
+    choose_group_reference_runs,
+    exact_ion_key,
+    faims_key,
+    plan_external_assays,
 )
 from .chemistry import IsotopePeak, isotope_library, parse_peptidoform
 from .confidence import (
@@ -35,6 +39,10 @@ from .confidence import (
 from .external_evidence import (
     EXTERNAL_EVIDENCE_SCHEMA_VERSION,
     evidence_schema as _evidence_schema,
+)
+from .external_observations import (
+    read_observation_sidecar,
+    write_observation_sidecar,
 )
 from .hybrid import (
     DirectAssay,
@@ -72,44 +80,23 @@ _EXTERNAL_RAW_OPTIONS = None
 _NATIVE_THREAD_ENVIRONMENT = NATIVE_THREAD_ENVIRONMENT
 
 
-@dataclass(frozen=True)
-class ExternalObservation:
-    run_id: str
-    ion_key: str
-    canonical_peptidoform: str
-    charge: int
-    faims_cv: Optional[float]
-    rt_apex_sec: float
-    q_value: float
-    assay_id: int
-    psm_id: str
-
-
-@dataclass(frozen=True)
-class ExternalPlan:
-    target_run: str
-    source_run: str
-    alignment_group: str
-    observation: ExternalObservation
-    predicted_rt_sec: float
-    alignment: RTAlignmentModel
-
-
 def _external_raw_summary(store, assay, decoy_assay, predicted_rt_sec, options):
     """Extract one raw pair and retain only data needed before re-extraction."""
 
     raw_ledger = ResidualMS1Ledger(store)
+    target_traces = _external_assay_traces(store, assay, options)
+    decoy_traces = _external_assay_traces(store, decoy_assay, options)
     strict_target = _extract_external_candidate(
-        store, assay, options, min_mono_points=3
+        store, assay, options, min_mono_points=3, preextracted_traces=target_traces
     )
     strict_decoy = _extract_external_candidate(
-        store, decoy_assay, options, min_mono_points=3
+        store, decoy_assay, options, min_mono_points=3, preextracted_traces=decoy_traces
     )
     weak_target = _extract_external_candidate(
-        store, assay, options, min_mono_points=2
+        store, assay, options, min_mono_points=2, preextracted_traces=target_traces
     )
     weak_decoy = _extract_external_candidate(
-        store, decoy_assay, options, min_mono_points=2
+        store, decoy_assay, options, min_mono_points=2, preextracted_traces=decoy_traces
     )
     ppm = float(options["ppm"])
     rt_tolerance = float(options["rt_tolerance_sec"])
@@ -263,33 +250,6 @@ def _parallel_extract(function, items, workers):
         return list(executor.map(function, items))
 
 
-def alignment_group_for_run(run) -> str:
-    """Return an explicit group or a conservative fraction/batch-derived one."""
-
-    explicit = (run.metadata.get("alignment_group") or "").strip()
-    if explicit:
-        return "explicit:" + explicit
-    fraction = (run.metadata.get("fraction") or "").strip()
-    batch = (run.metadata.get("batch") or "").strip()
-    if fraction or batch:
-        return "derived:fraction=%s|batch=%s" % (fraction, batch)
-    return "derived:default"
-
-
-def _faims_key(value) -> str:
-    if value is None or not math.isfinite(float(value)):
-        return "none"
-    return format(float(value), ".9g")
-
-
-def exact_ion_key(canonical_peptidoform, charge, faims_cv) -> str:
-    return "%s\x1f%d\x1f%s" % (
-        canonical_peptidoform,
-        int(charge),
-        _faims_key(faims_cv),
-    )
-
-
 def _read_rows(path, columns=None, table_name=None):
     source = Path(path)
     if not source.is_file():
@@ -369,6 +329,10 @@ def _read_table(path, table_name):
 def read_external_observations(run, paths) -> tuple[ExternalObservation, ...]:
     """Read de-duplicated, directly observed quantitative peptide-ion anchors."""
 
+    cached = read_observation_sidecar(run, paths)
+    if cached is not None:
+        return cached
+
     assays = _read_rows(
         paths["identifications"], table_name="identifications"
     )
@@ -417,161 +381,14 @@ def read_external_observations(run, paths) -> tuple[ExternalObservation, ...]:
         previous = selected.get(key)
         if previous is None or rank < previous[0]:
             selected[key] = (rank, observation)
-    return tuple(selected[key][1] for key in sorted(selected))
-
-
-def _rejected_alignment(source_run, target_run, count, status):
-    return RTAlignmentModel(
-        source_run,
-        target_run,
-        "none",
-        count,
-        0,
-        (),
-        (),
-        1.0,
-        0.0,
-        None,
-        status,
+    observations = tuple(selected[key][1] for key in sorted(selected))
+    write_observation_sidecar(
+        run.mzml_path,
+        getattr(run, "psm_path", None),
+        paths.get("external_observations"),
+        observations,
     )
-
-
-def build_alignment_models(
-    runs,
-    observations_by_run: Mapping[str, Sequence[ExternalObservation]],
-    *,
-    min_anchors: int = 5,
-    max_residual_mad_sec: float = 30.0,
-):
-    """Fit every useful ordered source-to-target model inside each group."""
-
-    grouped = defaultdict(list)
-    for run in runs:
-        grouped[alignment_group_for_run(run)].append(run.run_id)
-    models = {}
-    for group, run_ids in sorted(grouped.items()):
-        run_ids = sorted(run_ids)
-        indexed = {
-            run_id: {item.ion_key: item for item in observations_by_run.get(run_id, ())}
-            for run_id in run_ids
-        }
-        for source_run in run_ids:
-            for target_run in run_ids:
-                if source_run == target_run:
-                    continue
-                common = sorted(set(indexed[source_run]) & set(indexed[target_run]))
-                if len(common) < min_anchors:
-                    model = _rejected_alignment(
-                        source_run, target_run, len(common), "insufficient_anchors"
-                    )
-                else:
-                    anchors = [
-                        AlignmentAnchor(
-                            key,
-                            indexed[source_run][key].rt_apex_sec,
-                            indexed[target_run][key].rt_apex_sec,
-                            max(
-                                1e-6,
-                                1.0
-                                - max(
-                                    indexed[source_run][key].q_value,
-                                    indexed[target_run][key].q_value,
-                                ),
-                            ),
-                        )
-                        for key in common
-                    ]
-                    model = fit_rt_alignment(source_run, target_run, anchors)
-                    if (
-                        model.residual_mad_sec is None
-                        or model.residual_mad_sec > max_residual_mad_sec
-                    ):
-                        model = RTAlignmentModel(
-                            **{
-                                **model.__dict__,
-                                "status": "residual_mad_exceeds_limit",
-                            }
-                        )
-                models[(source_run, target_run)] = (group, model)
-    return models
-
-
-def choose_group_reference_runs(runs, observations_by_run):
-    grouped = defaultdict(dict)
-    for run in runs:
-        grouped[alignment_group_for_run(run)][run.run_id] = len(
-            observations_by_run.get(run.run_id, ())
-        )
-    return {
-        group: choose_reference_run(counts)
-        for group, counts in sorted(grouped.items())
-    }
-
-
-def plan_external_assays(
-    runs,
-    observations_by_run: Mapping[str, Sequence[ExternalObservation]],
-    models,
-):
-    """Choose one deterministic quantitative donor for every recipient-only ion."""
-
-    run_by_id = {run.run_id: run for run in runs}
-    group_by_run = {
-        run.run_id: alignment_group_for_run(run) for run in runs
-    }
-    sources_by_group = defaultdict(lambda: defaultdict(list))
-    for source_run, observations in observations_by_run.items():
-        group = group_by_run[source_run]
-        for observation in observations:
-            sources_by_group[group][observation.ion_key].append(observation)
-    result = {run.run_id: [] for run in runs}
-    for target_run in sorted(run_by_id):
-        group = group_by_run[target_run]
-        target_ions = {
-            item.ion_key for item in observations_by_run.get(target_run, ())
-        }
-        for ion_key in sorted(sources_by_group[group]):
-            if ion_key in target_ions:
-                continue
-            choices = []
-            for observation in sources_by_group[group][ion_key]:
-                if observation.run_id == target_run:
-                    continue
-                _model_group, model = models.get(
-                    (observation.run_id, target_run),
-                    (group, _rejected_alignment(observation.run_id, target_run, 0, "missing_model")),
-                )
-                if model.status != "accepted":
-                    continue
-                predicted = model.predict(observation.rt_apex_sec)
-                if not math.isfinite(predicted):
-                    continue
-                choices.append(
-                    (
-                        observation.q_value,
-                        math.inf
-                        if model.residual_mad_sec is None
-                        else model.residual_mad_sec,
-                        observation.run_id,
-                        observation.assay_id,
-                        observation,
-                        model,
-                        predicted,
-                    )
-                )
-            if choices:
-                choice = min(choices, key=lambda value: value[:4])
-                result[target_run].append(
-                    ExternalPlan(
-                        target_run,
-                        choice[4].run_id,
-                        group,
-                        choice[4],
-                        choice[6],
-                        choice[5],
-                    )
-                )
-    return {key: tuple(value) for key, value in result.items()}
+    return observations
 
 
 def _shifted_assay(assay: DirectAssay, neutral_shift: float) -> DirectAssay:
@@ -731,7 +548,57 @@ def _faims_equal(left, right):
     return math.isclose(float(left), float(right), abs_tol=1e-6)
 
 
+class _FeatureEquivalenceIndex:
+    """Small per-recipient m/z index used after external extraction wins."""
+
+    def __init__(self, features=()):
+        grouped = defaultdict(list)
+        for row in features:
+            # FAIMS needs the legacy tolerance comparison below.  Grouping by
+            # a formatted value changed the biological equivalence relation.
+            key = int(row["charge"])
+            grouped[key].append(row)
+        self._groups = {}
+        for key, rows in grouped.items():
+            ordered = sorted(rows, key=lambda row: float(row["mz"]))
+            self._groups[key] = (
+                [float(row["mz"]) for row in ordered],
+                ordered,
+            )
+
+    def add(self, row):
+        key = int(row["charge"])
+        masses, values = self._groups.setdefault(key, ([], []))
+        mz = float(row["mz"])
+        position = bisect_right(masses, mz)
+        masses.insert(position, mz)
+        values.insert(position, row)
+
+    def equivalents(self, candidate, ppm):
+        target_mz = candidate.assay.isotope_peaks[0].mz
+        key = candidate.assay.charge
+        group = self._groups.get(key)
+        if group is None:
+            return []
+        masses, values = group
+        delta = target_mz * float(ppm) * 1e-6
+        start = bisect_left(masses, target_mz - delta)
+        end = bisect_right(masses, target_mz + delta)
+        matches = []
+        for row in values[start:end]:
+            if not _faims_equal(row.get("FAIMS"), candidate.assay.faims_cv):
+                continue
+            if max(float(row["rtStart"]) * 60.0, candidate.rt_start_sec) > min(
+                float(row["rtEnd"]) * 60.0, candidate.rt_end_sec
+            ):
+                continue
+            matches.append(row)
+        return sorted(matches, key=lambda row: int(row["feature_idx"]))
+
+
 def _equivalent_features(candidate, features, ppm):
+    if isinstance(features, _FeatureEquivalenceIndex):
+        return features.equivalents(candidate, ppm)
     target_mz = candidate.assay.isotope_peaks[0].mz
     matches = []
     for row in features:
@@ -840,6 +707,75 @@ def _write_like_existing(table, final_path, *, schema=None):
     return temporary
 
 
+class _ExternalEvidenceSink:
+    """Bounded, staged writer for one recipient's external evidence."""
+
+    _BATCH_SIZE = 1024
+
+    def __init__(self, final_path, schema):
+        self.destination = Path(final_path)
+        self.destination.parent.mkdir(parents=True, exist_ok=True)
+        self.temporary = _temporary_neighbor(self.destination)
+        self.schema = schema
+        self._batch = []
+        self._handle = None
+        self._writer = None
+        if self.destination.suffix.lower() == ".tsv":
+            self._handle = self.temporary.open("w", encoding="utf-8", newline="")
+            self._writer = csv.DictWriter(
+                self._handle,
+                fieldnames=schema.names,
+                delimiter="\t",
+                lineterminator="\n",
+            )
+            self._writer.writeheader()
+        else:
+            self._writer = pq.ParquetWriter(
+                self.temporary,
+                schema,
+                compression="zstd",
+                compression_level=6,
+                use_dictionary=True,
+                data_page_version="2.0",
+                version="2.6",
+            )
+
+    def append(self, row):
+        if self._handle is not None:
+            self._writer.writerow(
+                {name: _format_tsv(row.get(name)) for name in self.schema.names}
+            )
+            return
+        self._batch.append(row)
+        if len(self._batch) >= self._BATCH_SIZE:
+            self._flush()
+
+    def _flush(self):
+        if not self._batch:
+            return
+        self._writer.write_table(
+            pa.Table.from_pylist(self._batch, schema=self.schema)
+        )
+        self._batch.clear()
+
+    def close(self):
+        if self._handle is not None:
+            self._handle.flush()
+            os.fsync(self._handle.fileno())
+            self._handle.close()
+        else:
+            self._flush()
+            self._writer.close()
+        return self.temporary
+
+    def discard(self):
+        if self._handle is not None and not self._handle.closed:
+            self._handle.close()
+        elif self._handle is None:
+            self._writer.close()
+        self.temporary.unlink(missing_ok=True)
+
+
 def _assay_for_external_plan(run_id, plan):
     peptidoform = parse_peptidoform(plan.observation.canonical_peptidoform)
     if peptidoform.formula_status != "exact" or peptidoform.formula is None:
@@ -868,7 +804,25 @@ def _assay_for_external_plan(run_id, plan):
     )
 
 
-def _extract_external_candidate(store, assay, options, *, min_mono_points=3):
+def _external_assay_traces(store, assay, options):
+    selected_peaks = tuple(
+        peak
+        for peak in assay.isotope_peaks
+        if peak.isotope_index == 0 or peak.relative_abundance >= 0.01
+    )
+    rt_tolerance = float(options["rt_tolerance_sec"])
+    return store.extract_traces(
+        tuple(peak.mz for peak in selected_peaks),
+        float(options["ppm"]),
+        float(assay.rt_sec) - rt_tolerance,
+        float(assay.rt_sec) + rt_tolerance,
+        faims_cv=assay.faims_cv,
+    )
+
+
+def _extract_external_candidate(
+    store, assay, options, *, min_mono_points=3, preextracted_traces=None,
+):
     return extract_local_feature(
         store,
         assay,
@@ -882,6 +836,7 @@ def _extract_external_candidate(store, assay, options, *, min_mono_points=3):
         # Project RT is a prediction, not an observed MS2 event.  Quality is
         # assessed from apex distance below, not from one exact scan index.
         require_event_scan=False,
+        _preextracted_traces=preextracted_traces,
     )
 
 
@@ -971,6 +926,7 @@ def run_external_recipient(task, workers=1):
     }
     feature_table = _read_table(paths["features"], "features")
     feature_rows = feature_table.to_pylist()
+    feature_index = _FeatureEquivalenceIndex(feature_rows)
     restored_external_feature_ids = _restore_initial_external_claims(
         ledger, store, feature_rows, prepared, options, ppm
     )
@@ -981,7 +937,6 @@ def run_external_recipient(task, workers=1):
         )
     new_feature_rows = []
     new_quant_rows = []
-    evidence_rows = []
     next_feature_id = 1 + max(
         (int(row["feature_idx"]) for row in feature_rows), default=0
     )
@@ -1010,7 +965,7 @@ def run_external_recipient(task, workers=1):
             store, record["assay"], options, min_mono_points=3
         )
         record["target"] = target
-        equivalents = _equivalent_features(target, feature_rows, ppm)
+        equivalents = _equivalent_features(target, feature_index, ppm)
         if len(equivalents) == 1:
             record["feature_id"] = int(equivalents[0]["feature_idx"])
             record["status"] = "accepted_matched_existing_feature"
@@ -1044,6 +999,7 @@ def run_external_recipient(task, workers=1):
         next_feature_id += 1
         feature_row = _recovered_feature_row(residual_target, feature_id)
         feature_rows.append(feature_row)
+        feature_index.add(feature_row)
         new_feature_rows.append(feature_row)
         rt = residual_target.traces[0].rt_sec[start:residual_target.segment_slice[1]]
         new_quant_rows.append(
@@ -1211,7 +1167,7 @@ def run_external_recipient(task, workers=1):
         if target is None:
             record["status"] = "weak_target_residual_not_evaluated"
             continue
-        equivalents = _equivalent_features(target, feature_rows, ppm)
+        equivalents = _equivalent_features(target, feature_index, ppm)
         if len(equivalents) == 1:
             record["feature_id"] = int(equivalents[0]["feature_idx"])
             record["status"] = "accepted_matched_existing_feature"
@@ -1233,6 +1189,7 @@ def run_external_recipient(task, workers=1):
         next_feature_id += 1
         feature_row = _recovered_feature_row(target, feature_id)
         feature_rows.append(feature_row)
+        feature_index.add(feature_row)
         new_feature_rows.append(feature_row)
         rt = target.traces[0].rt_sec[start:target.segment_slice[1]]
         flags = QUALITY_FLAG_WEAK_EXTERNAL_FEATURE | QUALITY_FLAG_TWO_POINT_QUANT
@@ -1255,7 +1212,55 @@ def run_external_recipient(task, workers=1):
         record["acceptance_family"] = "weak_external"
         record["acceptance_q_value"] = weak_result.q_value
 
-    for record in sorted(evaluated, key=lambda value: value["plan"].observation.ion_key):
+    ordered_evaluated = sorted(
+        evaluated, key=lambda value: value["plan"].observation.ion_key
+    )
+    counts.update(record["status"] for record in ordered_evaluated)
+    summary = {
+        "planned_assay_count": len(plans),
+        "evaluated_assay_count": len(evaluated),
+        "new_external_feature_count": len(new_feature_rows),
+        "new_strict_external_feature_count": sum(
+            row["status"] == "accepted_new_external_feature"
+            for row in evaluated
+        ),
+        "new_weak_external_feature_count": sum(
+            row["status"] == "accepted_new_weak_external_feature"
+            for row in evaluated
+        ),
+        "status_counts": dict(sorted(counts.items())),
+        "performance": {
+            "workers": int(workers),
+            "raw_pair_count": len(raw_pairs),
+            "weak_residual_pair_count": len(weak_items),
+            "weak_residual_target_count": sum(
+                bool(value[1]) for value in weak_items
+            ),
+            "weak_residual_decoy_count": sum(
+                bool(value[2]) for value in weak_items
+            ),
+            "raw_extract_sec": raw_extract_sec,
+            "weak_extract_sec": weak_extract_sec,
+        },
+    }
+    evidence_schema = _evidence_schema().with_metadata(
+        {
+            **(_evidence_schema().metadata or {}),
+            b"biosaur2_external_summary_json": json.dumps(
+                summary, sort_keys=True, separators=(",", ":")
+            ).encode(),
+        }
+    )
+    database_path = (
+        paths.get("run_output") if paths.get("format") == "duckdb" else None
+    )
+    evidence_destination = (
+        Path(paths["external_evidence"])
+        if not database_path
+        else Path(database_path).with_suffix(".external_id_evidence.parquet")
+    )
+    evidence_sink = _ExternalEvidenceSink(evidence_destination, evidence_schema)
+    for record in ordered_evaluated:
         plan = record["plan"]
         target = record.get("target")
         raw_target = record["raw_target"]
@@ -1267,8 +1272,7 @@ def run_external_recipient(task, workers=1):
         weak_decoy = record.get("weak_decoy")
         weak_result = record.get("weak_result")
         status = record["status"]
-        counts[status] += 1
-        evidence_rows.append({
+        evidence_sink.append({
                 "target_run": run.run_id,
                 "source_run": plan.source_run,
                 "alignment_group": plan.alignment_group,
@@ -1353,49 +1357,11 @@ def run_external_recipient(task, workers=1):
                 "acceptance_q_value": record["acceptance_q_value"],
             })
 
-    summary = {
-        "planned_assay_count": len(plans),
-        "evaluated_assay_count": len(evaluated),
-        "new_external_feature_count": len(new_feature_rows),
-        "new_strict_external_feature_count": sum(
-            row["status"] == "accepted_new_external_feature"
-            for row in evaluated
-        ),
-        "new_weak_external_feature_count": sum(
-            row["status"] == "accepted_new_weak_external_feature"
-            for row in evaluated
-        ),
-        "status_counts": dict(sorted(counts.items())),
-        "performance": {
-            "workers": int(workers),
-            "raw_pair_count": len(raw_pairs),
-            "weak_residual_pair_count": len(weak_items),
-            "weak_residual_target_count": sum(
-                bool(value[1]) for value in weak_items
-            ),
-            "weak_residual_decoy_count": sum(
-                bool(value[2]) for value in weak_items
-            ),
-            "raw_extract_sec": raw_extract_sec,
-            "weak_extract_sec": weak_extract_sec,
-        },
-    }
-    evidence_schema = _evidence_schema().with_metadata(
-        {
-            **(_evidence_schema().metadata or {}),
-            b"biosaur2_external_summary_json": json.dumps(
-                summary, sort_keys=True, separators=(",", ":")
-            ).encode(),
-        }
-    )
+    evidence_temporary = evidence_sink.close()
     staged = []
-    evidence_table = pa.Table.from_pylist(evidence_rows, schema=evidence_schema)
-    database_path = (
-        paths.get("run_output") if paths.get("format") == "duckdb" else None
-    )
     if not database_path:
         staged.append(
-            (_write_like_existing(evidence_table, paths["external_evidence"]), Path(paths["external_evidence"]))
+            (evidence_temporary, Path(paths["external_evidence"]))
         )
     appended = None
     if new_feature_rows:
@@ -1426,12 +1392,11 @@ def run_external_recipient(task, workers=1):
         shutil.copy2(target, temporary)
         try:
             with duckdb.connect(str(temporary)) as connection:
-                connection.register("_external_evidence", evidence_table)
                 connection.execute(
                     "CREATE OR REPLACE TABLE external_id_evidence AS "
-                    "SELECT * FROM _external_evidence"
+                    "SELECT * FROM read_parquet(?)",
+                    [str(evidence_temporary)],
                 )
-                connection.unregister("_external_evidence")
                 if appended is not None:
                     connection.register("_new_features", appended)
                     connection.execute(
@@ -1442,18 +1407,34 @@ def run_external_recipient(task, workers=1):
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
+        finally:
+            evidence_temporary.unlink(missing_ok=True)
     publish_staged_files(staged)
     return {"run_id": run.run_id, **summary}
 
 
 def alignment_model_rows(models, reference_runs=None):
-    reference_runs = reference_runs or {}
+    if hasattr(models, "reference_runs"):
+        reference_runs = models.reference_runs
+        model_items = models.items()
+        component_by_run = models.component_by_run
+    else:
+        reference_runs = reference_runs or {}
+        model_items = models.items()
+        component_by_run = {}
     rows = []
-    for (source_run, target_run), (group, model) in sorted(models.items()):
+    for (source_run, target_run), (group, model) in sorted(model_items):
+        source_component = component_by_run.get(source_run)
+        target_component = component_by_run.get(target_run)
+        resolved_group = (
+            source_component
+            if source_component is not None and source_component == target_component
+            else group
+        )
         rows.append(
             {
-                "alignment_group": group,
-                "reference_run": reference_runs.get(group),
+                "alignment_group": resolved_group,
+                "reference_run": reference_runs.get(resolved_group),
                 "source_run": source_run,
                 "target_run": target_run,
                 "method": model.method,

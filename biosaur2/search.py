@@ -296,6 +296,9 @@ def _run_args_for_file(args, filename, multiple_inputs, allocated_workers=None):
         run_args["residual_ownership_cache_dir"] = cache_paths[
             "residual_ownership_cache"
         ]
+        run_args["external_observations_cache_path"] = cache_paths[
+            "external_observations"
+        ]
     return run_args
 
 

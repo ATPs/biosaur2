@@ -9,6 +9,7 @@ import pyarrow.parquet as pq
 from biosaur2 import project_cli
 from biosaur2.alignment import RTAlignmentModel
 from biosaur2.external import ExternalObservation, ExternalPlan
+from biosaur2.external_alignment import ReferenceStarAlignment
 from biosaur2.schema import compact_schemas
 from biosaur2.project import (
     _command_for_run,
@@ -188,10 +189,16 @@ def test_external_recipient_fingerprint_tracks_exact_plan(tmp_path):
         assay_id=4,
         psm_id="psm-4",
     )
-    model = RTAlignmentModel(
-        "donor", "recipient", "median_shift", 2, 2, (), (), 1.0, 4.0, 1.0, "accepted"
+    source_model = RTAlignmentModel(
+        "donor", "reference", "median_shift", 2, 2, (), (), 1.0, 2.0, 1.0, "accepted"
     )
-    plan = ExternalPlan("recipient", "donor", "explicit:g", observation, 34.0, model)
+    target_model = RTAlignmentModel(
+        "reference", "recipient", "median_shift", 2, 2, (), (), 1.0, 2.0, 1.0, "accepted"
+    )
+    alignment = ReferenceStarAlignment(
+        "donor", "recipient", (source_model,), (target_model,)
+    )
+    plan = ExternalPlan("recipient", "donor", "explicit:g", observation, 34.0, alignment)
     result = {"command": ["python", "-m", "biosaur2.search", str(source)]}
     options = {
         "external_ppm": 8.0,
@@ -199,6 +206,7 @@ def test_external_recipient_fingerprint_tracks_exact_plan(tmp_path):
         "external_q_value_max": 0.01,
         "external_alignment_min_anchors": 5,
         "external_alignment_max_mad_sec": 30.0,
+        "external_alignment_max_anchors": 256,
         "external_min_isotope_cosine": 0.8,
         "external_weak_feature": True,
         "external_weak_q_value_max": 0.05,
@@ -207,9 +215,24 @@ def test_external_recipient_fingerprint_tracks_exact_plan(tmp_path):
         "feature_baseline": "edge_linear",
     }
     first = _external_task_fingerprint(run, result, (plan,), options)
-    changed = ExternalPlan("recipient", "donor", "explicit:g", observation, 35.0, model)
+    changed = ExternalPlan("recipient", "donor", "explicit:g", observation, 35.0, alignment)
     assert first != _external_task_fingerprint(run, result, (changed,), options)
+    changed_alignment = ReferenceStarAlignment(
+        "donor",
+        "recipient",
+        (source_model,),
+        (RTAlignmentModel(
+            "reference", "recipient", "median_shift", 2, 2, (), (), 1.0, 3.0, 1.0, "accepted"
+        ),),
+    )
+    changed_path = ExternalPlan(
+        "recipient", "donor", "explicit:g", observation, 34.0, changed_alignment
+    )
+    assert first != _external_task_fingerprint(run, result, (changed_path,), options)
     options["external_ppm"] = 7.0
+    assert first != _external_task_fingerprint(run, result, (plan,), options)
+    options["external_ppm"] = 8.0
+    options["external_alignment_max_anchors"] = 128
     assert first != _external_task_fingerprint(run, result, (plan,), options)
 
 

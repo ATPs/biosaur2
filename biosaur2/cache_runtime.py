@@ -43,6 +43,9 @@ def run_cache_paths(workspace, source_path, run_id=None):
         "raw_ms1_cache": str(run_dir / "raw-ms1"),
         "strict_stage_cache": str(run_dir / "strict-stage"),
         "candidate_cache": str(run_dir / "candidates"),
+        "external_observations": str(
+            run_dir / "external" / "observations-v2.parquet"
+        ),
         # Final ownership is consumed only by the project-level external-ID
         # stage.  Keep it separate from reusable upstream caches because it
         # represents the complete postprocessing population.

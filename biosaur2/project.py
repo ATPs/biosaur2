@@ -31,11 +31,11 @@ from .external import (
     _read_table,
     alignment_model_rows,
     build_alignment_models,
-    choose_group_reference_runs,
     plan_external_assays,
     read_external_observations,
     run_external_recipient,
 )
+from .project_validation import validate_project
 
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,7 @@ def _external_option_signature(options):
         "external_q_value_max",
         "external_alignment_min_anchors",
         "external_alignment_max_mad_sec",
+        "external_alignment_max_anchors",
         "external_min_isotope_cosine",
         "external_weak_feature",
         "external_weak_q_value_max",
@@ -135,7 +136,9 @@ def _external_implementation_signature():
     digest = hashlib.sha256()
     for name in (
         "external.py",
+        "external_alignment.py",
         "external_evidence.py",
+        "external_observations.py",
         "alignment.py",
         "residual.py",
         "project.py",
@@ -143,6 +146,22 @@ def _external_implementation_signature():
         digest.update(name.encode("ascii"))
         digest.update((package / name).read_bytes())
     return digest.hexdigest()
+
+
+def _alignment_model_signature(model):
+    return {
+        "source_run": model.source_run,
+        "target_run": model.target_run,
+        "method": model.method,
+        "anchor_count": model.anchor_count,
+        "inlier_count": model.inlier_count,
+        "x_knots": model.x_knots,
+        "y_knots": model.y_knots,
+        "slope": model.slope,
+        "intercept": model.intercept,
+        "residual_mad_sec": model.residual_mad_sec,
+        "status": model.status,
+    }
 
 
 def _external_plan_signature(plan):
@@ -166,14 +185,15 @@ def _external_plan_signature(plan):
         "predicted_rt_sec": plan.predicted_rt_sec,
         "alignment": {
             "method": alignment.method,
-            "anchor_count": alignment.anchor_count,
-            "inlier_count": alignment.inlier_count,
-            "x_knots": alignment.x_knots,
-            "y_knots": alignment.y_knots,
-            "slope": alignment.slope,
-            "intercept": alignment.intercept,
-            "residual_mad_sec": alignment.residual_mad_sec,
             "status": alignment.status,
+            "source_to_reference": [
+                _alignment_model_signature(model)
+                for model in alignment.source_to_reference
+            ],
+            "reference_to_target": [
+                _alignment_model_signature(model)
+                for model in alignment.reference_to_target
+            ],
         },
     }
 
@@ -851,23 +871,27 @@ def _write_project_database(
                     ),
                 ],
             )
-        for row in (external_stage or {}).get("alignment_models", ()):
-            connection.execute(
+        alignment_rows = (external_stage or {}).get("alignment_models", ())
+        if alignment_rows:
+            connection.executemany(
                 "INSERT INTO rt_alignment_models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    row["alignment_group"],
-                    row["reference_run"],
-                    row["source_run"],
-                    row["target_run"],
-                    row["method"],
-                    row["anchor_count"],
-                    row["inlier_count"],
-                    row["slope"],
-                    row["intercept"],
-                    row["residual_mad_sec"],
-                    row["status"],
-                    row["x_knots_json"],
-                    row["y_knots_json"],
+                    [
+                        row["alignment_group"],
+                        row["reference_run"],
+                        row["source_run"],
+                        row["target_run"],
+                        row["method"],
+                        row["anchor_count"],
+                        row["inlier_count"],
+                        row["slope"],
+                        row["intercept"],
+                        row["residual_mad_sec"],
+                        row["status"],
+                        row["x_knots_json"],
+                        row["y_knots_json"],
+                    ]
+                    for row in alignment_rows
                 ],
             )
         for stage, summary in (
@@ -926,9 +950,18 @@ def _run_external_stage(
         max_residual_mad_sec=float(
             options.get("external_alignment_max_mad_sec", 30.0)
         ),
+        max_anchors=int(options.get("external_alignment_max_anchors", 256)),
     )
-    reference_runs = choose_group_reference_runs(successful_runs, observations)
-    plans = plan_external_assays(successful_runs, observations, models)
+    plans = plan_external_assays(
+        successful_runs, observations, models
+    )
+    logger.info(
+        "External-ID reference-star alignment: groups=%d references=%s models=%d plans=%d",
+        len(models.reference_runs),
+        models.reference_runs,
+        len(models),
+        sum(len(value) for value in plans.values()),
+    )
     tasks = []
     summaries = {}
     refresh_ids = []
@@ -1067,8 +1100,8 @@ def _run_external_stage(
         )
     return {
         "summaries": summaries,
-        "alignment_models": alignment_model_rows(models, reference_runs),
-        "reference_runs": reference_runs,
+        "alignment_models": alignment_model_rows(models),
+        "reference_runs": models.reference_runs,
         "scheduler_summary": scheduler_summary,
     }
 
@@ -1421,103 +1454,3 @@ def run_project(manifest, output_dir, project_db, **options):
         checkpoint.release()
     return results
 
-
-def validate_project(project_db):
-    import duckdb
-
-    database = Path(project_db).resolve()
-    problems = []
-    with duckdb.connect(str(database), read_only=True) as connection:
-        runs = connection.execute(
-            "SELECT run_id, status, output_format, run_output_path, "
-            "features_path, identification_path, external_evidence_path "
-            "FROM runs ORDER BY run_order"
-        ).fetchall()
-        metadata = dict(
-            connection.execute(
-                "SELECT key, value_json FROM project_metadata"
-            ).fetchall()
-        )
-    mode = json.loads(metadata.get("resolved_options", "{}")).get(
-        "mode", "legacy"
-    )
-    for (
-        run_id,
-        status,
-        output_format,
-        run_output,
-        features,
-        identifications,
-        external,
-    ) in runs:
-        if status not in {"success", "skipped_resume"}:
-            problems.append("%s has status %s" % (run_id, status))
-            continue
-        primary = Path(run_output or features)
-        if not primary.is_file():
-            problems.append("%s is missing output %s" % (run_id, primary))
-            continue
-        if mode == "legacy" and output_format == "tsv":
-            continue
-        feature_table = _read_table(features, "features")
-        feature_ids = feature_table.column("feature_idx").to_pylist()
-        if (
-            any(value is None or value <= 0 for value in feature_ids)
-            or len(feature_ids) != len(set(feature_ids))
-        ):
-            problems.append("%s has invalid/duplicate feature IDs" % run_id)
-        if mode == "hybrid":
-            if not Path(identifications).is_file():
-                problems.append(
-                    "%s is missing identifications output %s"
-                    % (run_id, identifications)
-                )
-            else:
-                try:
-                    _read_table(identifications, "identifications")
-                except Exception as error:
-                    problems.append(
-                        "%s has an unreadable identifications table: %s"
-                        % (run_id, error)
-                    )
-        external_rows = []
-        if external and Path(external).is_file():
-            if output_format == "duckdb":
-                try:
-                    with duckdb.connect(str(external), read_only=True) as connection:
-                        external_rows = connection.execute(
-                            "SELECT status, feature_id, acceptance_q_value, extraction_q_value "
-                            "FROM external_id_evidence"
-                        ).fetch_arrow_table().to_pylist()
-                except Exception:
-                    external_rows = []
-            elif Path(external).suffix.lower() == ".parquet":
-                external_rows = pq.read_table(
-                    external,
-                    columns=[
-                        "status", "feature_id", "acceptance_q_value",
-                        "extraction_q_value",
-                    ],
-                ).to_pylist()
-            elif Path(external).suffix.lower() == ".tsv":
-                with Path(external).open(
-                    "r", encoding="utf-8", newline=""
-                ) as handle:
-                    external_rows = list(csv.DictReader(handle, delimiter="\t"))
-        for row in external_rows:
-            accepted_q_value = row.get("acceptance_q_value")
-            if accepted_q_value in {None, ""}:
-                accepted_q_value = row.get("extraction_q_value")
-            if row["status"].startswith("accepted_") and (
-                row["feature_id"] in {None, ""}
-                or int(row["feature_id"]) <= 0
-                or accepted_q_value in {None, ""}
-            ):
-                problems.append(
-                    "%s has an invalid accepted external-ID evidence row"
-                    % run_id
-                )
-                break
-    if problems:
-        raise ValueError("project validation failed: " + "; ".join(problems))
-    return {"run_count": len(runs), "problems": ()}

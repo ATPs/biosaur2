@@ -83,8 +83,14 @@ def extract_local_feature(
     mz_shift_ppm: float = 0.0,
     rt_center_sec: Optional[float] = None,
     require_event_scan: bool = True,
+    _preextracted_traces=None,
 ) -> LocalFeatureCandidate:
-    """Extract, repair and jointly segment a bounded exact-assay region."""
+    """Extract, repair and jointly segment a bounded exact-assay region.
+
+    ``_preextracted_traces`` is an internal reuse hook for project external
+    strict/weak gates.  It avoids repeating the expensive sparse MS1 lookup;
+    all candidate construction and quality semantics remain unchanged.
+    """
 
     selected_peaks = tuple(
         peak
@@ -96,16 +102,18 @@ def extract_local_feature(
         if rt_center_sec is None
         else float(rt_center_sec)
     )
-    traces = store.extract_traces(
-        tuple(
-            peak.mz * (1.0 + float(mz_shift_ppm) * 1e-6)
-            for peak in selected_peaks
-        ),
-        ppm,
-        extraction_rt_center - rt_tolerance_sec,
-        extraction_rt_center + rt_tolerance_sec,
-        faims_cv=assay.faims_cv,
-    )
+    traces = _preextracted_traces
+    if traces is None:
+        traces = store.extract_traces(
+            tuple(
+                peak.mz * (1.0 + float(mz_shift_ppm) * 1e-6)
+                for peak in selected_peaks
+            ),
+            ppm,
+            extraction_rt_center - rt_tolerance_sec,
+            extraction_rt_center + rt_tolerance_sec,
+            faims_cv=assay.faims_cv,
+        )
     if not traces or traces[0].rt_sec.size == 0:
         return LocalFeatureCandidate(
             assay,

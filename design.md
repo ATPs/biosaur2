@@ -387,9 +387,14 @@ Each run first completes its own single-run workflow and publishes atomically.
 
 For compatible alignment groups, the project stage then:
 
-1. selects reference runs deterministically;
-2. builds shared high-confidence peptide/charge anchors;
-3. fits robust monotonic RT mappings with minimum-anchor and MAD checks;
+1. builds a sparse run-by-direct-ion anchor matrix and deterministically keeps
+   at most four high-overlap reference candidates per run, excluding itself;
+2. fits bidirectional robust monotonic RT mappings only along those candidates,
+   accepting a bounded reference-rooted forest after minimum-anchor and MAD
+   checks;
+3. composes donor-to-recipient predictions through the component reference.
+   Direct two-leg paths are `reference_star`; a failed preferred leg may use a
+   bounded fallback path reported as `reference_forest`;
 4. plans missing exact assays in recipient runs;
 5. extracts and quantifies recipient-run MS1 signal; predicted RT is a local
    centre rather than a required exact event scan;
@@ -408,6 +413,15 @@ raw-point footprints; the recipient process compares them only after current
 strict ownership has been allocated. On resume, it deterministically rebuilds
 claims for published external features from the pre-external ownership cache
 before new recovery. Weak transferred features never become donors themselves.
+Each recipient-only ion chooses one deterministic strict direct-ID donor;
+project rescue results never enter the donor population.  Metadata alignment
+groups are subdivided by accepted anchor connectivity; donors cannot cross the
+resulting component boundary.  Candidate construction uses sparse overlap and
+limits every run to four reference candidates, so directional model attempts
+are bounded by `8n` rather than all run pairs. Reference-edge anchor fitting is
+deterministically RT-stratified and capped by
+`--external-alignment-max-anchors` (256 by default), which bounds Theil-Sen
+work without collapsing retention-time coverage.
 
 ## Caching and performance design
 
@@ -423,6 +437,10 @@ results:
    by the residual ownership state.
 4. **Residual-ownership cache**: final sparse raw-point intensity claims used
    by project external recovery to prevent double quantification.
+5. **External-observation sidecar**: compact direct donor anchors materialized
+   during single-run hybrid postprocessing, before project external recovery.
+   Its v2 provenance is the mzML/PSM source fingerprints and direct-observation
+   policy, so later DuckDB external evidence/feature writes do not invalidate it.
 
 Cache keys include source fingerprints, scientific parameters and relevant
 implementation signatures. Scheduling-only/downstream options do not
@@ -518,7 +536,7 @@ events with features and PSM-bearing events with identifications.
 | `direct_competitors.py` | Pre-conflict capture of bounded direct-relevant losing hill candidates. |
 | `confidence.py` | Deterministic decoys, competitions and extraction q-values. |
 | `quantification.py` | Area/apex calculations and baseline handling. |
-| `external.py`, `alignment.py` | Multi-run RT alignment and recipient-run external assay extraction. |
+| `external.py`, `external_alignment.py`, `alignment.py` | Multi-run RT alignment and recipient-run external assay extraction. |
 | `stage_cache.py`, `postprocess_cache.py` | Fingerprinted strict and local candidate caches. |
 | `project.py`, `project_manifest.py` | Bounded multi-run execution, resume/validation and project metadata. |
 | `output.py`, `legacy_output.py`, `duckdb_output.py` | Atomic output lifecycle, schemas and compact formats. |

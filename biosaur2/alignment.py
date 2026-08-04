@@ -36,6 +36,8 @@ class RTAlignmentModel:
         value = float(rt_sec)
         if self.status != "accepted":
             raise ValueError("alignment model is not accepted")
+        if self.method == "identity":
+            return value
         if self.method in {"median_shift", "robust_affine"}:
             return self.slope * value + self.intercept
         x = np.asarray(self.x_knots)

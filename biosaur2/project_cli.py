@@ -173,6 +173,10 @@ README.md and examples/hybrid_project_manifest.tsv.
             help=_advanced_help(show_all, "maximum robust RT-alignment residual MAD in seconds"),
         )
         parser.add_argument(
+            "--external-alignment-max-anchors", type=int, default=256,
+            help=_advanced_help(show_all, "maximum deterministic RT anchors fitted per reference edge"),
+        )
+        parser.add_argument(
             "--external-min-isotope-cosine", type=float, default=0.8,
             help=_advanced_help(show_all, "minimum theoretical/observed isotope cosine for an external candidate"),
         )
@@ -250,6 +254,8 @@ README.md and examples/hybrid_project_manifest.tsv.
             parser.error("--external-rt-tolerance-sec must be finite and nonnegative")
         if args.external_alignment_min_anchors < 1:
             parser.error("--external-alignment-min-anchors must be positive")
+        if args.external_alignment_max_anchors < 1:
+            parser.error("--external-alignment-max-anchors must be positive")
         if (
             not math.isfinite(args.external_alignment_max_mad_sec)
             or args.external_alignment_max_mad_sec < 0
