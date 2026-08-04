@@ -7,10 +7,14 @@ import math
 import os
 import queue
 import traceback
+import logging
 from dataclasses import dataclass
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -542,6 +546,7 @@ def run_adaptive_process_tasks(
     max_memory_bytes: int,
     stop_on_result: Optional[Callable[[Any], bool]] = None,
     on_result: Optional[Callable[[int, Any], None]] = None,
+    on_start: Optional[Callable[[int, Sequence[Any], int], None]] = None,
     poll_seconds: float = 5.0,
     resource_sampler=None,
 ) -> Tuple[Dict[int, Any], List[int], Dict[str, Any]]:
@@ -561,6 +566,8 @@ def run_adaptive_process_tasks(
     context = multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     task_iterator = enumerate(task_args)
+    next_task = None
+    next_task_ready = False
     active = {}
     results = {}
     started = []
@@ -585,17 +592,20 @@ def run_adaptive_process_tasks(
         "peak_process_pss_bytes": 0,
         "cpu_pause_count": 0,
         "memory_pause_count": 0,
+        "memory_wait_seconds": 0.0,
+        "last_wait_reason": None,
     }
 
     def allocation_total():
         return sum(allocation for _process, allocation in active.values())
 
     def sample():
-        if not active:
-            return None
-        value = sampler.sample([process.pid for process, _allocation in active.values()])
-        cpu_history.append(value.process_cpu_cores)
-        del cpu_history[:-3]
+        value = sampler.sample(
+            [process.pid for process, _allocation in active.values()]
+        )
+        if active:
+            cpu_history.append(value.process_cpu_cores)
+            del cpu_history[:-3]
         summary["peak_process_cpu_cores"] = max(
             summary["peak_process_cpu_cores"], value.process_cpu_cores
         )
@@ -603,6 +613,18 @@ def run_adaptive_process_tasks(
             summary["peak_process_pss_bytes"], value.process_pss_bytes
         )
         return value
+
+    def ensure_next_task():
+        nonlocal exhausted, next_task, next_task_ready
+        if next_task_ready or exhausted:
+            return not exhausted
+        try:
+            next_task = next(task_iterator)
+            next_task_ready = True
+            return True
+        except StopIteration:
+            exhausted = True
+            return False
 
     def may_start(allocation, resource, *, bootstrap):
         if allocation_total() + allocation > allocation_ceiling:
@@ -612,16 +634,8 @@ def run_adaptive_process_tasks(
             resource.process_pss_bytes if resource is not None else 0,
             len(active) * estimate,
         ) + estimate
-        available = (
-            resource.mem_available_bytes
-            if resource is not None
-            else physical_memory_bytes()
-        )
-        physical = (
-            resource.physical_memory_bytes
-            if resource is not None
-            else physical_memory_bytes()
-        )
+        available = resource.mem_available_bytes
+        physical = resource.physical_memory_bytes
         reserve = max(8 * GIB, int(physical * 0.05))
         if predicted > max_memory_bytes or available < estimate + reserve:
             summary["memory_pause_count"] += 1
@@ -642,12 +656,12 @@ def run_adaptive_process_tasks(
         return True, "ok"
 
     def start_next(allocation, *, bootstrap):
-        nonlocal exhausted, initial_started
-        try:
-            worker_id, args = next(task_iterator)
-        except StopIteration:
-            exhausted = True
+        nonlocal initial_started, next_task, next_task_ready
+        if not ensure_next_task():
             return False
+        worker_id, args = next_task
+        if on_start is not None:
+            on_start(worker_id, args, allocation)
         process = context.Process(
             target=_worker_entry,
             args=(
@@ -658,6 +672,8 @@ def run_adaptive_process_tasks(
             ),
         )
         process.start()
+        next_task = None
+        next_task_ready = False
         active[worker_id] = (process, allocation)
         started.append(worker_id)
         if bootstrap:
@@ -670,7 +686,7 @@ def run_adaptive_process_tasks(
 
     def fill(resource):
         launches = 0
-        while not exhausted and not stop_submitting:
+        while ensure_next_task() and not stop_submitting:
             bootstrap = initial_started < initial_slots
             allocation = min(4, target_workers) if bootstrap else 1
             allowed, _reason = may_start(allocation, resource, bootstrap=bootstrap)
@@ -683,10 +699,27 @@ def run_adaptive_process_tasks(
                 break
 
     try:
-        fill(None)
-        while active:
+        resource = sample()
+        if estimator.estimate_bytes > max_memory_bytes:
+            raise ValueError(
+                "--max-memory is below the initial per-run admission estimate "
+                "of %.1f GiB" % (estimator.estimate_bytes / float(GIB))
+            )
+        while active or ensure_next_task():
             resource = sample()
             fill(resource)
+            if not active:
+                if not exhausted and not stop_submitting:
+                    summary["memory_wait_seconds"] += poll_seconds
+                    summary["last_wait_reason"] = "memory"
+                    if int(summary["memory_wait_seconds"]) % 60 < poll_seconds:
+                        logger.info(
+                            "Project scheduler waiting for memory: available=%.1f GiB",
+                            resource.mem_available_bytes / float(GIB),
+                        )
+                    time.sleep(poll_seconds)
+                    continue
+                break
             try:
                 status, worker_id, payload = result_queue.get(timeout=poll_seconds)
             except queue.Empty:

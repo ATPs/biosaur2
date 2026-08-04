@@ -131,8 +131,12 @@ biosaur2 project run --manifest runs.tsv --output-dir results-recheck \
 ```
 
 Project resume is on by default. Reusing the original locations skips completed
-local runs and external recipients whose inputs, scientific options and outputs
-still match; use `--no-resume --overwrite` for a fresh replacement run.
+local runs and external recipients only when their inputs, scientific options,
+exact donor/alignment plan and published outputs still match. A changed plan
+recomputes only affected recipients. If a required recipient cache was cleaned
+after a prior success, Project automatically refreshes that recipient's local
+stage before external recovery; use `--no-resume --overwrite` for a fresh
+replacement run.
 
 Cache manifests fingerprint the source and relevant scientific state. A
 downstream option change does not invalidate raw ingestion unnecessarily;
@@ -142,6 +146,11 @@ workspace for resume. After each checkpoint, strict/candidate layers are
 removed once external-ID no longer needs them; raw/ownership layers are removed
 after the recipient succeeds. The remaining workspace is removed after a fully
 successful Project. `--keep-cache` preserves all compatible layers.
+
+`--max-memory` is an admission limit in GiB and excludes swap. The Project
+manager samples `MemAvailable` before launching its first run and waits when
+free memory is temporarily insufficient. It fails immediately only when the
+configured limit cannot admit even one conservatively estimated run.
 
 Advanced alignment and external-extraction tolerances appear under
 `biosaur2 project run --help-all`. Keep defaults unless a representative

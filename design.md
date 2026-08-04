@@ -448,6 +448,12 @@ one-worker runs; declared allocations are capped at 1.5 times the target and
 new submission stops when CPU or `--max-memory` (integer GiB, no swap) would be
 exceeded. Local and external-recipient work share this manager. Atomic per-run
 and per-recipient checkpoint records make default resume skip published work.
+Each recipient record fingerprints its exact donor plans, alignment model,
+external science options, implementation and published outputs. A changed plan
+recomputes only affected recipients; a missing or changed output is never
+treated as complete. Checkpoint records are independently atomically published
+per run, with a heartbeat lease for cross-host recovery, so large Projects do
+not rewrite a growing global checkpoint after every completion.
 CLI startup fixes implicit OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O pools
 at one thread before numerical modules load.
 

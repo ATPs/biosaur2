@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from biosaur2.cache_runtime import (
     CacheWorkspace,
     ProjectCacheWorkspace,
@@ -64,6 +66,29 @@ def test_project_checkpoint_is_atomic_and_reopenable(tmp_path):
     resumed = ProjectCheckpoint(path).open(identity, resume=True)
     assert resumed.run_record("run")["result"]["runtime_sec"] == 1
     resumed.release()
+
+
+def test_project_checkpoint_updates_only_the_changed_record(tmp_path):
+    checkpoint = ProjectCheckpoint(tmp_path / "project-state.json").open(
+        {"project_db": "project.duckdb"}, resume=True
+    )
+    checkpoint.put_run("first", {"status": "success", "result": {"id": 1}})
+    first = checkpoint.runs_dir / checkpoint._record_name("first")
+    first_payload = first.read_bytes()
+    checkpoint.put_run("second", {"status": "success", "result": {"id": 2}})
+    assert first.read_bytes() == first_payload
+    assert len(list(checkpoint.runs_dir.glob("*.json"))) == 2
+    metadata = checkpoint.path.read_text(encoding="utf-8")
+    assert '"runs"' not in metadata
+    checkpoint.release()
+
+
+def test_project_checkpoint_does_not_replace_an_active_lease(tmp_path):
+    path = tmp_path / "project-state.json"
+    first = ProjectCheckpoint(path).open({"project_db": "project.duckdb"}, resume=True)
+    with pytest.raises(RuntimeError, match="owned"):
+        ProjectCheckpoint(path).open({"project_db": "project.duckdb"}, resume=False)
+    first.release()
 
 
 def test_remove_cache_layers_removes_only_requested_paths(tmp_path):

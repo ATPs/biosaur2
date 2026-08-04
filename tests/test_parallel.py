@@ -32,7 +32,7 @@ def _failed_status(value):
     return {"value": value, "status": "failed"}
 
 
-def _slow_resource_task(value):
+def _slow_resource_task(value, _allocated_workers):
     time.sleep(0.35)
     return {"value": value, "peak_rss_kib": 1024}
 
@@ -50,12 +50,29 @@ class _IdleSampler:
 
 
 class _MemoryBoundSampler(_IdleSampler):
-    def sample(self, _pids):
+    def sample(self, pids):
         return ResourceSample(
             process_cpu_cores=0.0,
             host_busy_cores=0.0,
-            process_pss_bytes=16 * GIB,
+            process_pss_bytes=17 * GIB if pids else 0,
             mem_available_bytes=512 * GIB,
+            physical_memory_bytes=512 * GIB,
+            cpu_count=80,
+        )
+
+
+class _BootstrapMemorySampler(_IdleSampler):
+    def __init__(self):
+        self.calls = 0
+
+    def sample(self, pids):
+        self.calls += 1
+        available = 0 if not pids and self.calls < 3 else 512 * GIB
+        return ResourceSample(
+            process_cpu_cores=0.0,
+            host_busy_cores=0.0,
+            process_pss_bytes=0,
+            mem_available_bytes=available,
             physical_memory_bytes=512 * GIB,
             cpu_count=80,
         )
@@ -154,3 +171,28 @@ def test_adaptive_scheduler_records_memory_admission_pauses():
     assert set(results) == {0, 1}
     assert started == [0, 1]
     assert summary["memory_pause_count"] > 0
+
+
+def test_adaptive_scheduler_waits_for_memory_before_bootstrap():
+    results, started, summary = run_adaptive_process_tasks(
+        _slow_resource_task,
+        ((value,) for value in range(1)),
+        target_workers=1,
+        max_memory_bytes=64 * GIB,
+        resource_sampler=_BootstrapMemorySampler(),
+        poll_seconds=0.01,
+    )
+    assert set(results) == {0}
+    assert started == [0]
+    assert summary["memory_wait_seconds"] >= 0.01
+
+
+def test_adaptive_scheduler_rejects_impossible_memory_limit():
+    with pytest.raises(ValueError, match="initial per-run admission"):
+        run_adaptive_process_tasks(
+            _slow_resource_task,
+            ((0,),),
+            target_workers=1,
+            max_memory_bytes=2 * GIB,
+            resource_sampler=_IdleSampler(),
+        )

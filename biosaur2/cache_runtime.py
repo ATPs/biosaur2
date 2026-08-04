@@ -11,6 +11,7 @@ import re
 import shutil
 import socket
 import tempfile
+import threading
 import time
 import uuid
 
@@ -143,92 +144,257 @@ def remove_cache_layers(paths, layers):
 
 
 class ProjectCheckpoint:
-    """Atomic project progress state, including an interruption-safe lease."""
+    """Crash-safe Project state with O(1) record updates and a host lease.
 
-    VERSION = 1
+    Project workspaces can live on NFS, where SQLite WAL is a poor fit.  Keep
+    the identity, each run record, and the lease as separate atomically
+    published files instead.  Completing one of thousands of runs therefore
+    never serializes the rest of the project state.
+    """
+
+    VERSION = 2
+    HEARTBEAT_SECONDS = 30.0
+    STALE_SECONDS = 120.0
 
     def __init__(self, path):
         self.path = Path(path)
+        self.records_dir = self.path.with_name(self.path.stem + ".records")
+        self.runs_dir = self.records_dir / "runs"
+        self.external_dir = self.records_dir / "external"
+        self.lease_dir = self.path.with_name(self.path.stem + ".lease")
         self.state = {}
+        self._owner = None
+        self._heartbeat_stop = None
+        self._heartbeat_thread = None
 
-    def open(self, identity, *, resume):
-        if self.path.is_file() and resume:
-            with self.path.open(encoding="utf-8") as handle:
-                self.state = json.load(handle)
-            if self.state.get("identity") != identity:
-                raise ValueError(
-                    "project checkpoint has different scientific inputs/options; "
-                    "use --no-resume with --overwrite for a fresh project"
-                )
-        else:
-            self.state = {
-                "version": self.VERSION,
-                "identity": identity,
-                "runs": {},
-                "external": {},
-                "lease": None,
-            }
-        self._claim()
-        self.save()
-        return self
+    def __del__(self):
+        # ``run_project`` normally releases explicitly.  This is the fallback
+        # for exceptions raised before that point, so a handled failure does
+        # not leave a live process holding the lease until it becomes stale.
+        try:
+            self.release()
+        except Exception:
+            pass
 
-    def _claim(self):
-        lease = self.state.get("lease")
-        now = time.time()
-        if lease:
-            same_host = lease.get("hostname") == socket.gethostname()
-            active = False
-            if same_host and int(lease.get("pid", -1)) != os.getpid():
-                try:
-                    os.kill(int(lease.get("pid", -1)), 0)
-                    active = True
-                except (OSError, ValueError):
-                    pass
-            fresh_remote = not same_host and now - float(lease.get("heartbeat", 0)) < 120
-            if active or fresh_remote:
-                raise RuntimeError(
-                    "project checkpoint is owned by %s pid %s"
-                    % (lease.get("hostname"), lease.get("pid"))
-                )
-        self.state["lease"] = {
-            "hostname": socket.gethostname(),
-            "pid": os.getpid(),
-            "heartbeat": now,
-        }
+    @staticmethod
+    def _record_name(run_id):
+        label = _safe_name(str(run_id))
+        digest = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:12]
+        return "%s-%s.json" % (label, digest)
 
-    def save(self):
-        if self.state.get("lease") is not None:
-            self.state["lease"]["heartbeat"] = time.time()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def _read_json(path):
+        with Path(path).open(encoding="utf-8") as handle:
+            return json.load(handle)
+
+    @staticmethod
+    def _sync_directory(directory):
+        try:
+            descriptor = os.open(str(directory), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _write_json(cls, path, value):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix="." + self.path.name + ".", dir=self.path.parent
+            prefix="." + path.name + ".", dir=path.parent
         )
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(self.state, handle, sort_keys=True, separators=(",", ":"))
+                json.dump(value, handle, sort_keys=True, separators=(",", ":"))
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary_name, self.path)
+            os.replace(temporary_name, path)
+            cls._sync_directory(path.parent)
         except BaseException:
             Path(temporary_name).unlink(missing_ok=True)
             raise
 
+    def _load_records(self, directory):
+        records = {}
+        if not directory.is_dir():
+            return records
+        for path in sorted(directory.glob("*.json")):
+            try:
+                record = self._read_json(path)
+                records[record["run_id"]] = record["record"]
+            except (KeyError, OSError, ValueError, json.JSONDecodeError):
+                # Atomic replacement guarantees that only a manually damaged
+                # record can reach this branch.  Treat it as unfinished.
+                continue
+        return records
+
+    def _write_record(self, directory, run_id, record):
+        self._write_json(
+            directory / self._record_name(run_id),
+            {"run_id": run_id, "record": record},
+        )
+
+    def _migrate_v1(self, legacy, identity):
+        self.records_dir.mkdir(parents=True, exist_ok=True)
+        for run_id, record in legacy.get("runs", {}).items():
+            self._write_record(self.runs_dir, run_id, record)
+        for run_id, record in legacy.get("external", {}).items():
+            # v1 external completion has no dependency/output fingerprints.
+            # It must be recomputed before it can be safely reused.
+            migrated = dict(record)
+            migrated.pop("status", None)
+            self._write_record(self.external_dir, run_id, migrated)
+        self._write_json(
+            self.path,
+            {"version": self.VERSION, "identity": identity},
+        )
+
+    def _load_or_create(self, identity, resume):
+        if self.path.is_file() and resume:
+            metadata = self._read_json(self.path)
+            saved_identity = metadata.get("identity", {})
+            if metadata.get("version") == 1:
+                saved_identity = {
+                    key: saved_identity.get(key)
+                    for key in ("manifest", "output_dir", "project_db")
+                }
+            if saved_identity != identity:
+                raise ValueError(
+                    "project checkpoint has different scientific inputs/options; "
+                    "use --no-resume with --overwrite for a fresh project"
+                )
+            if metadata.get("version") == 1:
+                self._migrate_v1(metadata, identity)
+                metadata = self._read_json(self.path)
+            if metadata.get("version") != self.VERSION:
+                raise ValueError("unsupported project checkpoint version")
+        else:
+            if self.records_dir.exists():
+                shutil.rmtree(self.records_dir)
+            self._write_json(
+                self.path, {"version": self.VERSION, "identity": identity}
+            )
+        self.state = {
+            "version": self.VERSION,
+            "identity": identity,
+            "runs": self._load_records(self.runs_dir),
+            "external": self._load_records(self.external_dir),
+        }
+
+    def _lease_owner(self):
+        try:
+            return self._read_json(self.lease_dir / "owner.json")
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _pid_active(pid):
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _lease_is_active(self, owner):
+        if not owner:
+            try:
+                return time.time() - self.lease_dir.stat().st_mtime < self.STALE_SECONDS
+            except OSError:
+                return False
+        if owner.get("hostname") == socket.gethostname():
+            return self._pid_active(owner.get("pid", -1))
+        return time.time() - float(owner.get("heartbeat", 0)) < self.STALE_SECONDS
+
+    def _claim(self):
+        for _attempt in range(4):
+            try:
+                self.lease_dir.mkdir(parents=False)
+            except FileExistsError:
+                owner = self._lease_owner()
+                if self._lease_is_active(owner):
+                    raise RuntimeError(
+                        "project checkpoint is owned by %s pid %s"
+                        % ((owner or {}).get("hostname"), (owner or {}).get("pid"))
+                    )
+                stale = self.lease_dir.with_name(
+                    self.lease_dir.name + ".stale-" + uuid.uuid4().hex
+                )
+                try:
+                    os.replace(self.lease_dir, stale)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    continue
+                shutil.rmtree(stale, ignore_errors=True)
+                continue
+            self._owner = {
+                "hostname": socket.gethostname(),
+                "pid": os.getpid(),
+                "heartbeat": time.time(),
+            }
+            self._write_json(self.lease_dir / "owner.json", self._owner)
+            return
+        raise RuntimeError("could not claim project checkpoint lease")
+
+    def touch(self):
+        if self._owner is None:
+            return
+        self._owner = {**self._owner, "heartbeat": time.time()}
+        self._write_json(self.lease_dir / "owner.json", self._owner)
+
+    def _heartbeat(self):
+        while not self._heartbeat_stop.wait(self.HEARTBEAT_SECONDS):
+            try:
+                self.touch()
+            except OSError:
+                # A later foreground checkpoint operation will surface an I/O
+                # failure; do not silently relinquish a live lease here.
+                pass
+
+    def _start_heartbeat(self):
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat, name="biosaur2-project-lease", daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    def open(self, identity, *, resume):
+        self.lease_dir.parent.mkdir(parents=True, exist_ok=True)
+        self._claim()
+        try:
+            self._load_or_create(identity, resume)
+            self._start_heartbeat()
+            return self
+        except BaseException:
+            self.release()
+            raise
+
     def release(self):
-        if self.state:
-            self.state["lease"] = None
-            self.save()
+        if self._heartbeat_stop is not None:
+            self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=self.HEARTBEAT_SECONDS + 1)
+        self._heartbeat_stop = self._heartbeat_thread = None
+        owner = self._lease_owner()
+        if owner == self._owner:
+            shutil.rmtree(self.lease_dir, ignore_errors=True)
+        self._owner = None
 
     def run_record(self, run_id):
         return self.state.get("runs", {}).get(run_id)
 
     def put_run(self, run_id, record):
         self.state.setdefault("runs", {})[run_id] = record
-        self.save()
+        self._write_record(self.runs_dir, run_id, record)
 
     def external_record(self, run_id):
         return self.state.get("external", {}).get(run_id)
 
     def put_external(self, run_id, record):
         self.state.setdefault("external", {})[run_id] = record
-        self.save()
+        self._write_record(self.external_dir, run_id, record)
