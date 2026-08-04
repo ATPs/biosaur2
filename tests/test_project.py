@@ -12,8 +12,8 @@ from biosaur2.project import (
     _project_worker,
     _resume_option_signature,
     _input_fingerprint,
+    _read_successful_external_runs,
     _read_successful_runs,
-    _resume_option_signature,
     _scientific_command,
     _write_project_database,
     validate_project,
@@ -83,6 +83,8 @@ def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
         ]
     ) == 0
     assert captured["options"]["mode"] == "legacy"
+    assert captured["options"]["resume"] is True
+    assert captured["options"]["max_memory"] > 0
 
     project_cli.run_project_cli(
         [
@@ -293,6 +295,9 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert successful["run"]["command"] == command
     assert successful["run"]["input_fingerprint"] == _input_fingerprint(run)
     assert successful["run"]["peak_rss_kib"] == 123456
+    assert _read_successful_external_runs(database)["run"][
+        "new_external_feature_count"
+    ] == 2
     assert validate_project(database) == {"run_count": 1, "problems": ()}
 
     import duckdb
@@ -326,7 +331,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert json.loads(persisted[1]) == hybrid_summary["generic_summary"]
     assert external == (10, 9, 2)
     assert alignment == ("explicit:g", "run", "run", "other", "accepted")
-    assert schema_version == "5"
+    assert schema_version == "6"
     assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")

@@ -6,7 +6,8 @@ import argparse
 import logging
 import math
 
-from .cache_runtime import CacheWorkspace, default_cache_dir
+from .cache_runtime import ProjectCacheWorkspace, default_cache_dir
+from .parallel import physical_memory_bytes
 from .project_manifest import auto_pair_runs, write_manifest
 from .project import run_project, validate_project
 from .search import (
@@ -129,7 +130,13 @@ README.md and examples/hybrid_project_manifest.tsv.
             "--format", choices=("tsv", "parquet", "duckdb"), default=None,
             help="per-run output format (default: automatic: tsv in legacy mode, parquet in hybrid mode)",
         )
-        parser.add_argument("--workers", type=int, default=4, help="total CPU worker-process budget shared dynamically across runs")
+        parser.add_argument("--workers", type=int, default=4, help="target busy CPU cores; Project manager may use bounded soft overcommit across runs")
+        parser.add_argument(
+            "--max-memory",
+            type=_positive_integer,
+            default=max(1, physical_memory_bytes() // (1024 ** 3)),
+            help="maximum project memory admission limit in integer GiB; swap is excluded",
+        )
         parser.add_argument("--cache-dir", default=str(default_cache_dir()), help="root for all raw, strict-stage, candidate, and project caches")
         parser.add_argument("--keep-cache", action="store_true", help="retain fingerprinted caches for later reuse")
         parser.add_argument(
@@ -137,7 +144,12 @@ README.md and examples/hybrid_project_manifest.tsv.
             help="maximum feature/precursor charge hypothesis passed to each run",
         )
         parser.add_argument("--continue-on-error", action="store_true", help="finish independent runs after a failure but retain a failed project status")
-        parser.add_argument("--resume", action="store_true", help="reuse successful runs only when input and resolved option signatures still match")
+        parser.add_argument(
+            "--resume",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="reuse compatible completed work by default; --no-resume starts a fresh project",
+        )
         parser.add_argument("--overwrite", action="store_true", help="atomically replace existing per-run/project outputs instead of refusing collisions")
         parser.add_argument("--psm-q-value-max", type=float, default=0.01, help="default maximum Percolator q-value; manifest q_value_max may override it per run")
         parser.add_argument("--psm-pep-max", type=float, default=None, help=_advanced_help(show_all, "optional maximum PSM posterior error probability; none disables this filter"))
@@ -273,14 +285,17 @@ README.md and examples/hybrid_project_manifest.tsv.
         manifest = options.pop("manifest")
         output_dir = options.pop("output_dir")
         project_db = options.pop("project_db")
-        cache_workspace = CacheWorkspace.create(
-            options["cache_dir"], keep=options["keep_cache"]
+        cache_workspace = ProjectCacheWorkspace.create(
+            options["cache_dir"], project_db, keep=options["keep_cache"]
         )
         options["_cache_workspace"] = str(cache_workspace.workspace)
+        options["_project_checkpoint_path"] = str(cache_workspace.checkpoint_path)
+        completed = False
         try:
             run_project(manifest, output_dir, project_db, **options)
+            completed = True
         finally:
-            cache_workspace.cleanup()
+            cache_workspace.cleanup(success=completed)
         return 0
     if arguments and arguments[0] == "validate":
         parser = argparse.ArgumentParser(

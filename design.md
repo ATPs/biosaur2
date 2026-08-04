@@ -432,17 +432,24 @@ atomic publication.
 
 `--cache-dir` defines one root for all three layers in single-run and project
 processing. The default root is `.biosaur2_cache` in the current directory.
-Without `--keep-cache`, each command uses an isolated invocation namespace and
-removes it after all run and project stages finish. With `--keep-cache`, stable
-source-keyed run directories allow later compatible commands to reuse layers.
+Single-run commands use an isolated invocation namespace without
+`--keep-cache`. Project mode instead uses a deterministic project workspace and
+an atomic checkpoint: interruption retains compatible cache layers and the next
+invocation resumes automatically. On a successful Project, strict/candidate
+layers are deleted after their local consumer, raw/ownership layers after the
+external recipient, and the remaining workspace is deleted. With
+`--keep-cache`, stable source-keyed run directories allow later compatible
+commands to reuse every layer.
 
-`--workers` is one total CPU worker-process budget. For multiple files, the
-scheduler targets roughly four workers per active run, divides the budget
-evenly over run slots, and hands a completed slot's allocation to the next
-pending run. The budget is capped by detected available CPUs and running
-process pools are not resized. CLI startup fixes implicit OpenMP, BLAS,
-NumExpr, vecLib and Arrow CPU/I/O pools at one thread before numerical modules
-load, so they cannot exceed this explicit process budget.
+For Project mode, `--workers` is a busy-core target. The manager starts a
+four-worker cohort and samples the owned process tree's CPU/PSS plus system
+available memory from Linux `/proc`. After three low-CPU samples it adds
+one-worker runs; declared allocations are capped at 1.5 times the target and
+new submission stops when CPU or `--max-memory` (integer GiB, no swap) would be
+exceeded. Local and external-recipient work share this manager. Atomic per-run
+and per-recipient checkpoint records make default resume skip published work.
+CLI startup fixes implicit OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O pools
+at one thread before numerical modules load.
 
 ## Output contract
 
@@ -487,7 +494,8 @@ events with features and PSM-bearing events with identifications.
 | generic local maximum width | `auto` | Strict-feature width q99 clamped to 15-60 s; fallback 30 s. |
 | relaxed local minima/cosine | mono 2; channel 2; channels 2; cosine 0.95 | Guarded retry defaults. |
 | relaxed MS2 feature | false | Conservative MS2-only retry is disabled by default. |
-| workers | 4 | One total CPU budget dynamically shared across files, targeting about four workers per active file. |
+| project workers | 4 | Busy-core target for the adaptive Project manager; declared allocation is bounded at 1.5x. |
+| project max memory | physical RAM | Integer-GiB Project admission limit, excluding swap. |
 
 ## Module responsibilities
 

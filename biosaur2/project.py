@@ -16,13 +16,12 @@ import time
 import pyarrow.parquet as pq
 
 from .output import publish_staged_files, _temporary_neighbor
-from .cache_runtime import run_cache_paths
+from .cache_runtime import ProjectCheckpoint, remove_cache_layers, run_cache_paths
 from .parallel import (
     WorkerFailure,
     effective_worker_budget,
-    run_bounded_process_tasks,
-    run_budgeted_process_tasks,
-    worker_slot_allocations,
+    physical_memory_bytes,
+    run_adaptive_process_tasks,
 )
 from .project_manifest import read_manifest
 from .raw_ms1 import source_fingerprint
@@ -65,15 +64,33 @@ def _resume_option_signature(options):
         "resume",
         "continue_on_error",
         "workers",
+        "max_memory",
         "cache_dir",
         "keep_cache",
         "log_level",
         "_cache_workspace",
+        "_project_checkpoint_path",
+        "_max_memory_bytes",
+        "_effective_workers",
+        "_local_scheduler_summary",
+        "_resumed_external_summaries",
     }
-    return {
+    signature = {
         key: value
         for key, value in options.items()
         if key not in ignored
+    }
+    # Project metadata is JSON. Normalize tuples such as isotope-error lists
+    # before comparing a freshly parsed CLI namespace with persisted options.
+    return json.loads(json.dumps(signature, sort_keys=True, default=str))
+
+
+def _checkpoint_identity(manifest, output_dir, database, options):
+    return {
+        "manifest": str(Path(manifest).resolve()),
+        "output_dir": str(Path(output_dir).resolve()),
+        "project_db": str(Path(database).resolve()),
+        "scientific_options": _resume_option_signature(options),
     }
 
 
@@ -148,6 +165,8 @@ def _project_worker_budgeted(task, allocated_workers):
         "--workers",
         str(allocated_workers),
     ]
+    if task.get("force_overwrite"):
+        execution_command.append("--overwrite")
     if task.get("cache_root"):
         execution_command.extend(
             ("--cache-dir", task["cache_root"], "--keep-cache")
@@ -316,6 +335,39 @@ def _read_successful_runs(database):
         return {}
 
 
+def _read_successful_external_runs(database):
+    """Return completed recipient summaries from a completed project index."""
+
+    if not database.is_file():
+        return {}
+    import duckdb
+
+    try:
+        with duckdb.connect(str(database), read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT external.run_id, external.planned_assay_count, "
+                "external.evaluated_assay_count, external.new_external_feature_count, "
+                "external.new_strict_external_feature_count, "
+                "external.new_weak_external_feature_count, external.status_counts_json "
+                "FROM external_summary AS external "
+                "JOIN stage_status AS stage ON stage.run_id = external.run_id "
+                "WHERE stage.stage = 'external_id' AND stage.status = 'success'"
+            ).fetchall()
+        return {
+            row[0]: {
+                "planned_assay_count": row[1],
+                "evaluated_assay_count": row[2],
+                "new_external_feature_count": row[3],
+                "new_strict_external_feature_count": row[4],
+                "new_weak_external_feature_count": row[5],
+                "status_counts": json.loads(row[6] or "{}"),
+            }
+            for row in rows
+        }
+    except Exception:
+        return {}
+
+
 def _input_fingerprint(run):
     return {
         "mzml": source_fingerprint(run.mzml_path),
@@ -423,6 +475,7 @@ def _write_project_database(
             "CREATE TABLE runs (run_order INTEGER, run_id VARCHAR, mzml_path VARCHAR, "
             "psm_path VARCHAR, status VARCHAR, runtime_sec DOUBLE, error VARCHAR, "
             "cpu_user_sec DOUBLE, cpu_system_sec DOUBLE, peak_rss_kib BIGINT, "
+            "allocated_workers INTEGER, "
             "output_format VARCHAR, run_output_path VARCHAR, "
             "features_path VARCHAR, identification_path VARCHAR, "
             "external_evidence_path VARCHAR, raw_ms1_cache_path VARCHAR, "
@@ -452,6 +505,9 @@ def _write_project_database(
             "CREATE TABLE project_metadata (key VARCHAR, value_json VARCHAR)"
         )
         connection.execute(
+            "CREATE TABLE scheduler_summary (stage VARCHAR, summary_json VARCHAR)"
+        )
+        connection.execute(
             "CREATE TABLE rt_alignment_models (alignment_group VARCHAR, "
             "reference_run VARCHAR, source_run VARCHAR, target_run VARCHAR, method VARCHAR, "
             "anchor_count INTEGER, inlier_count INTEGER, slope DOUBLE, "
@@ -469,7 +525,7 @@ def _write_project_database(
             paths = result["paths"]
             summary = _summary_for_result(result)
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     index,
                     run.run_id,
@@ -481,6 +537,7 @@ def _write_project_database(
                     result.get("cpu_user_sec"),
                     result.get("cpu_system_sec"),
                     result.get("peak_rss_kib"),
+                    result.get("allocated_workers"),
                     paths.get("format", options.get("format", "parquet")),
                     paths.get("run_output"),
                     paths["features"],
@@ -685,8 +742,16 @@ def _write_project_database(
                     row["y_knots_json"],
                 ],
             )
+        for stage, summary in (
+            ("local", options.get("_local_scheduler_summary", {})),
+            ("external", (external_stage or {}).get("scheduler_summary", {})),
+        ):
+            connection.execute(
+                "INSERT INTO scheduler_summary VALUES (?, ?)",
+                [stage, json.dumps(summary, sort_keys=True)],
+            )
         connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', '5')"
+            "INSERT INTO project_metadata VALUES ('project_schema_version', '6')"
         )
         connection.execute(
             "INSERT INTO project_metadata VALUES ('resolved_options', ?)",
@@ -697,7 +762,7 @@ def _write_project_database(
     publish_staged_files([(temporary, database)])
 
 
-def _run_external_stage(runs, results, options):
+def _run_external_stage(runs, results, options, checkpoint=None):
     successful_runs = [
         run
         for index, run in enumerate(runs)
@@ -721,8 +786,19 @@ def _run_external_stage(runs, results, options):
     reference_runs = choose_group_reference_runs(successful_runs, observations)
     plans = plan_external_assays(successful_runs, observations, models)
     tasks = []
+    summaries = {}
     for run in successful_runs:
+        prior = checkpoint.external_record(run.run_id) if checkpoint else None
+        if prior and prior.get("status") == "success":
+            summaries[run.run_id] = prior["summary"]
+            continue
         paths = results[result_index[run.run_id]]["paths"]
+        prior_summary = options.get("_resumed_external_summaries", {}).get(
+            run.run_id
+        )
+        if prior_summary and Path(paths["external_evidence"]).is_file():
+            summaries[run.run_id] = prior_summary
+            continue
         tasks.append(
             {
                 "run": run,
@@ -751,18 +827,36 @@ def _run_external_stage(runs, results, options):
                 },
             }
         )
-    raw, _started, allocations = run_budgeted_process_tasks(
-        _external_worker_budgeted,
-        ((task,) for task in tasks),
-        int(options.get("_effective_workers", options.get("workers", 4))),
-        lambda result: isinstance(result, WorkerFailure),
-    )
+    def checkpoint_external_result(position, value):
+        if isinstance(value, WorkerFailure):
+            return
+        run_id = tasks[position]["run"].run_id
+        if checkpoint:
+            checkpoint.put_external(
+                run_id, {"status": "success", "summary": value}
+            )
+        if not options.get("keep_cache"):
+            remove_cache_layers(
+                tasks[position]["paths"],
+                ("raw", "strict", "candidate", "ownership"),
+            )
+
+    if tasks:
+        raw, _started, scheduler_summary = run_adaptive_process_tasks(
+            _external_worker_budgeted,
+            ((task,) for task in tasks),
+            int(options.get("_effective_workers", options.get("workers", 4))),
+            int(options["_max_memory_bytes"]),
+            lambda result: isinstance(result, WorkerFailure),
+            on_result=checkpoint_external_result,
+        )
+    else:
+        raw, scheduler_summary = {}, {}
     logger.info(
-        "External-ID worker budget: requested=%d allocations=%s",
+        "External-ID adaptive manager: target=%d summary=%s",
         int(options.get("_effective_workers", options.get("workers", 4))),
-        allocations,
+        scheduler_summary,
     )
-    summaries = {}
     failures = []
     for position, value in raw.items():
         run_id = tasks[position]["run"].run_id
@@ -792,6 +886,7 @@ def _run_external_stage(runs, results, options):
         "summaries": summaries,
         "alignment_models": alignment_model_rows(models, reference_runs),
         "reference_runs": reference_runs,
+        "scheduler_summary": scheduler_summary,
     }
 
 
@@ -806,6 +901,18 @@ def run_project(manifest, output_dir, project_db, **options):
     ).resolve()
     effective_workers = effective_worker_budget(int(options.get("workers", 4)))
     options["_effective_workers"] = effective_workers
+    options["_max_memory_bytes"] = int(
+        options.get("_max_memory_bytes")
+        or int(options.get("max_memory", 0) or 0) * (1024 ** 3)
+        or physical_memory_bytes()
+    )
+    checkpoint = None
+    checkpoint_path = options.get("_project_checkpoint_path")
+    if checkpoint_path:
+        checkpoint = ProjectCheckpoint(checkpoint_path).open(
+            _checkpoint_identity(manifest, output_dir, database, options),
+            resume=bool(options.get("resume", True)),
+        )
     logger.debug(
         "Project start: manifest=%s output_dir=%s project_db=%s runs=%d mode=%s "
         "format=%s requested_workers=%d effective_workers=%d resume=%s",
@@ -829,6 +936,23 @@ def run_project(manifest, output_dir, project_db, **options):
             raise ValueError("unsupported psm_format for %s: %s" % (run.run_id, run.psm_format))
 
     successful = _read_successful_runs(database) if options["resume"] else {}
+    resumed_external = (
+        _read_successful_external_runs(database) if options["resume"] else {}
+    )
+    options["_resumed_external_summaries"] = resumed_external
+    if checkpoint and options["resume"]:
+        for run_id, record in checkpoint.state.get("runs", {}).items():
+            if record.get("status") != "success":
+                continue
+            result = record["result"]
+            successful[run_id] = {
+                "input_fingerprint": record["input_fingerprint"],
+                "command": record["command"],
+                "cpu_user_sec": result.get("cpu_user_sec"),
+                "cpu_system_sec": result.get("cpu_system_sec"),
+                "peak_rss_kib": result.get("peak_rss_kib"),
+                "project_option_signature": record["project_option_signature"],
+            }
     tasks = []
     skipped = {}
     for index, run in enumerate(runs):
@@ -848,14 +972,27 @@ def run_project(manifest, output_dir, project_db, **options):
         if options["mode"] == "hybrid":
             required_paths.append(paths["run_output"] or paths["identifications"])
         required_cache_paths = []
-        if options["mode"] == "hybrid" and options.get("external_id", False):
+        external_complete = bool(
+            run.run_id in resumed_external
+            or (
+                checkpoint
+                and checkpoint.external_record(run.run_id)
+                and checkpoint.external_record(run.run_id).get("status") == "success"
+            )
+        )
+        if (
+            options["mode"] == "hybrid"
+            and options.get("external_id", False)
+            and not external_complete
+        ):
             required_cache_paths = [
                 paths["raw_ms1_cache"], paths["residual_ownership_cache"]
             ]
         resume_valid = (
             resume_record is not None
             and resume_record["input_fingerprint"] == _input_fingerprint(run)
-            and _scientific_command(resume_record["command"]) == command
+            and _scientific_command(resume_record["command"])
+            == _scientific_command(command)
             and resume_record.get("project_option_signature")
             == _resume_option_signature(options)
             and all(Path(path).is_file() for path in required_paths)
@@ -888,34 +1025,74 @@ def run_project(manifest, output_dir, project_db, **options):
                         if options["mode"] == "hybrid"
                         else None
                     ),
+                    "force_overwrite": bool(
+                        checkpoint and checkpoint.run_record(run.run_id)
+                    ),
                 },
             )
         )
+        if checkpoint:
+            checkpoint.put_run(
+                run.run_id,
+                {
+                    "status": "pending",
+                    "input_fingerprint": _input_fingerprint(run),
+                    "command": command,
+                    "project_option_signature": _resume_option_signature(options),
+                },
+            )
 
     logger.debug(
-        "Project scheduling: pending_runs=%d resumed_runs=%d allocations=%s",
+        "Project scheduling: pending_runs=%d resumed_runs=%d target_workers=%d max_memory_gib=%.1f",
         len(tasks),
         len(skipped),
-        worker_slot_allocations(effective_workers, len(tasks)),
+        effective_workers,
+        options["_max_memory_bytes"] / float(1024 ** 3),
     )
 
     def task_arguments():
         for _index, task in tasks:
             yield (task,)
 
-    raw, _started, allocations = run_budgeted_process_tasks(
+    def checkpoint_local_result(task_position, value):
+        if not checkpoint or isinstance(value, WorkerFailure):
+            return
+        task = tasks[task_position][1]
+        run = runs[tasks[task_position][0]]
+        checkpoint.put_run(
+            run.run_id,
+            {
+                "status": value.get("status", "failed"),
+                "input_fingerprint": _input_fingerprint(run),
+                "command": task["command"],
+                "project_option_signature": _resume_option_signature(options),
+                "result": value,
+            },
+        )
+        if value.get("status") == "success" and not options.get("keep_cache"):
+            if options["mode"] == "hybrid" and options.get("external_id", False):
+                remove_cache_layers(task["paths"], ("strict", "candidate"))
+            elif options["mode"] == "hybrid":
+                remove_cache_layers(
+                    task["paths"], ("raw", "strict", "candidate", "ownership")
+                )
+
+    raw, _started, scheduler_summary = run_adaptive_process_tasks(
         _project_worker_budgeted,
         task_arguments(),
         effective_workers,
+        options["_max_memory_bytes"],
         None if options["continue_on_error"] else lambda result: (
             isinstance(result, WorkerFailure) or result.get("status") == "failed"
         ),
+        on_result=checkpoint_local_result,
     )
+    options["_local_scheduler_summary"] = scheduler_summary
     logger.info(
-        "Project worker budget: requested=%d effective=%d allocations=%s",
+        "Project adaptive manager: requested=%d effective=%d summary=%s",
         int(options.get("workers", 4)),
         effective_workers,
-        allocations,
+        scheduler_summary,
     )
     results = dict(skipped)
     for task_position, value in raw.items():
@@ -975,13 +1152,17 @@ def run_project(manifest, output_dir, project_db, **options):
         )
     ):
         logger.info("Starting project-level RT alignment and external-ID stage")
-        external_stage = _run_external_stage(runs, results, options)
+        external_stage = _run_external_stage(
+            runs, results, options, checkpoint=checkpoint
+        )
         logger.info("Project-level external-ID stage complete")
     _write_project_database(
         database, runs, results, options, external_stage=external_stage
     )
     if any(result["status"] in {"failed", "not_run"} for result in results.values()):
         raise RuntimeError("one or more project runs failed; inspect the project database")
+    if checkpoint:
+        checkpoint.release()
     return results
 
 

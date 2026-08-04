@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from biosaur2.cache_runtime import CacheWorkspace, run_cache_paths
+from biosaur2.cache_runtime import (
+    CacheWorkspace,
+    ProjectCacheWorkspace,
+    ProjectCheckpoint,
+    remove_cache_layers,
+    run_cache_paths,
+)
 
 
 def test_temporary_cache_workspace_cleans_only_its_invocation(tmp_path):
@@ -27,3 +33,45 @@ def test_retained_cache_path_is_stable_and_layered(tmp_path):
     assert Path(first["raw_ms1_cache"]).name == "raw-ms1"
     assert Path(first["strict_stage_cache"]).name == "strict-stage"
     assert Path(first["candidate_cache"]).name == "candidates"
+
+
+def test_project_workspace_retains_interrupted_cache_then_cleans_success(tmp_path):
+    workspace = ProjectCacheWorkspace.create(
+        tmp_path / "cache", tmp_path / "result" / "project.duckdb", keep=False
+    )
+    marker = workspace.workspace / "runs" / "run" / "raw-ms1" / "manifest.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}\n", encoding="utf-8")
+    workspace.cleanup(success=False)
+    assert marker.is_file()
+    workspace.cleanup(success=True)
+    assert not workspace.workspace.exists()
+
+    retained = ProjectCacheWorkspace.create(
+        tmp_path / "retained-cache", tmp_path / "result" / "project.duckdb", keep=True
+    )
+    retained.checkpoint_path.write_text("{}\n", encoding="utf-8")
+    retained.cleanup(success=True)
+    assert retained.checkpoint_path.is_file()
+
+
+def test_project_checkpoint_is_atomic_and_reopenable(tmp_path):
+    path = tmp_path / "project-state.json"
+    identity = {"project_db": "project.duckdb", "scientific_options": {}}
+    checkpoint = ProjectCheckpoint(path).open(identity, resume=True)
+    checkpoint.put_run("run", {"status": "success", "result": {"runtime_sec": 1}})
+    checkpoint.release()
+    resumed = ProjectCheckpoint(path).open(identity, resume=True)
+    assert resumed.run_record("run")["result"]["runtime_sec"] == 1
+    resumed.release()
+
+
+def test_remove_cache_layers_removes_only_requested_paths(tmp_path):
+    paths = run_cache_paths(tmp_path, tmp_path / "source.mzML")
+    for path in paths.values():
+        if path != paths["cache_run_dir"]:
+            Path(path).mkdir(parents=True, exist_ok=True)
+    remove_cache_layers(paths, ("strict", "candidate"))
+    assert Path(paths["raw_ms1_cache"]).is_dir()
+    assert not Path(paths["strict_stage_cache"]).exists()
+    assert not Path(paths["candidate_cache"]).exists()

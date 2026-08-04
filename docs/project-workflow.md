@@ -95,8 +95,12 @@ biosaur2 project run \
 biosaur2 project validate --project-db results/project.duckdb
 ```
 
-`--workers` is the total CPU budget. Biosaur2 dynamically chooses active files
-and the per-file allocation without exceeding it.
+`--workers` is the Project manager's target number of busy CPU cores. It starts
+with four-worker runs, then adds one-worker runs only while measured project
+CPU remains below target and memory is available. Declared allocations are
+bounded at 1.5 times the target, so phase overlap is controlled rather than
+unbounded. `--max-memory` is an integer GiB admission cap (default: physical
+RAM/cgroup limit; swap is excluded).
 
 For Parquet or TSV, every run directory contains its own `features` and
 `identifications` files. A single-file Hybrid command stops there. A successful
@@ -126,15 +130,18 @@ biosaur2 project run --manifest runs.tsv --output-dir results-recheck \
   --cache-dir project-cache --keep-cache
 ```
 
-Alternatively, use the original locations with `--resume` to skip completed
-runs whose inputs and scientific option signatures still match, or
-`--overwrite` to regenerate their outputs while reusing compatible caches.
+Project resume is on by default. Reusing the original locations skips completed
+local runs and external recipients whose inputs, scientific options and outputs
+still match; use `--no-resume --overwrite` for a fresh replacement run.
 
 Cache manifests fingerprint the source and relevant scientific state. A
 downstream option change does not invalidate raw ingestion unnecessarily;
 incompatible or partially published layers are recomputed. Without
-`--keep-cache`, the job's private cache namespace is removed only after both
-per-run and cross-run stages finish.
+`--keep-cache`, an interrupted Project retains its deterministic private
+workspace for resume. After each checkpoint, strict/candidate layers are
+removed once external-ID no longer needs them; raw/ownership layers are removed
+after the recipient succeeds. The remaining workspace is removed after a fully
+successful Project. `--keep-cache` preserves all compatible layers.
 
 Advanced alignment and external-extraction tolerances appear under
 `biosaur2 project run --help-all`. Keep defaults unless a representative
