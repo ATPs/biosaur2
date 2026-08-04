@@ -11,6 +11,7 @@ import numpy as np
 
 from .chemistry import PROTON_MASS
 from .confidence import TargetDecoyCompetition, target_decoy_q_values
+from .cutils import generic_local_component_metrics
 from .local_refinement import SegmentEdit, refine_local_isotope_components
 from .generic_association import C13_C12_MASS_DIFF
 from .parallel import balanced_ranges, run_process_tasks
@@ -208,50 +209,35 @@ def evaluate_generic_local_candidate(
             if allocated[isotope_error, event_local] <= 0:
                 continue
             selected_component_found = True
-            channel_counts = [
-                int(np.count_nonzero(values > 0)) for values in allocated
-            ]
-            mono_points = channel_counts[0]
-            if mono_points < min_mono_points:
-                failures["insufficient_mono_points"] += 1
-                continue
-            supported_channels = sum(
-                count >= min_channel_points for count in channel_counts
-            )
-            if supported_channels < min_supported_channels:
-                failures["insufficient_isotope_channel_support"] += 1
-                continue
             segment_rt = reference.rt_sec[start:end]
-            width = float(segment_rt[-1] - segment_rt[0])
-            if width > width_limit_sec:
-                failures["component_too_wide"] += 1
-                continue
-            integrated = np.asarray(
-                [np.trapezoid(values, segment_rt) for values in allocated],
-                dtype=np.float64,
+            (
+                metric_status, mono_points, point_count, supported_channels,
+                cosine, apex_spread, width, apex_local, event_apex_ratio,
+                boundary_truncated,
+            ) = generic_local_component_metrics(
+                np.ascontiguousarray(allocated, dtype=np.float64),
+                np.ascontiguousarray(segment_rt, dtype=np.float64),
+                np.ascontiguousarray(theoretical, dtype=np.float64),
+                isotope_error,
+                event_local,
+                min_mono_points,
+                min_channel_points,
+                min_supported_channels,
+                min_cosine,
+                width_limit_sec,
             )
-            denominator = float(
-                np.linalg.norm(integrated) * np.linalg.norm(theoretical)
+            metric_failures = (
+                "insufficient_mono_points",
+                "insufficient_isotope_channel_support",
+                "component_too_wide",
+                "low_averagine_cosine",
+                "isotope_apex_spread",
             )
-            cosine = None if denominator == 0 else float(
-                np.dot(integrated, theoretical) / denominator
-            )
-            if cosine is None or cosine < min_cosine:
-                failures["low_averagine_cosine"] += 1
-                continue
-            apex_rts = []
-            for values, count in zip(allocated, channel_counts):
-                if count >= min_channel_points:
-                    apex_rts.append(float(segment_rt[int(np.argmax(values))]))
-            apex_spread = max(apex_rts) - min(apex_rts)
-            allowed_apex_spread = max(3.0, min(10.0, width * 0.5))
-            if apex_spread > allowed_apex_spread:
-                failures["isotope_apex_spread"] += 1
+            if metric_status:
+                failures[metric_failures[metric_status - 1]] += 1
                 continue
             observed_mz = float(selected_trace.observed_mz[event_position])
             mass_error = (observed_mz - selected) * 1e6 / selected
-            envelope = np.sum(allocated, axis=0, dtype=np.float64)
-            apex_local = int(np.argmax(envelope))
             mass_support = max(0.0, 1.0 - abs(mass_error) / ppm)
             cosine_denominator = max(1e-12, 1.0 - float(min_cosine))
             cosine_support = min(
@@ -261,14 +247,8 @@ def evaluate_generic_local_candidate(
                     (float(cosine) - float(min_cosine)) / cosine_denominator,
                 ),
             )
-            event_apex_ratio = min(
-                1.0,
-                max(
-                    0.0,
-                    float(envelope[event_local])
-                    / max(float(envelope[apex_local]), 1e-12),
-                ),
-            )
+            event_apex_ratio = min(1.0, max(0.0, event_apex_ratio))
+            allowed_apex_spread = max(3.0, min(10.0, width * 0.5))
             coelution_support = max(
                 0.0, 1.0 - apex_spread / max(allowed_apex_spread, 1e-12)
             )
@@ -296,12 +276,8 @@ def evaluate_generic_local_candidate(
                 )
             )
             boundary_truncated = bool(
-                (start == 0 and envelope.size and envelope[0] > 0)
-                or (
-                    end == reference.rt_sec.size
-                    and envelope.size
-                    and envelope[-1] > 0
-                )
+                boundary_truncated
+                and (start == 0 or end == reference.rt_sec.size)
             )
             allocation_group_key = None
             if component.source == "identifiable_nnls":
@@ -333,7 +309,7 @@ def evaluate_generic_local_candidate(
                 scan_apex=int(reference.scan_number[start + apex_local]),
                 width_sec=width,
                 mono_points=mono_points,
-                point_count=int(np.count_nonzero(envelope > 0)),
+                point_count=point_count,
                 supported_channels=supported_channels,
                 isotope_cosine=cosine,
                 isotope_apex_spread_sec=apex_spread,

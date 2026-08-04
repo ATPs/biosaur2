@@ -14,7 +14,8 @@ from .raw_ms1 import source_fingerprint
 from .generic_association import C13_C12_MASS_DIFF
 
 
-LOCAL_CANDIDATE_CACHE_VERSION = 1
+LOCAL_CANDIDATE_CACHE_VERSION = 2
+NATIVE_GENERIC_LOCAL_ABI = "generic-component-metrics-v1"
 PAYLOAD_NAME = "candidate_pairs.pkl"
 MANIFEST_NAME = "manifest.json"
 
@@ -32,6 +33,7 @@ def _implementation_signature():
         "raw_ms1.py",
         "residual.py",
         "postprocess_cache.py",
+        "cutils.pyx",
     ):
         path = package / name
         digest.update(name.encode("ascii"))
@@ -39,6 +41,7 @@ def _implementation_signature():
     digest.update(
         ("C13_C12_MASS_DIFF=%.17g" % C13_C12_MASS_DIFF).encode("ascii")
     )
+    digest.update(NATIVE_GENERIC_LOCAL_ABI.encode("ascii"))
     return digest.hexdigest()
 
 

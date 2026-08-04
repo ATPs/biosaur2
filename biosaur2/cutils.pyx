@@ -1,7 +1,7 @@
 cimport cython
 import numpy as np
 cimport numpy as np
-from libc.math cimport NAN
+from libc.math cimport NAN, log1p, sqrt
 import itertools
 import math
 from collections import Counter, defaultdict
@@ -146,6 +146,254 @@ def extract_traces_values(
                     weighted_mz / total if total > 0.0 else NAN
                 )
     return values, observed
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def generic_local_component_metrics(
+    np.ndarray[np.float64_t, ndim=2] allocated,
+    np.ndarray[np.float64_t, ndim=1] rt_sec,
+    np.ndarray[np.float64_t, ndim=1] theoretical,
+    int isotope_error,
+    int event_local,
+    int min_mono_points,
+    int min_channel_points,
+    int min_supported_channels,
+    double min_cosine,
+    double width_limit_sec,
+):
+    """Return the hot generic-local component gates without Python/NumPy loops.
+
+    The caller owns all policy and result-object construction.  Integer status
+    codes intentionally keep this kernel free of Python objects while its
+    numeric loops run without the GIL:
+    0 accepted, 1 mono, 2 channels, 3 width, 4 cosine, 5 apex spread.
+    """
+
+    cdef Py_ssize_t channel_count = allocated.shape[0]
+    cdef Py_ssize_t scan_count = allocated.shape[1]
+    cdef Py_ssize_t channel, scan, apex_scan, envelope_apex = 0
+    cdef int mono_points = 0
+    cdef int point_count = 0
+    cdef int supported_channels = 0
+    cdef int status = 0
+    cdef double value, previous, envelope, event_envelope = 0.0
+    cdef double max_envelope = -1.0
+    cdef double integral, dot_value = 0.0, integrated_norm = 0.0
+    cdef double theoretical_norm = 0.0, cosine = 0.0
+    cdef double width = 0.0, apex_min = 0.0, apex_max = 0.0
+    cdef double apex_spread = 0.0, event_apex_ratio = 0.0
+    cdef double allowed_apex_spread = 0.0
+    cdef bint boundary_truncated = False
+    cdef bint have_apex = False
+    cdef bint cosine_defined = False
+    cdef np.ndarray[np.float64_t, ndim=1] integrated = np.empty(
+        channel_count, dtype=np.float64
+    )
+    cdef const double[:, ::1] allocated_view = allocated
+    cdef const double[::1] rt_view = rt_sec
+    cdef const double[::1] theoretical_view = theoretical
+    cdef double[::1] integrated_view = integrated
+
+    if channel_count == 0 or scan_count == 0:
+        return (1, 0, 0, 0, None, None, 0.0, 0, 0.0, False)
+    if theoretical.shape[0] != channel_count:
+        raise ValueError("theoretical isotope vector does not match channels")
+    if isotope_error < 0 or isotope_error >= channel_count:
+        raise ValueError("isotope error is outside allocated channels")
+    if event_local < 0 or event_local >= scan_count:
+        raise ValueError("event position is outside allocated component")
+
+    with nogil:
+        width = rt_view[scan_count - 1] - rt_view[0]
+        for channel in range(channel_count):
+            integral = 0.0
+            apex_scan = 0
+            value = allocated_view[channel, 0]
+            if value > 0.0:
+                if channel == 0:
+                    mono_points += 1
+            for scan in range(1, scan_count):
+                previous = value
+                value = allocated_view[channel, scan]
+                if value > 0.0:
+                    if channel == 0:
+                        mono_points += 1
+                if value > allocated_view[channel, apex_scan]:
+                    apex_scan = scan
+                integral += 0.5 * (previous + value) * (
+                    rt_view[scan] - rt_view[scan - 1]
+                )
+            integrated_view[channel] = integral
+        # Recount channels and envelope in a single cache-friendly scan.  This
+        # also preserves NumPy's first-maximum apex convention.
+        for channel in range(channel_count):
+            value = 0.0
+            for scan in range(scan_count):
+                if allocated_view[channel, scan] > 0.0:
+                    value += 1.0
+            if value >= min_channel_points:
+                supported_channels += 1
+
+        for scan in range(scan_count):
+            envelope = 0.0
+            for channel in range(channel_count):
+                envelope += allocated_view[channel, scan]
+            if envelope > 0.0:
+                point_count += 1
+            if envelope > max_envelope:
+                max_envelope = envelope
+                envelope_apex = scan
+            if scan == event_local:
+                event_envelope = envelope
+            if scan == 0 and envelope > 0.0:
+                boundary_truncated = True
+            if scan == scan_count - 1 and envelope > 0.0:
+                boundary_truncated = True
+
+        for channel in range(channel_count):
+            dot_value += integrated_view[channel] * theoretical_view[channel]
+            integrated_norm += integrated_view[channel] * integrated_view[channel]
+            theoretical_norm += theoretical_view[channel] * theoretical_view[channel]
+
+        if integrated_norm > 0.0 and theoretical_norm > 0.0:
+            cosine = dot_value / sqrt(integrated_norm * theoretical_norm)
+            cosine_defined = True
+
+        if status == 0:
+            for channel in range(channel_count):
+                value = 0.0
+                for scan in range(scan_count):
+                    if allocated_view[channel, scan] > 0.0:
+                        value += 1.0
+                if value >= min_channel_points:
+                    apex_scan = 0
+                    for scan in range(1, scan_count):
+                        if allocated_view[channel, scan] > allocated_view[channel, apex_scan]:
+                            apex_scan = scan
+                    if not have_apex:
+                        apex_min = rt_view[apex_scan]
+                        apex_max = rt_view[apex_scan]
+                        have_apex = True
+                    elif rt_view[apex_scan] < apex_min:
+                        apex_min = rt_view[apex_scan]
+                    elif rt_view[apex_scan] > apex_max:
+                        apex_max = rt_view[apex_scan]
+            apex_spread = apex_max - apex_min
+            if mono_points < min_mono_points:
+                status = 1
+            elif supported_channels < min_supported_channels:
+                status = 2
+            elif width > width_limit_sec:
+                status = 3
+            elif not cosine_defined or cosine < min_cosine:
+                status = 4
+            allowed_apex_spread = width * 0.5
+            if allowed_apex_spread < 3.0:
+                allowed_apex_spread = 3.0
+            elif allowed_apex_spread > 10.0:
+                allowed_apex_spread = 10.0
+            if status == 0 and apex_spread > allowed_apex_spread:
+                status = 5
+        if max_envelope > 0.0:
+            event_apex_ratio = event_envelope / max_envelope
+
+    return (
+        status, mono_points, point_count, supported_channels, cosine,
+        apex_spread, width, envelope_apex, event_apex_ratio,
+        bool(boundary_truncated),
+    )
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def local_segment_objective_values(
+    np.ndarray[np.float64_t, ndim=2] matrix,
+    np.ndarray[np.int64_t, ndim=2] segments,
+    np.ndarray[np.float64_t, ndim=1] theoretical,
+):
+    """Evaluate local-refinement segment proposals using one native pass."""
+
+    cdef Py_ssize_t channel_count = matrix.shape[0]
+    cdef Py_ssize_t scan_count = matrix.shape[1]
+    cdef Py_ssize_t segment_count = segments.shape[0]
+    cdef Py_ssize_t segment_index, channel, scan, start, end, length
+    cdef double value = 0.0, total_intensity = 0.0, objective = 0.0
+    cdef double expected_norm = 0.0, integrated_norm, dot_value, cosine
+    cdef double envelope, previous, current, following
+    cdef int supported, internal_zeros, apex_count
+    cdef np.ndarray[np.float64_t, ndim=1] integrated = np.empty(
+        channel_count, dtype=np.float64
+    )
+    cdef const double[:, ::1] matrix_view = matrix
+    cdef const long long[:, ::1] segments_view = segments
+    cdef const double[::1] theoretical_view = theoretical
+    cdef double[::1] integrated_view = integrated
+
+    if matrix.ndim != 2 or channel_count == 0:
+        raise ValueError("local trace matrix must be channels by scans")
+    if theoretical.shape[0] != channel_count:
+        raise ValueError("theoretical isotope vector does not match channels")
+    if segments.ndim != 2 or segments.shape[1] != 2:
+        raise ValueError("segments must be a two-column integer array")
+    if segment_count == 0:
+        return 0.0
+
+    with nogil:
+        for channel in range(channel_count):
+            expected_norm += theoretical_view[channel] * theoretical_view[channel]
+        expected_norm = sqrt(expected_norm)
+        for segment_index in range(segment_count):
+            start = segments_view[segment_index, 0]
+            end = segments_view[segment_index, 1]
+            if start < 0 or end < start or end > scan_count:
+                continue
+            length = end - start
+            integrated_norm = 0.0
+            dot_value = 0.0
+            supported = 0
+            for channel in range(channel_count):
+                value = 0.0
+                for scan in range(start, end):
+                    value += matrix_view[channel, scan]
+                integrated_view[channel] = value
+                total_intensity += value
+                if value > 0.0:
+                    supported += 1
+                integrated_norm += value * value
+                dot_value += value * theoretical_view[channel]
+            if integrated_norm > 0.0 and expected_norm > 0.0:
+                cosine = dot_value / (sqrt(integrated_norm) * expected_norm)
+            else:
+                cosine = 0.0
+            internal_zeros = 0
+            for scan in range(start, end):
+                envelope = 0.0
+                for channel in range(channel_count):
+                    envelope += matrix_view[channel, scan]
+                if envelope == 0.0:
+                    internal_zeros += 1
+            apex_count = 0
+            for scan in range(start + 1, end - 1):
+                previous = 0.0
+                current = 0.0
+                following = 0.0
+                for channel in range(channel_count):
+                    previous += matrix_view[channel, scan - 1]
+                    current += matrix_view[channel, scan]
+                    following += matrix_view[channel, scan + 1]
+                if current > previous and current >= following:
+                    apex_count += 1
+            objective += 2.0 * cosine
+            objective += 0.1 * supported - 0.2 * internal_zeros
+            if apex_count > 1:
+                objective -= 4.0 * (apex_count - 1)
+        objective += log1p(total_intensity)
+        if segment_count > 1:
+            objective -= 5.0 * (segment_count - 1)
+    return objective
 
 
 @cython.cdivision(True)

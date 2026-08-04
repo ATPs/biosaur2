@@ -513,7 +513,7 @@ events with features and PSM-bearing events with identifications.
 | `identifications.py`, `chemistry.py` | Percolator parsing/mapping, modification normalization, exact formulas and isotope libraries. |
 | `hybrid.py` | Direct/generic association, residual recovery, strict protection, quantification assembly and audit finalization. |
 | `generic_association.py`, `generic_local.py` | Generic precursor association, scoring, local extraction and target/decoy candidates. |
-| `local_refinement.py`, `optimization.py` | Bounded trace edits, local components and non-negative decomposition. |
+| `local_refinement.py`, `optimization.py`, `cutils.pyx` | Bounded trace edits, local components and non-negative decomposition. Generic-local component gating (channel support, integration, cosine, apex and score inputs) runs in the Cython numeric kernel; Python retains the evidence policy and output objects. |
 | `residual.py` | Reversible intensity ownership and conservation ledger. |
 | `direct_competitors.py` | Pre-conflict capture of bounded direct-relevant losing hill candidates. |
 | `confidence.py` | Deterministic decoys, competitions and extraction q-values. |

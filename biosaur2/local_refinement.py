@@ -8,6 +8,7 @@ from typing import Optional
 
 import numpy as np
 
+from .cutils import local_segment_objective_values
 from .optimization import nonnegative_deconvolution
 
 
@@ -74,39 +75,11 @@ def _contiguous_segments(present):
 def _segment_objective(matrix, segments, theoretical):
     if not segments:
         return 0.0
-    value = 0.0
-    total_intensity = 0.0
-    expected = np.asarray(theoretical, dtype=np.float64)
-    expected_norm = float(np.linalg.norm(expected))
-    for start, end in segments:
-        local = matrix[:, start:end]
-        integrated = np.sum(local, axis=1, dtype=np.float64)
-        denominator = float(np.linalg.norm(integrated) * expected_norm)
-        cosine = 0.0 if denominator == 0 else float(
-            np.dot(integrated, expected) / denominator
-        )
-        supported = int(np.count_nonzero(np.sum(local, axis=1) > 0))
-        internal_zeros = int(
-            np.count_nonzero(np.sum(local, axis=0, dtype=np.float64) == 0)
-        )
-        # The same conserved raw intensity must not be rewarded once per
-        # proposed segment: doing so made merge/relink decisions depend on
-        # absolute ion intensity and favored splitting high-abundance hills.
-        # Reward total explained signal once, then score each component's
-        # isotope coherence and structural quality.
-        total_intensity += float(np.sum(local))
-        value += 2.0 * cosine
-        value += 0.1 * supported - 0.2 * internal_zeros
-        envelope = np.sum(local, axis=0, dtype=np.float64)
-        apex_count = sum(
-            envelope[position] > envelope[position - 1]
-            and envelope[position] >= envelope[position + 1]
-            for position in range(1, max(1, envelope.size - 1))
-        )
-        value -= 4.0 * max(0, apex_count - 1)
-    value += math.log1p(total_intensity)
-    value -= 5.0 * max(0, len(segments) - 1)
-    return float(value)
+    return float(local_segment_objective_values(
+        np.ascontiguousarray(matrix, dtype=np.float64),
+        np.asarray(tuple(segments), dtype=np.int64),
+        np.ascontiguousarray(theoretical, dtype=np.float64),
+    ))
 
 
 def _append_edit(

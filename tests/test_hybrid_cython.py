@@ -1,5 +1,7 @@
 import numpy as np
+import pytest
 
+from biosaur2.cutils import generic_local_component_metrics
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
 
 
@@ -55,3 +57,32 @@ def test_cython_batch_trace_matches_scalar_reference():
         intensity, observed = _scalar_trace(store, target, 5.0, 0.0, 3.0)
         np.testing.assert_allclose(trace.intensity, intensity)
         np.testing.assert_allclose(trace.observed_mz, observed, equal_nan=True)
+
+
+def test_cython_generic_component_metrics_match_expected_component_gates():
+    allocated = np.asarray(
+        [[0.0, 1.0, 3.0, 1.0, 0.0],
+         [0.0, 0.4, 1.2, 0.4, 0.0],
+         [0.0, 0.2, 0.6, 0.2, 0.0]],
+        dtype=np.float64,
+    )
+    result = generic_local_component_metrics(
+        allocated, np.arange(5, dtype=np.float64),
+        np.asarray([1.0, 0.4, 0.2]), 0, 2, 3, 3, 2, 0.9, 10.0,
+    )
+    assert result[0] == 0
+    assert result[1:4] == (3, 3, 3)
+    assert result[4] == pytest.approx(1.0)
+    assert result[5:9] == (0.0, 4.0, 2, 1.0)
+    assert not result[9]
+
+
+def test_cython_generic_component_metrics_preserve_gate_precedence():
+    allocated = np.asarray(
+        [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]], dtype=np.float64
+    )
+    result = generic_local_component_metrics(
+        allocated, np.arange(3, dtype=np.float64),
+        np.asarray([1.0, 0.4]), 0, 1, 3, 3, 2, 0.99, 1.0,
+    )
+    assert result[0] == 1
