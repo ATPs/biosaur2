@@ -208,6 +208,7 @@ def test_raw_workers_cap_native_threads_and_restore_parent_environment(monkeypat
 
     monkeypatch.setattr(external, "ProcessPoolExecutor", FailingExecutor)
     monkeypatch.setenv("OPENBLAS_NUM_THREADS", "7")
+    monkeypatch.setenv("ARROW_IO_THREADS", "9")
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     with pytest.raises(RuntimeError, match="stop before worker startup"):
         external._parallel_raw_extract(
@@ -216,6 +217,7 @@ def test_raw_workers_cap_native_threads_and_restore_parent_environment(monkeypat
         )
     assert set(seen.values()) == {"1"}
     assert os.environ["OPENBLAS_NUM_THREADS"] == "7"
+    assert os.environ["ARROW_IO_THREADS"] == "9"
     assert "OMP_NUM_THREADS" not in os.environ
 
 

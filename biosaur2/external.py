@@ -57,6 +57,7 @@ from .residual import (
     load_residual_ownership_cache,
 )
 from .schema import compact_schemas
+from .thread_runtime import NATIVE_THREAD_ENVIRONMENT
 
 
 logger = logging.getLogger(__name__)
@@ -68,14 +69,7 @@ logger = logging.getLogger(__name__)
 _EXTERNAL_RAW_STORE = None
 _EXTERNAL_RAW_OPTIONS = None
 
-_NATIVE_THREAD_ENVIRONMENT = (
-    "OPENBLAS_NUM_THREADS",
-    "OMP_NUM_THREADS",
-    "MKL_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS",
-    "BLIS_NUM_THREADS",
-    "VECLIB_MAXIMUM_THREADS",
-)
+_NATIVE_THREAD_ENVIRONMENT = NATIVE_THREAD_ENVIRONMENT
 
 
 @dataclass(frozen=True)

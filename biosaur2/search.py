@@ -1,3 +1,9 @@
+from .thread_runtime import configure_cli_thread_pools
+
+# This must run before importing workflow modules: they load NumPy, SciPy and
+# PyArrow, which initialize their native thread pools during import.
+configure_cli_thread_pools()
+
 from . import main, main_dia, main_dia2
 import argparse
 from copy import deepcopy

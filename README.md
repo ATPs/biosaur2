@@ -124,6 +124,10 @@ output path avoids overwriting the first result.
 files, Biosaur2 distributes that budget dynamically, targeting about four
 workers per active file without exceeding the total.
 
+Biosaur2 CLI commands set OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O
+thread pools to one before loading numerical libraries. This prevents hidden
+native pools from exceeding the explicit `--workers` process budget.
+
 ## Learn the terms
 
 - [Getting started](docs/getting-started.md): MS1/MS2, feature, PSM, required

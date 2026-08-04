@@ -440,7 +440,9 @@ source-keyed run directories allow later compatible commands to reuse layers.
 scheduler targets roughly four workers per active run, divides the budget
 evenly over run slots, and hands a completed slot's allocation to the next
 pending run. The budget is capped by detected available CPUs and running
-process pools are not resized.
+process pools are not resized. CLI startup fixes implicit OpenMP, BLAS,
+NumExpr, vecLib and Arrow CPU/I/O pools at one thread before numerical modules
+load, so they cannot exceed this explicit process budget.
 
 ## Output contract
 
