@@ -282,9 +282,11 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         schema=schemas["hybrid_features"],
     ).replace_schema_metadata(
         {
-            b"biosaur2_hybrid_summary_json": json.dumps(
-                hybrid_summary, sort_keys=True
-            ).encode()
+            b"biosaur2_provenance_json": json.dumps({
+                "hybrid_summary_json": json.dumps(
+                    hybrid_summary, sort_keys=True
+                )
+            }, sort_keys=True).encode()
         }
     )
     pq.write_table(feature_table, paths["features"])
@@ -343,6 +345,10 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
                 "slope": 1.0,
                 "intercept": 2.0,
                 "residual_mad_sec": 1.0,
+                "validation_anchor_count": 7,
+                "validation_median_bias_sec": 0.5,
+                "validation_mad_sec": 1.0,
+                "validation_q90_abs_error_sec": 2.5,
                 "status": "accepted",
                 "x_knots_json": "[]",
                 "y_knots_json": "[]",
@@ -382,7 +388,9 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         ).fetchone()
         alignment = connection.execute(
             "SELECT alignment_group, reference_run, source_run, target_run, "
-            "status FROM rt_alignment_models"
+            "status, validation_anchor_count, validation_median_bias_sec, "
+            "validation_mad_sec, validation_q90_abs_error_sec "
+            "FROM rt_alignment_models"
         ).fetchone()
         schema_version = connection.execute(
             "SELECT value_json FROM project_metadata "
@@ -396,8 +404,10 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert persisted[0] == 1
     assert json.loads(persisted[1]) == hybrid_summary["generic_summary"]
     assert external == (10, 9, 2)
-    assert alignment == ("explicit:g", "run", "run", "other", "accepted")
-    assert schema_version == "8"
+    assert alignment == (
+        "explicit:g", "run", "run", "other", "accepted", 7, 0.5, 1.0, 2.5
+    )
+    assert schema_version == "9"
     assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")

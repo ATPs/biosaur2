@@ -177,7 +177,7 @@ README.md and examples/hybrid_project_manifest.tsv.
             help=_advanced_help(show_all, "maximum deterministic RT anchors fitted per reference edge"),
         )
         parser.add_argument("--external-weak-min-mono-points", type=_positive_integer, default=2, help=_advanced_help(show_all, "minimum monoisotopic points for a weak Project candidate"))
-        parser.add_argument("--external-weak-min-secondary-points", type=_positive_integer, default=1, help=_advanced_help(show_all, "minimum raw points in one secondary isotope"))
+        parser.add_argument("--external-weak-min-secondary-points", type=_positive_integer, default=2, help=_advanced_help(show_all, "minimum raw points in one secondary isotope"))
         parser.add_argument("--external-weak-min-isotope-cosine", type=float, default=0.6, help=_advanced_help(show_all, "minimum isotope cosine for a weak Project candidate"))
         parser.add_argument("--generic-ms2-refine", action=argparse.BooleanOptionalAction, default=True, help="enable/disable unidentified-MS2 hypotheses and residual local recovery")
         parser.add_argument("--generic-q-value-max", type=float, default=0.01, help="estimated false-discovery limit for unidentified-MS2 associations from target/decoy (real-versus-shifted precursor) competition; not the PSM q-value")

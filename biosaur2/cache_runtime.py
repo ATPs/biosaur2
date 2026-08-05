@@ -47,10 +47,10 @@ def run_cache_paths(workspace, source_path, run_id=None):
             run_dir / "external" / "observations-v2.parquet"
         ),
         "external_strong_features": str(
-            run_dir / "external" / "strong-features-v1.parquet"
+            run_dir / "external" / "strong-features-v2.parquet"
         ),
         "external_weak_candidates": str(
-            run_dir / "external" / "weak-candidates-v1.parquet"
+            run_dir / "external" / "weak-candidates-v2.parquet"
         ),
         # Final ownership is consumed only by the project-level external-ID
         # stage.  Keep it separate from reusable upstream caches because it

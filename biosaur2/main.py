@@ -23,15 +23,12 @@ from .preprocessing import (
     process_tof,
 )
 from .raw_ms1 import load_raw_ms1_cache
-from .stage_cache import (
-    build_strict_stage_payload,
-    load_strict_stage_cache,
-    save_strict_stage_cache,
-)
+from .stage_cache import build_strict_stage_payload, invalidate_stale_strict_stage_cache, load_strict_stage_cache, save_strict_stage_cache
 from .hybrid import AssayBuildResult, build_direct_assays, run_hybrid_postprocessing
 from .direct_competitors import capture_direct_processed_hill_competitors
 from .identifications import map_identifications_to_ms2, read_percolator_tsv
 from .output import input_stem
+from .external_weak import append_rejected_candidate, publish_detector_outcomes, remember_reject_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -422,7 +419,7 @@ def _generate_initial_isotope_candidates(
     logger.info('Number of potential isotope clusters: %d', len(ready))
     return ready
 
-def _calibrate_and_filter_isotope_candidates(ready, faims_val, args):
+def _calibrate_and_filter_isotope_candidates(ready, faims_val, args, rejected_sink=None):
     isotope_calibration_override = args.get(
         '_isotope_calibration_override'
     )
@@ -526,19 +523,19 @@ def _calibrate_and_filter_isotope_candidates(ready, faims_val, args):
                 ready[cur_l]['nIsotopes'] = tmp_n_isotopes + 1
                 ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
             else:
+                if rejected_sink is not None:
+                    rejected_sink.append(pep_feature)
                 del ready[cur_l]
                 max_l -= 1
                 cur_l -= 1
         else:
+            if rejected_sink is not None:
+                rejected_sink.append(pep_feature)
             del ready[cur_l]
             max_l -= 1
             cur_l -= 1
         cur_l += 1
     logger.info('Number of potential isotope clusters after smart mass accuracy for isotopes: %d', len(ready))
-    logger.info(
-        'Number of potential isotope clusters after smart mass accuracy for isotopes: %d',
-        len(ready),
-    )
     return ready
 
 def _capture_direct_competitors(
@@ -568,7 +565,7 @@ def _capture_direct_competitors(
     return captured_direct_competitors
 
 def _select_nonconflicting_isotope_candidates(
-    ready, hills_dict, RT_dict, data_start_id
+    ready, hills_dict, RT_dict, data_start_id, rejected_sink=None
 ):
     max_l = len(ready)
     cur_l = 0
@@ -577,6 +574,7 @@ def _select_nonconflicting_isotope_candidates(
     )
     ready_final = []
     ready_set = set()
+    original_by_candidate = {}
     if not ready:
         logger.info('No isotope clusters remained after smart mass accuracy filtering.')
     else:
@@ -595,6 +593,7 @@ def _select_nonconflicting_isotope_candidates(
             if pep_feature['monoisotope hill idx'] not in ready_set:
                 if not any(cand['isotope_hill_idx'] in ready_set for cand in pep_feature['isotopes']):
                     ready_final.append(pep_feature)
+                    original_by_candidate.pop(id(pep_feature), None)
                     ready_set.add(pep_feature['monoisotope hill idx'])
                     for cand in pep_feature['isotopes']:
                         ready_set.add(cand['isotope_hill_idx'])
@@ -610,6 +609,8 @@ def _select_nonconflicting_isotope_candidates(
                             break
                     tmp_n_isotopes = len(tmp)
                     if tmp_n_isotopes:
+                        if rejected_sink is not None:
+                            remember_reject_snapshot(original_by_candidate, pep_feature)
                         all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
                         all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
                         all_exp_intensity = all_exp_intensity[:tmp_n_isotopes+1]
@@ -621,19 +622,21 @@ def _select_nonconflicting_isotope_candidates(
                             ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
                             cur_l -= 1
                         else:
+                            append_rejected_candidate(rejected_sink, original_by_candidate, pep_feature)
                             del ready[cur_l]
                             max_l -= 1
                             cur_l -= 1
                     else:
+                        append_rejected_candidate(rejected_sink, original_by_candidate, pep_feature)
                         del ready[cur_l]
                         max_l -= 1
                         cur_l -= 1
             else:
+                append_rejected_candidate(rejected_sink, original_by_candidate, pep_feature)
                 del ready[cur_l]
                 max_l -= 1
                 cur_l -= 1
             cur_l += 1
-    logger.info('Number of detected isotope clusters: %d', len(ready_final))
     ready_final.sort(
         key=lambda candidate: _final_feature_key(
             candidate, hills_dict, RT_dict, data_start_id
@@ -723,28 +726,23 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
     ready = _generate_initial_isotope_candidates(
         hills_dict, faims_val, mz_step, paseftol, args
     )
-    ready = _calibrate_and_filter_isotope_candidates(ready, faims_val, args)
-    # Project feature-MBR can later reconsider calibrated isotope envelopes
-    # that lose only the ordinary greedy conflict selection.  Keep this data
-    # private to hybrid external mode; normal feature output is unchanged.
-    weak_pool = tuple(ready) if (
-        args.get('feature_mode') == 'hybrid' and args.get('external_id')
-    ) else ()
+    collect_weak = args.get('feature_mode') == 'hybrid' and args.get('external_id')
+    initial_candidate_count = len(ready)
+    smart_rejects = [] if collect_weak else None
+    ready = _calibrate_and_filter_isotope_candidates(ready, faims_val, args, smart_rejects)
+    smart_accepted_count = len(ready)
     captured_direct_competitors = _capture_direct_competitors(
         ready, hills_dict, RT_dict, data_for_analyse_tmp, args, direct_assays,
         direct_events_by_id, direct_competitor_sink,
     )
+    greedy_rejects = [] if collect_weak else None
     ready_set, ready_final = _select_nonconflicting_isotope_candidates(
-        ready, hills_dict, RT_dict, data_start_id
+        ready, hills_dict, RT_dict, data_start_id, greedy_rejects
     )
-    if weak_pool:
-        hills_dict['_external_weak_candidates'] = tuple(
-            candidate for candidate in weak_pool
-            if int(candidate['monoisotope hill idx']) not in ready_set
-            and not any(
-                int(value['isotope_hill_idx']) in ready_set
-                for value in candidate['isotopes']
-            )
+    if collect_weak:
+        publish_detector_outcomes(
+            hills_dict, smart_rejects, greedy_rejects, initial_count=initial_candidate_count,
+            smart_accepted_count=smart_accepted_count, strict_selected_count=len(ready_final)
         )
     _record_losing_direct_competitors(
         ready_final, captured_direct_competitors, direct_competitor_sink
@@ -935,6 +933,7 @@ def _prepare_mzml_processing(
             'strict stage cache path exists but is not a directory: %s'
             % strict_stage_cache
         )
+    invalidate_stale_strict_stage_cache(strict_stage_cache, input_file_path, strict_stage_cache_args)
     if strict_stage_cache and Path(strict_stage_cache).is_dir():
         logger.debug('Checking strict-stage cache: %s', strict_stage_cache)
         strict_cache_started = _debug_stage_start(

@@ -596,7 +596,7 @@ Advanced output notes:
         help=_advanced_help(show_all, 'project compatibility switch for aligned external assays; single-run commands have no donor runs'),
     )
     parser.add_argument('--external-weak-min-mono-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum monoisotopic points for a Project external weak candidate'))
-    parser.add_argument('--external-weak-min-secondary-points', type=_positive_integer, default=1, help=_advanced_help(show_all, 'minimum raw points in one secondary isotope for a Project external weak candidate'))
+    parser.add_argument('--external-weak-min-secondary-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum raw points in one secondary isotope for a Project external weak candidate'))
     parser.add_argument('--external-weak-min-isotope-cosine', type=float, default=0.6, help=_advanced_help(show_all, 'minimum isotope cosine for a Project external weak candidate'))
     parser.add_argument(
         '--generic-ms2-refine', action=argparse.BooleanOptionalAction, default=True,

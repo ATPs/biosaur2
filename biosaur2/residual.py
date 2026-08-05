@@ -243,6 +243,85 @@ class ResidualMS1Ledger:
         )
         return ComponentOverlap("accepted", footprint.requested_intensity, overlap)
 
+    def observed_point_footprint(
+        self, contributions, *, mz_tolerance_ppm: float = 0.01
+    ) -> ComponentFootprint:
+        """Map detector hill centroids to raw points without consuming them."""
+
+        if not math.isfinite(mz_tolerance_ppm) or mz_tolerance_ppm < 0:
+            raise ValueError("mz tolerance must be finite and nonnegative")
+        normalized = tuple(
+            (int(scan), float(mz), float(intensity))
+            for scan, mz, intensity in contributions
+        )
+        if any(
+            not math.isfinite(mz)
+            or mz <= 0
+            or not math.isfinite(intensity)
+            or intensity < 0
+            for _scan, mz, intensity in normalized
+        ):
+            raise ValueError(
+                "observed-point contributions must have finite positive m/z "
+                "and finite nonnegative intensity"
+            )
+        requested_total = float(
+            sum(intensity for _scan, _mz, intensity in normalized)
+        )
+        if requested_total <= self.tolerance:
+            return ComponentFootprint(
+                "no_candidate_intensity", requested_total, ()
+            )
+        by_point = {}
+        for source_scan, observed_mz, requested in normalized:
+            if requested <= self.tolerance:
+                continue
+            local_scan = self._local_scan_index(source_scan)
+            if local_scan is None:
+                return ComponentFootprint(
+                    "source_scan_not_found", requested_total, ()
+                )
+            scan_start = int(self.store.offsets[local_scan])
+            scan_end = int(self.store.offsets[local_scan + 1])
+            mz_values = self.store.mz[scan_start:scan_end]
+            tolerance = max(
+                np.finfo(np.float64).eps * max(abs(observed_mz), 1.0) * 8.0,
+                observed_mz * float(mz_tolerance_ppm) * 1e-6,
+            )
+            start = int(np.searchsorted(
+                mz_values, observed_mz - tolerance, side="left"
+            ))
+            end = int(np.searchsorted(
+                mz_values, observed_mz + tolerance, side="right"
+            ))
+            candidates = []
+            for point_index in range(scan_start + start, scan_start + end):
+                raw = float(self.store.intensity[point_index])
+                proposed = by_point.get(point_index, 0.0)
+                if requested + proposed <= raw + max(
+                    self.tolerance, self.tolerance * raw
+                ):
+                    candidates.append((
+                        abs(float(self.store.mz[point_index]) - observed_mz),
+                        abs(raw - proposed - requested),
+                        point_index,
+                    ))
+            if not candidates:
+                return ComponentFootprint(
+                    "observed_point_not_found", requested_total, ()
+                )
+            point_index = min(candidates)[2]
+            by_point[point_index] = by_point.get(point_index, 0.0) + requested
+        return ComponentFootprint(
+            "accepted",
+            requested_total,
+            tuple(
+                RawPointAllocation(point_index, intensity)
+                for point_index, intensity in sorted(by_point.items())
+                if intensity > self.tolerance
+            ),
+        )
+
     def _local_scan_index(self, source_scan_index: int):
         values = self.store.source_scan_index
         position = int(np.searchsorted(values, int(source_scan_index)))

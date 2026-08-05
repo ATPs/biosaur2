@@ -6,17 +6,20 @@ from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import pickle
+import shutil
 import tempfile
 
 import numpy as np
 
 from .raw_ms1 import source_fingerprint
-STRICT_STAGE_CACHE_VERSION = 2
+STRICT_STAGE_CACHE_VERSION = 3
 PAYLOAD_NAME = "strict_stage.pkl"
 MANIFEST_NAME = "manifest.json"
+logger = logging.getLogger(__name__)
 
 UPSTREAM_ARGUMENTS = (
     "mini",
@@ -40,6 +43,7 @@ UPSTREAM_ARGUMENTS = (
     "md_correction",
     "combine_every",
     "iuse",
+    "external_id",
 )
 
 
@@ -60,6 +64,7 @@ def _implementation_signature():
         "cutils.pyx",
         "direct_competitors.py",
         "stage_cache.py",
+        "external_weak.py",
     ):
         path = package / name
         digest.update(name.encode())
@@ -87,14 +92,50 @@ def strict_stage_fingerprint(source_path, args):
     }
 
 
+def invalidate_stale_strict_stage_cache(directory, source_path, args):
+    """Remove an incompatible strict cache while preserving other layers."""
+
+    if not directory:
+        return None
+    cache = Path(directory).resolve()
+    if not cache.is_dir():
+        return None
+    try:
+        with (cache / MANIFEST_NAME).open(encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return None
+    expected = strict_stage_fingerprint(source_path, args)
+    mismatch = next(
+        (key for key, value in expected.items() if manifest.get(key) != value),
+        None,
+    )
+    if mismatch is None:
+        return None
+    shutil.rmtree(cache)
+    logger.info(
+        "Invalidated incompatible strict-stage cache %s: %s",
+        cache,
+        mismatch,
+    )
+    return mismatch
+
+
 def _compact_context(context, hill_mass_accuracy, paseftol):
+    source = context["hills"]
     candidates = deepcopy(list(context["candidates"]))
+    # Candidate envelopes can share nested isotope dictionaries.  Copy each
+    # envelope independently so remapping one cannot mutate another.
+    weak_candidates = [
+        deepcopy(candidate)
+        for candidate in source.get("_external_weak_candidates", ())
+    ]
     direct_competitors = [
         replace(value, candidate=deepcopy(value.candidate))
         for value in context.get("direct_competitors", ())
     ]
     used = set()
-    for candidate in candidates + [
+    for candidate in candidates + weak_candidates + [
         value.candidate for value in direct_competitors
     ]:
         used.add(int(candidate["monoisotope idx"]))
@@ -104,24 +145,30 @@ def _compact_context(context, hill_mass_accuracy, paseftol):
         )
     ordered = sorted(used)
     remap = {old: new for new, old in enumerate(ordered)}
-    for candidate in candidates:
+    remapped_candidates = set()
+
+    def remap_candidate(candidate):
+        identity = id(candidate)
+        if identity in remapped_candidates:
+            return
         candidate["monoisotope idx"] = remap[
             int(candidate["monoisotope idx"])
         ]
         for isotope in candidate["isotopes"]:
             isotope["isotope_idx"] = remap[int(isotope["isotope_idx"])]
+        remapped_candidates.add(identity)
+
+    for candidate in candidates:
+        remap_candidate(candidate)
+    for candidate in weak_candidates:
+        remap_candidate(candidate)
     for position, competitor in enumerate(direct_competitors):
         candidate = competitor.candidate
-        candidate["monoisotope idx"] = remap[
-            int(candidate["monoisotope idx"])
-        ]
-        for isotope in candidate["isotopes"]:
-            isotope["isotope_idx"] = remap[int(isotope["isotope_idx"])]
+        remap_candidate(candidate)
         direct_competitors[position] = replace(
             competitor, candidate=candidate
         )
 
-    source = context["hills"]
     rt_by_local = {
         int(key): float(value)
         for key, value in context["rt_by_local"].items()
@@ -170,6 +217,10 @@ def _compact_context(context, hill_mass_accuracy, paseftol):
         "rtStart": np.asarray(rt_start),
         "rtEnd": np.asarray(rt_end),
         "rtApex": np.asarray(rt_apex),
+        "_external_weak_candidates": tuple(weak_candidates),
+        "_external_weak_detector_audit": deepcopy(
+            source.get("_external_weak_detector_audit", {})
+        ),
     }
     if "hills_im_median" in source:
         compact["hills_im_median"] = np.asarray(
@@ -267,6 +318,12 @@ def save_strict_stage_cache(directory, source_path, args, payload):
                 ),
                 "direct_competitor_count": sum(
                     len(context.get("direct_competitors", ()))
+                    for context in payload["strict_contexts"]
+                ),
+                "weak_candidate_count": sum(
+                    len(context["hills"].get(
+                        "_external_weak_candidates", ()
+                    ))
                     for context in payload["strict_contexts"]
                 ),
             }

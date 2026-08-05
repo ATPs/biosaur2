@@ -140,6 +140,7 @@ def _external_implementation_signature():
         "external_evidence.py",
         "external_observations.py",
         "external_mbr.py",
+        "external_weak.py",
         "alignment.py",
         "residual.py",
         "project.py",
@@ -161,6 +162,10 @@ def _alignment_model_signature(model):
         "slope": model.slope,
         "intercept": model.intercept,
         "residual_mad_sec": model.residual_mad_sec,
+        "validation_anchor_count": model.validation_anchor_count,
+        "validation_median_bias_sec": model.validation_median_bias_sec,
+        "validation_mad_sec": model.validation_mad_sec,
+        "validation_q90_abs_error_sec": model.validation_q90_abs_error_sec,
         "status": model.status,
     }
 
@@ -382,7 +387,7 @@ def _command_for_run(run, paths, options):
         command.append("--external-id" if options["external_id"] else "--no-external-id")
         for key, default in (
             ("external_weak_min_mono_points", 2),
-            ("external_weak_min_secondary_points", 1),
+            ("external_weak_min_secondary_points", 2),
             ("external_weak_min_isotope_cosine", 0.6),
         ):
             command.extend(("--" + key.replace("_", "-"), str(options.get(key, default))))
@@ -608,6 +613,11 @@ def _summary_for_result(result):
     elif feature_path.suffix.lower() == ".parquet":
         metadata = pq.ParquetFile(feature_path).metadata.metadata or {}
         encoded = metadata.get(b"biosaur2_hybrid_summary_json")
+        if not encoded and metadata.get(b"biosaur2_provenance_json"):
+            provenance = json.loads(
+                metadata[b"biosaur2_provenance_json"]
+            )
+            encoded = provenance.get("hybrid_summary_json")
         if encoded:
             summary["hybrid_summary"] = json.loads(encoded)
     return summary
@@ -662,6 +672,8 @@ def _write_project_database(
             "reference_run VARCHAR, source_run VARCHAR, target_run VARCHAR, method VARCHAR, "
             "anchor_count INTEGER, inlier_count INTEGER, slope DOUBLE, "
             "intercept DOUBLE, residual_mad_sec DOUBLE, status VARCHAR, "
+            "validation_anchor_count INTEGER, validation_median_bias_sec DOUBLE, "
+            "validation_mad_sec DOUBLE, validation_q90_abs_error_sec DOUBLE, "
             "x_knots_json VARCHAR, y_knots_json VARCHAR)"
         )
         connection.execute(
@@ -881,7 +893,7 @@ def _write_project_database(
         alignment_rows = (external_stage or {}).get("alignment_models", ())
         if alignment_rows:
             connection.executemany(
-                "INSERT INTO rt_alignment_models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO rt_alignment_models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     [
                         row["alignment_group"],
@@ -895,6 +907,10 @@ def _write_project_database(
                         row["intercept"],
                         row["residual_mad_sec"],
                         row["status"],
+                        row.get("validation_anchor_count", 0),
+                        row.get("validation_median_bias_sec"),
+                        row.get("validation_mad_sec"),
+                        row.get("validation_q90_abs_error_sec"),
                         row["x_knots_json"],
                         row["y_knots_json"],
                     ]
@@ -910,7 +926,7 @@ def _write_project_database(
                 [stage, json.dumps(summary, sort_keys=True)],
             )
         connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', '8')"
+            "INSERT INTO project_metadata VALUES ('project_schema_version', '9')"
         )
         connection.execute(
             "INSERT INTO project_metadata VALUES ('resolved_options', ?)",

@@ -31,6 +31,10 @@ class RTAlignmentModel:
     intercept: float
     residual_mad_sec: Optional[float]
     status: str
+    validation_anchor_count: int = 0
+    validation_median_bias_sec: Optional[float] = None
+    validation_mad_sec: Optional[float] = None
+    validation_q90_abs_error_sec: Optional[float] = None
 
     def predict(self, rt_sec):
         value = float(rt_sec)

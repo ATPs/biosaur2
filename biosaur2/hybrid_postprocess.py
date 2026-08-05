@@ -11,9 +11,9 @@ from .external_observations import (
 )
 from .external_mbr import (
     sidecar_rows,
-    weak_feature_rows_from_contexts,
     write_feature_sidecars,
 )
+from .external_weak import weak_feature_rows_from_contexts
 
 
 def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts, manager, args, direct, generic, residual):
@@ -51,13 +51,19 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         )
     # Weak candidates are private Project sidecar rows.  They are never
     # appended to the ordinary run output until cross-run FDR accepts them.
-    weak_feature_rows = (
+    weak_feature_rows, weak_candidate_audit = (
         weak_feature_rows_from_contexts(
-            run_id, strict_contexts, final_feature_rows, args
+            run_id, strict_contexts, final_feature_rows, args,
+            residual_ledger,
         )
         if args.get("external_id") and args.get("external_weak_candidates_cache_path")
-        else []
+        else ([], {})
     )
+    if weak_candidate_audit:
+        logger.info(
+            "External weak-candidate local funnel: %s",
+            weak_candidate_audit,
+        )
     args["_hybrid_summary"] = {
         "trace_extractor": "cython",
         "relaxed_ms2_feature_enabled": bool(
@@ -150,6 +156,7 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         args["_hybrid_summary"]["external_feature_mbr"] = {
             "strong_feature_count": len(strong_rows),
             "weak_candidate_count": len(weak_rows),
+            "weak_candidate_audit": weak_candidate_audit,
         }
     output_started = time.monotonic()
     manager.append_hybrid_results(

@@ -1,4 +1,5 @@
 from pathlib import Path
+from copy import deepcopy
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 from biosaur2 import utils
 from biosaur2.stage_cache import (
     build_strict_stage_payload,
+    invalidate_stale_strict_stage_cache,
     load_strict_stage_cache,
     save_strict_stage_cache,
     strict_stage_argument_signature,
@@ -80,6 +82,15 @@ def _context():
         "nScans": 3,
         "cos_cor_isotopes": 0.95,
         "intensity_array_for_cos_corr": [[1.0, 0.4], [1.0, 0.4]],
+        "_external_reject_source": "greedy_conflict_reject",
+    }
+    hills["_external_weak_candidates"] = (deepcopy(losing_candidate),)
+    hills["_external_weak_detector_audit"] = {
+        "initial_candidates": 2,
+        "smart_filter_accepted": 2,
+        "smart_filter_rejected": 0,
+        "strict_selected": 1,
+        "greedy_rejected": 1,
     }
     return {
         "hills": hills,
@@ -151,6 +162,12 @@ def test_strict_stage_cache_compacts_hills_and_rejects_stale_parameters(tmp_path
     assert compact["direct_competitors"][0].candidate["isotopes"][0][
         "isotope_idx"
     ] == 1
+    assert compact["hills"]["_external_weak_candidates"][0][
+        "monoisotope idx"
+    ] == 0
+    assert compact["hills"]["_external_weak_detector_audit"][
+        "greedy_rejected"
+    ] == 1
 
     cache = save_strict_stage_cache(
         tmp_path / "strict-cache", source, args, payload
@@ -159,10 +176,20 @@ def test_strict_stage_cache_compacts_hills_and_rejects_stale_parameters(tmp_path
     assert loaded["next_feature_id"] == 2
     assert manifest["strict_feature_count"] == 1
     assert manifest["direct_competitor_count"] == 1
+    assert manifest["weak_candidate_count"] == 1
     assert manifest["payload_bytes"] > 0
 
     with pytest.raises(ValueError, match="upstream_arguments"):
         load_strict_stage_cache(cache, source, _args(cmax=8))
+
+    assert invalidate_stale_strict_stage_cache(
+        cache, source, args
+    ) is None
+    assert cache.is_dir()
+    assert invalidate_stale_strict_stage_cache(
+        cache, source, _args(cmax=8)
+    ) == "upstream_arguments"
+    assert not cache.exists()
 
 
 def test_stage_signature_excludes_downstream_and_scheduling_options():
@@ -223,6 +250,17 @@ def test_hybrid_stage_cache_cold_and_replay_are_logically_equal(tmp_path):
 
     cold_result = run(cold)
     assert cold_result.returncode == 0, cold_result.stderr
+    weak_path = next(
+        cache_root.glob("runs/*/external/weak-candidates-v2.parquet")
+    )
+    weak_table = pq.read_table(weak_path)
+    assert weak_table.num_rows > 0
+    weak_rows = weak_table.to_pylist()
+    assert {row["reject_source"] for row in weak_rows} == {
+        "smart_filter_reject", "greedy_conflict_reject"
+    }
+    assert all(row["secondary_points"] >= 2 for row in weak_rows)
+    assert all(row["strong_overlap_fraction"] <= 0.20 for row in weak_rows)
     replay_result = run(replay)
     assert replay_result.returncode == 0, replay_result.stderr
     assert "Reused strict-stage cache" in replay_result.stderr
