@@ -110,28 +110,43 @@ def _claim_candidate_fraction(ledger, fraction):
     assert ledger.allocate_observed_points("strong", contributions).accepted
 
 
-def test_weak_ownership_accepts_twenty_percent_boundary_and_rejects_above():
+def test_weak_ownership_uses_configurable_inclusive_boundary():
     candidate = _candidate(0, 10, 1, 11, 0.8)
     candidate["_external_reject_source"] = "smart_filter_reject"
     ledger = _ledger()
-    _claim_candidate_fraction(ledger, 0.20)
+    _claim_candidate_fraction(ledger, 0.30)
     rows, audit = weak_feature_rows_from_contexts(
         "run", [_context(candidate)], [], _args(), ledger
     )
     assert len(rows) == 1
-    assert rows[0]["external_strong_overlap_fraction"] == pytest.approx(0.20)
+    assert rows[0]["external_strong_overlap_fraction"] == pytest.approx(0.30)
     assert audit["persisted_weak_candidates"] == 1
     assert audit["reject_source_counts"] == {"smart_filter_reject": 1}
 
     candidate = _candidate(0, 10, 1, 11, 0.8)
     candidate["_external_reject_source"] = "greedy_conflict_reject"
     ledger = _ledger()
-    _claim_candidate_fraction(ledger, 0.201)
+    _claim_candidate_fraction(ledger, 0.301)
     rows, audit = weak_feature_rows_from_contexts(
         "run", [_context(candidate)], [], _args(), ledger
     )
     assert rows == []
     assert audit["strong_overlap_rejected"] == 1
+
+    for threshold, fraction, expected in (
+        (0.20, 0.201, 0),
+        (0.40, 0.301, 1),
+    ):
+        candidate = _candidate(0, 10, 1, 11, 0.8)
+        candidate["_external_reject_source"] = "smart_filter_reject"
+        ledger = _ledger()
+        _claim_candidate_fraction(ledger, fraction)
+        args = {**_args(), "external_weak_max_strong_overlap": threshold}
+        rows, audit = weak_feature_rows_from_contexts(
+            "run", [_context(candidate)], [], args, ledger
+        )
+        assert len(rows) == expected
+        assert audit["max_strong_overlap_fraction"] == threshold
 
 
 def test_same_run_strong_equivalent_and_weak_mono_duplicate_are_rejected():

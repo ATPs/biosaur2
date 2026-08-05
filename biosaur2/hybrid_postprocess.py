@@ -152,6 +152,7 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
             },
             strong_rows,
             weak_rows,
+            args,
         )
         args["_hybrid_summary"]["external_feature_mbr"] = {
             "strong_feature_count": len(strong_rows),

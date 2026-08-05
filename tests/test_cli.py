@@ -333,6 +333,12 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     assert all_help.returncode == 0
     assert "--relaxed-ms2-feature" in all_help.stdout
     assert "recipient-run m/z tolerance" in all_help.stdout
+    assert "--external-q-value-max" in all_help.stdout
+    assert "--external-weak-max-strong-overlap" in all_help.stdout
+    assert "--external-min-support-runs" in all_help.stdout
+    assert "--external-max-support-runs" in all_help.stdout
+    assert "(default: 0.1)" in all_help.stdout
+    assert "(default: 0.3)" in all_help.stdout
     assert "explicit positive value disables adaptation" in all_help.stdout
 
     result = _run(
@@ -349,6 +355,28 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     )
     assert result.returncode != 0
     assert "finite nonnegative number" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (("--external-weak-max-strong-overlap", "nan"), "finite and in [0, 1]"),
+        (("--external-weak-max-strong-overlap", "1.1"), "finite and in [0, 1]"),
+        (("--external-min-support-runs", "0"), "positive integer"),
+        (("--external-max-support-runs", "17"), "at most 16"),
+        (("--external-min-support-runs", "5", "--external-max-support-runs", "4"), "cannot exceed"),
+    ],
+)
+def test_project_external_rescue_options_are_validated(tmp_path, options, message):
+    result = _run(
+        "project", "run",
+        "--manifest", tmp_path / "missing.tsv",
+        "--output-dir", tmp_path / "runs",
+        "--project-db", tmp_path / "project.duckdb",
+        *options,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
 
 
 def test_project_manifest_help_documents_inputs_and_defaults():

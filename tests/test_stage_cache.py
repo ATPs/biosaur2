@@ -260,7 +260,7 @@ def test_hybrid_stage_cache_cold_and_replay_are_logically_equal(tmp_path):
         "smart_filter_reject", "greedy_conflict_reject"
     }
     assert all(row["secondary_points"] >= 2 for row in weak_rows)
-    assert all(row["strong_overlap_fraction"] <= 0.20 for row in weak_rows)
+    assert all(row["strong_overlap_fraction"] <= 0.30 for row in weak_rows)
     replay_result = run(replay)
     assert replay_result.returncode == 0, replay_result.stderr
     assert "Reused strict-stage cache" in replay_result.stderr

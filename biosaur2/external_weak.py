@@ -10,7 +10,7 @@ import math
 import numpy as np
 
 
-MAX_STRONG_OVERLAP = 0.20
+DEFAULT_MAX_STRONG_OVERLAP = 0.30
 
 
 def remember_reject_snapshot(snapshots, candidate):
@@ -236,6 +236,14 @@ def weak_feature_rows_from_contexts(
 
     from . import utils
 
+    max_strong_overlap = float(args.get(
+        "external_weak_max_strong_overlap",
+        DEFAULT_MAX_STRONG_OVERLAP,
+    ))
+    if not math.isfinite(max_strong_overlap) or not 0 <= max_strong_overlap <= 1:
+        raise ValueError(
+            "external weak maximum strong overlap must be finite and in [0, 1]"
+        )
     audit = Counter()
     source_counts = Counter()
     for context in contexts:
@@ -293,7 +301,7 @@ def weak_feature_rows_from_contexts(
             audit["footprint_" + footprint.status] += 1
             continue
         overlap = residual_ledger.footprint_overlap(footprint)
-        if overlap.fraction > MAX_STRONG_OVERLAP + 1e-12:
+        if overlap.fraction > max_strong_overlap + 1e-12:
             audit["strong_overlap_rejected"] += 1
             continue
         audit["ownership_gate_accepted"] += 1
@@ -335,12 +343,12 @@ def weak_feature_rows_from_contexts(
     return rows, {
         **dict(sorted(audit.items())),
         "reject_source_counts": dict(sorted(source_counts.items())),
-        "max_strong_overlap_fraction": MAX_STRONG_OVERLAP,
+        "max_strong_overlap_fraction": max_strong_overlap,
     }
 
 
 __all__ = [
-    "MAX_STRONG_OVERLAP",
+    "DEFAULT_MAX_STRONG_OVERLAP",
     "append_rejected_candidate",
     "publish_detector_outcomes",
     "remember_reject_snapshot",

@@ -598,6 +598,7 @@ Advanced output notes:
     parser.add_argument('--external-weak-min-mono-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum monoisotopic points for a Project external weak candidate'))
     parser.add_argument('--external-weak-min-secondary-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum raw points in one secondary isotope for a Project external weak candidate'))
     parser.add_argument('--external-weak-min-isotope-cosine', type=float, default=0.6, help=_advanced_help(show_all, 'minimum isotope cosine for a Project external weak candidate'))
+    parser.add_argument('--external-weak-max-strong-overlap', type=float, default=0.30, help=_advanced_help(show_all, 'maximum fraction of weak-candidate raw hill intensity already owned by final same-run strong features'))
     parser.add_argument(
         '--generic-ms2-refine', action=argparse.BooleanOptionalAction, default=True,
         help='enable/disable unidentified-MS2 charge/C13 hypotheses, target-decoy association, and local recovery in hybrid mode',
@@ -752,6 +753,8 @@ def _run_with_parser(parser):
         parser.error('--generic-q-value-max must be finite and in [0, 1].')
     if not math.isfinite(args['external_weak_min_isotope_cosine']) or not 0 <= args['external_weak_min_isotope_cosine'] <= 1:
         parser.error('--external-weak-min-isotope-cosine must be finite and in [0, 1].')
+    if not math.isfinite(args['external_weak_max_strong_overlap']) or not 0 <= args['external_weak_max_strong_overlap'] <= 1:
+        parser.error('--external-weak-max-strong-overlap must be finite and in [0, 1].')
     if args['feature_mode'] == 'hybrid':
         if args['write_ms2']:
             parser.error('--write-ms2 is a legacy-only diagnostic option.')

@@ -14,6 +14,7 @@ from biosaur2.schema import compact_schemas
 from biosaur2.project import (
     _command_for_run,
     _project_worker,
+    _local_resume_option_signature,
     _resume_option_signature,
     _input_fingerprint,
     _external_task_fingerprint,
@@ -102,6 +103,10 @@ def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
         ]
     )
     assert captured["options"]["mode"] == "hybrid"
+    assert captured["options"]["external_q_value_max"] == 0.10
+    assert captured["options"]["external_weak_max_strong_overlap"] == 0.30
+    assert captured["options"]["external_min_support_runs"] == 1
+    assert captured["options"]["external_max_support_runs"] == 4
 
 
 def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
@@ -141,6 +146,7 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
     assert "--write-ms2" not in command
     assert command[command.index("--format") + 1] == "parquet"
     assert command[command.index("--generic-ms2-isotope-errors") + 1] == "0,1,2,3"
+    assert command[command.index("--external-weak-max-strong-overlap") + 1] == "0.3"
     assert "--workers" not in command
     assert "--cache-dir" not in command
 
@@ -164,6 +170,35 @@ def test_resume_signature_ignores_scheduling_but_tracks_external_science():
     assert _resume_option_signature(previous) == _resume_option_signature(resumed)
     resumed["external_q_value_max"] = 0.02
     assert _resume_option_signature(previous) != _resume_option_signature(resumed)
+
+
+def test_local_resume_tracks_weak_sidecar_options_only():
+    base = {
+        "mode": "hybrid",
+        "external_id": True,
+        "external_q_value_max": 0.10,
+        "external_min_support_runs": 1,
+        "external_max_support_runs": 4,
+        "external_weak_min_mono_points": 2,
+        "external_weak_min_secondary_points": 2,
+        "external_weak_min_isotope_cosine": 0.6,
+        "external_weak_max_strong_overlap": 0.30,
+    }
+    signature = _local_resume_option_signature(base)
+    for key, value in (
+        ("external_q_value_max", 0.05),
+        ("external_min_support_runs", 2),
+        ("external_max_support_runs", 8),
+    ):
+        assert signature == _local_resume_option_signature({**base, key: value})
+    for key, value in (
+        ("external_id", False),
+        ("external_weak_min_mono_points", 3),
+        ("external_weak_min_secondary_points", 3),
+        ("external_weak_min_isotope_cosine", 0.7),
+        ("external_weak_max_strong_overlap", 0.25),
+    ):
+        assert signature != _local_resume_option_signature({**base, key: value})
 
 
 def test_resume_command_ignores_worker_and_cache_location():
@@ -207,6 +242,9 @@ def test_external_recipient_fingerprint_tracks_exact_plan(tmp_path):
         "external_alignment_min_anchors": 5,
         "external_alignment_max_mad_sec": 30.0,
         "external_alignment_max_anchors": 256,
+        "external_weak_max_strong_overlap": 0.30,
+        "external_min_support_runs": 1,
+        "external_max_support_runs": 4,
         "external_min_isotope_cosine": 0.8,
         "external_weak_feature": True,
         "external_weak_q_value_max": 0.05,
@@ -234,6 +272,16 @@ def test_external_recipient_fingerprint_tracks_exact_plan(tmp_path):
     options["external_ppm"] = 8.0
     options["external_alignment_max_anchors"] = 128
     assert first != _external_task_fingerprint(run, result, (plan,), options)
+    options["external_alignment_max_anchors"] = 256
+    for key, value in (
+        ("external_weak_max_strong_overlap", 0.25),
+        ("external_min_support_runs", 2),
+        ("external_max_support_runs", 8),
+    ):
+        changed_options = {**options, key: value}
+        assert first != _external_task_fingerprint(
+            run, result, (plan,), changed_options
+        )
 
 
 def test_project_worker_captures_cpu_and_peak_rss(tmp_path):

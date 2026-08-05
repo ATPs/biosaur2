@@ -12,7 +12,9 @@ from biosaur2.external_mbr import (
     FeatureRecord,
     _aggregate_support_score,
     _json_default,
+    _outcome_status,
     build_feature_alignment_models,
+    read_feature_sidecars,
     run_feature_mbr_stage,
     write_feature_sidecars,
 )
@@ -55,20 +57,34 @@ def _candidate_row(mz=700.0):
 
 
 def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
-    runs = [_run("source"), _run("reference"), _run("target")]
-    source_path = tmp_path / "source.mzML"
-    reference_path = tmp_path / "reference.mzML"
-    target_path = tmp_path / "target.mzML"
-    for run, path in zip(runs, (source_path, reference_path, target_path)):
+    run_ids = ("source", "reference", "donor_c", "donor_d", "target")
+    runs = [_run(run_id) for run_id in run_ids]
+    offsets = {
+        run_id: index * 5.0 for index, run_id in enumerate(run_ids)
+    }
+    for run in runs:
+        path = tmp_path / (run.run_id + ".mzML")
         path.write_bytes(run.run_id.encode())
         run.mzml_path = path
 
     anchors = [500.0 + value for value in range(5)]
-    strong = {
-        "source": [_feature("source", index + 1, mz, 100.0 + index) for index, mz in enumerate(anchors)] + [_feature("source", 20 + index, 700.0 + index * 0.1, 150.0) for index in range(20)],
-        "reference": [_feature("reference", index + 1, mz, 110.0 + index) for index, mz in enumerate(anchors)] + [_feature("reference", 20 + index, 700.0 + index * 0.1, 160.0) for index in range(20)],
-        "target": [_feature("target", index + 1, mz, 120.0 + index) for index, mz in enumerate(anchors)],
-    }
+    strong = {}
+    for run_id in run_ids:
+        strong[run_id] = [
+            _feature(
+                run_id, index + 1, mz,
+                100.0 + offsets[run_id] + index,
+            )
+            for index, mz in enumerate(anchors)
+        ]
+        if run_id != "target":
+            strong[run_id].extend(
+                _feature(
+                    run_id, 20 + index, 700.0 + index * 0.1,
+                    150.0 + offsets[run_id],
+                )
+                for index in range(20)
+            )
     paths_by_run = {}
     results = {}
     for index, run in enumerate(runs):
@@ -115,7 +131,7 @@ def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
     assert output[0]["envelope_apex"] == pytest.approx(100.0)
     evidence = pq.read_table(paths_by_run["target"]["external_evidence"]).to_pylist()
     assert evidence[0]["status"] == "accepted_matched_weak_feature"
-    assert evidence[0]["source_run"] in {"source", "reference"}
+    assert evidence[0]["source_run"] in set(run_ids) - {"target"}
     for candidate_id in range(1, 21):
         sources = {
             row["source_run"] for row in evidence
@@ -128,6 +144,67 @@ def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
     assert stage["scheduler_summary"][
         "component_strong_index_build_count"
     ] == 1
+    assert stage["scheduler_summary"]["external_min_support_runs"] == 1
+    assert stage["scheduler_summary"]["external_max_support_runs"] == 4
+    assert stage["scheduler_summary"][
+        "rescued_support_run_count_distribution"
+    ] == {4: 20}
+    max_four_score = evidence[0]["target_score"]
+
+    capped = run_feature_mbr_stage(runs, results, {
+        "external_ppm": 8.0, "external_rt_tolerance_sec": 120.0,
+        "external_q_value_max": 0.10, "external_alignment_min_anchors": 3,
+        "external_alignment_max_mad_sec": 30.0,
+        "external_alignment_max_anchors": 64,
+        "external_min_support_runs": 1,
+        "external_max_support_runs": 2,
+    })
+    assert capped["summaries"]["target"][
+        "rescued_support_run_count_distribution"
+    ] == {2: 20}
+    capped_evidence = pq.read_table(
+        paths_by_run["target"]["external_evidence"]
+    ).to_pylist()
+    assert len([
+        row for row in capped_evidence if row["weak_candidate_id"] == 1
+    ]) == 2
+    max_two_score = capped_evidence[0]["target_score"]
+
+    limited = run_feature_mbr_stage(runs, results, {
+        "external_ppm": 8.0, "external_rt_tolerance_sec": 120.0,
+        "external_q_value_max": 0.05, "external_alignment_min_anchors": 3,
+        "external_alignment_max_mad_sec": 30.0,
+        "external_alignment_max_anchors": 64,
+        "external_min_support_runs": 1,
+        "external_max_support_runs": 1,
+    })
+    assert limited["summaries"]["target"][
+        "new_weak_external_feature_count"
+    ] == 20
+    assert limited["summaries"]["target"][
+        "rescued_support_run_count_distribution"
+    ] == {1: 20}
+    limited_evidence = pq.read_table(
+        paths_by_run["target"]["external_evidence"]
+    ).to_pylist()
+    max_one_score = limited_evidence[0]["target_score"]
+    assert max_four_score > max_two_score > max_one_score
+    assert max_four_score > 3 * max_one_score
+
+    gated = run_feature_mbr_stage(runs, results, {
+        "external_ppm": 8.0, "external_rt_tolerance_sec": 120.0,
+        "external_q_value_max": 0.10, "external_alignment_min_anchors": 3,
+        "external_alignment_max_mad_sec": 30.0,
+        "external_alignment_max_anchors": 64,
+        "external_min_support_runs": 5,
+        "external_max_support_runs": 5,
+    })
+    assert gated["summaries"]["target"][
+        "new_weak_external_feature_count"
+    ] == 0
+    assert gated["summaries"]["target"]["status_counts"] == {
+        "insufficient_target_support_runs": 20
+    }
 
 
 def test_external_competition_aggregates_distinct_run_supports():
@@ -136,8 +213,46 @@ def test_external_competition_aggregates_distinct_run_supports():
         ((0.8, 0.2, 2.0, -0.8, 2, None, 101.0), "run-b", None),
     ]
     assert _aggregate_support_score(supports) == pytest.approx(1.7)
+    assert _aggregate_support_score(supports, min_support_runs=2) == pytest.approx(1.7)
+    assert _aggregate_support_score(supports[:1], min_support_runs=2) is None
     assert _aggregate_support_score([]) is None
     assert _json_default(np.float32(1.25)) == pytest.approx(1.25)
+
+
+def test_support_minimum_status_and_sidecar_options_are_explicit(tmp_path):
+    result = SimpleNamespace(winner="none", q_value=1.0)
+    item = {
+        "competition": result,
+        "accepted_alignment_count": 1,
+        "targets": [(None, "source", None)],
+        "min_support_runs": 2,
+    }
+    assert _outcome_status(item, 0.10) == "insufficient_target_support_runs"
+
+    item.update({
+        "competition": SimpleNamespace(winner="target", q_value=0.08),
+        "targets": [(None, "source", None), (None, "reference", None)],
+    })
+    assert _outcome_status(item, 0.10) == "accepted_matched_weak_feature"
+    assert _outcome_status(item, 0.05) == "target_q_value_above_limit"
+
+    mzml = tmp_path / "run.mzML"
+    mzml.write_bytes(b"source")
+    paths = {
+        "external_strong_features": str(tmp_path / "strong.parquet"),
+        "external_weak_candidates": str(tmp_path / "weak.parquet"),
+    }
+    run = _run("run")
+    run.mzml_path = mzml
+    write_feature_sidecars(mzml, paths, [], [], {
+        "external_weak_max_strong_overlap": 0.30,
+    })
+    assert read_feature_sidecars(run, paths, {
+        "external_weak_max_strong_overlap": 0.30,
+    }) == ((), ())
+    assert read_feature_sidecars(run, paths, {
+        "external_weak_max_strong_overlap": 0.20,
+    }) is None
 
 
 def test_feature_alignment_lis_rejects_isobaric_distractors_and_validates_holdout():

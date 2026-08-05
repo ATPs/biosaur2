@@ -55,31 +55,28 @@ Donor abundance is never copied. The donor says what ion to look for and the
 alignment says approximately when; the final signal is measured from the
 recipient mzML and competes with a recipient-run decoy.
 
-## Donor-guided weak recovery
+## Feature-only external weak rescue
 
-An accepted direct, quantitative donor feature can recover a weaker feature in
-a recipient after RT alignment. The predicted RT is a local search centre, not
-an observed MS2 scan: candidate apexes may differ by up to
-`--external-rt-tolerance-sec` (120 seconds by default).
+Hybrid runs with external-ID enabled retain detector rejects as private weak
+candidates. The default local gates require at least two monoisotopic points,
+two points in a secondary isotope, isotope cosine at least 0.6, positive
+quantification, and no equivalent same-run strong feature. Candidates with
+more than `--external-weak-max-strong-overlap` (0.30 by default) of their raw
+hill intensity already owned by final same-run strong features are rejected.
 
-The ordinary aligned-external path retains its standard extraction controls and
-`--external-q-value-max` default of 0.01. If it does not recover a feature,
-the default `--external-weak-feature` fallback requires a monoisotopic hill
-with at least two points and at least one secondary isotope hill with at least
-two points, isotope cosine at least `--external-min-isotope-cosine` (0.8 by
-default), and an independent donor-guided target/decoy q-value at most
-`--external-weak-q-value-max` (0.05 by default).
+The Project stage aligns strong features between runs and matches each weak
+candidate using exact charge and FAIMS, 8 ppm m/z tolerance, and the configured
+RT window. Each source run contributes at most its best feature. By default at
+least one distinct source run is required, and scores from at most four source
+runs are summed; configure these bounds with
+`--external-min-support-runs` and `--external-max-support-runs`. Target and
+shifted-decoy supports use identical rules, and
+`--external-q-value-max` defaults to 0.10.
 
-Before weak recovery, Biosaur2 measures how much of the proposed raw component
-is already assigned to recipient features after strict external claims have
-been allocated. Candidates with more than
-`--external-weak-overlap-max` (0.20 by default) explained intensity are
-rejected. For accepted weak features, previously assigned intensity is removed
-and the final recipient quantification uses only the residual signal. Weak
-features are marked `aligned_external_weak` / `external_id_weak`; they are
-never used as new project donors. On a resumed Project run, Biosaur2 rebuilds
-ownership for already-published external features before considering new ones;
-it stops safely if those claims cannot be reconstructed deterministically.
+Only weak candidates accepted by this project-level competition are published
+as `aligned_external_weak` / `external_id_weak` features. Donor abundance is
+never copied, and rescued weak features are not promoted into the strong donor
+index.
 
 ## Run a project
 

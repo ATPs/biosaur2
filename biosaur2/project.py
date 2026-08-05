@@ -92,8 +92,15 @@ def _local_resume_option_signature(options):
     """Return options that can change per-run local output."""
 
     signature = _resume_option_signature(options)
+    local_external_options = {
+        "external_id",
+        "external_weak_min_mono_points",
+        "external_weak_min_secondary_points",
+        "external_weak_min_isotope_cosine",
+        "external_weak_max_strong_overlap",
+    }
     for key in tuple(signature):
-        if key.startswith("external_"):
+        if key.startswith("external_") and key not in local_external_options:
             signature.pop(key, None)
     return signature
 
@@ -124,6 +131,9 @@ def _external_option_signature(options):
         "external_weak_min_mono_points",
         "external_weak_min_secondary_points",
         "external_weak_min_isotope_cosine",
+        "external_weak_max_strong_overlap",
+        "external_min_support_runs",
+        "external_max_support_runs",
         "quant_method",
         "feature_baseline",
     )
@@ -389,6 +399,7 @@ def _command_for_run(run, paths, options):
             ("external_weak_min_mono_points", 2),
             ("external_weak_min_secondary_points", 2),
             ("external_weak_min_isotope_cosine", 0.6),
+            ("external_weak_max_strong_overlap", 0.30),
         ):
             command.extend(("--" + key.replace("_", "-"), str(options.get(key, default))))
         command.append(
@@ -942,7 +953,7 @@ def _external_worker_options(options):
         "ppm": options.get("external_ppm", 8.0),
         "rt_tolerance_sec": options.get("external_rt_tolerance_sec", 120.0),
         "min_isotope_cosine": options.get("external_min_isotope_cosine", 0.8),
-        "q_value_max": options.get("external_q_value_max", 0.01),
+        "q_value_max": options.get("external_q_value_max", 0.10),
         "quant_method": options["quant_method"],
         "baseline": options["feature_baseline"],
         "weak_feature": options.get("external_weak_feature", True),

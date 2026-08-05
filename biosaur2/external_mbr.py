@@ -29,8 +29,16 @@ from .raw_ms1 import source_fingerprint
 from .schema import compact_schemas
 
 
-SIDECAR_VERSION = "feature-mbr-v2"
-MAX_SUPPORTS = 4
+SIDECAR_VERSION = "feature-mbr-v3"
+DEFAULT_MIN_SUPPORT_RUNS = 1
+DEFAULT_MAX_SUPPORT_RUNS = 4
+MAX_CONFIGURED_SUPPORT_RUNS = 16
+LOCAL_WEAK_OPTION_DEFAULTS = {
+    "external_weak_min_mono_points": 2,
+    "external_weak_min_secondary_points": 2,
+    "external_weak_min_isotope_cosine": 0.6,
+    "external_weak_max_strong_overlap": 0.30,
+}
 logger = logging.getLogger(__name__)
 EVIDENCE_FIELDS = (
     "target_run", "weak_candidate_id", "feature_id", "source_run",
@@ -130,9 +138,21 @@ def _faims_equal(left, right):
     return left is not None and right is not None and math.isclose(left, right, abs_tol=1e-6)
 
 
-def _signature(mzml_path):
+def _local_weak_option_signature(options=None):
+    options = options or {}
+    return {
+        key: options.get(key, default)
+        for key, default in LOCAL_WEAK_OPTION_DEFAULTS.items()
+    }
+
+
+def _signature(mzml_path, options=None):
     return json.dumps(
-        {"version": SIDECAR_VERSION, "mzml": source_fingerprint(mzml_path)},
+        {
+            "version": SIDECAR_VERSION,
+            "mzml": source_fingerprint(mzml_path),
+            "weak_options": _local_weak_option_signature(options),
+        },
         sort_keys=True, separators=(",", ":"),
     )
 
@@ -197,14 +217,16 @@ def _atomic_parquet(path, table):
         raise
 
 
-def write_feature_sidecars(mzml_path, paths, strong_rows, weak_rows):
+def write_feature_sidecars(
+    mzml_path, paths, strong_rows, weak_rows, options=None
+):
     """Publish source-provenanced feature-only sidecars after local detection."""
 
     strong_path = paths.get("external_strong_features")
     weak_path = paths.get("external_weak_candidates")
     if not strong_path or not weak_path:
         return
-    signature = _signature(mzml_path).encode()
+    signature = _signature(mzml_path, options).encode()
     strong_table = pa.Table.from_pylist(strong_rows, schema=_strong_schema()).replace_schema_metadata(
         {b"biosaur2_external_feature_mbr_signature": signature}
     )
@@ -226,8 +248,8 @@ def write_feature_sidecars(mzml_path, paths, strong_rows, weak_rows):
     _atomic_parquet(weak_path, weak_table)
 
 
-def read_feature_sidecars(run, paths):
-    expected = _signature(run.mzml_path).encode()
+def read_feature_sidecars(run, paths, options=None):
+    expected = _signature(run.mzml_path, options).encode()
     try:
         strong_table = pq.read_table(paths["external_strong_features"])
         weak_table = pq.read_table(paths["external_weak_candidates"])
@@ -612,15 +634,25 @@ def _supports_by_run(
     ]
 
 
-def _aggregate_support_score(supports):
-    """Combine up to four distinct-run supports for symmetric competition."""
+def _aggregate_support_score(supports, min_support_runs=1):
+    """Sum configured distinct-run supports for symmetric competition."""
 
-    if not supports:
+    if len(supports) < min_support_runs:
         return None
     return float(sum(item[0][0] for item in supports))
 
 
 def _candidate_outcomes(runs, strong_by_run, weak_by_run, models, options):
+    min_support_runs = int(options.get(
+        "min_support_runs", DEFAULT_MIN_SUPPORT_RUNS
+    ))
+    max_support_runs = int(options.get(
+        "max_support_runs", DEFAULT_MAX_SUPPORT_RUNS
+    ))
+    if not 1 <= min_support_runs <= max_support_runs <= MAX_CONFIGURED_SUPPORT_RUNS:
+        raise ValueError(
+            "external support-run limits must satisfy 1 <= min <= max <= 16"
+        )
     by_component = defaultdict(list)
     for run in runs:
         by_component[models.component_by_run[run.run_id]].append(run.run_id)
@@ -658,7 +690,10 @@ def _candidate_outcomes(runs, strong_by_run, weak_by_run, models, options):
                 decoy_supports.sort(key=lambda item: (-item[0][0], item[0][1], item[0][2], item[0][3], item[0][4], item[1]))
                 grouped[component].append({
                     "target_run": target_id, "candidate": candidate, "component": component,
-                    "targets": target_supports[:MAX_SUPPORTS], "decoys": decoy_supports[:MAX_SUPPORTS],
+                    "targets": target_supports[:max_support_runs],
+                    "decoys": decoy_supports[:max_support_runs],
+                    "min_support_runs": min_support_runs,
+                    "max_support_runs": max_support_runs,
                     "accepted_alignment_count": len(alignments),
                 })
     for component, outcomes in grouped.items():
@@ -668,8 +703,12 @@ def _candidate_outcomes(runs, strong_by_run, weak_by_run, models, options):
             item["seed"] = seed
             competitions.append(TargetDecoyCompetition(
                 seed,
-                _aggregate_support_score(item["targets"]),
-                _aggregate_support_score(item["decoys"]),
+                _aggregate_support_score(
+                    item["targets"], item["min_support_runs"]
+                ),
+                _aggregate_support_score(
+                    item["decoys"], item["min_support_runs"]
+                ),
             ))
         results = {item.seed_id: item for item in target_decoy_q_values(competitions)}
         for item in outcomes:
@@ -681,6 +720,10 @@ def _outcome_status(item, q_value_max):
     result = item["competition"]
     if not item.get("accepted_alignment_count"):
         return "no_accepted_alignment"
+    if 0 < len(item["targets"]) < item.get(
+        "min_support_runs", DEFAULT_MIN_SUPPORT_RUNS
+    ):
+        return "insufficient_target_support_runs"
     if result.winner == "none":
         return "no_external_support"
     if result.winner == "decoy":
@@ -772,7 +815,7 @@ def _publish_features(path, accepted):
 
 
 def _coerce_feature_row(row, schema):
-    """Read numeric strings written by the initial feature-mbr-v2 encoder."""
+    """Read numeric strings written by the initial feature-MBR encoder."""
 
     normalized = dict(row)
     for field in schema:
@@ -791,7 +834,12 @@ def run_feature_mbr_stage(runs, results, options):
 
     successful = [run for index, run in enumerate(runs) if results[index]["status"] in {"success", "skipped_resume"}]
     result_by_id = {runs[index].run_id: results[index] for index in range(len(runs))}
-    sidecars = {run.run_id: read_feature_sidecars(run, result_by_id[run.run_id]["paths"]) for run in successful}
+    sidecars = {
+        run.run_id: read_feature_sidecars(
+            run, result_by_id[run.run_id]["paths"], options
+        )
+        for run in successful
+    }
     missing = [run_id for run_id, value in sidecars.items() if value is None]
     if missing:
         raise RuntimeError("feature-MBR sidecars are missing or stale: " + ", ".join(sorted(missing)))
@@ -809,9 +857,21 @@ def run_feature_mbr_stage(runs, results, options):
     outcomes = _candidate_outcomes(successful, strong, weak, models, {
         "ppm": float(options.get("external_ppm", 8.0)),
         "rt_tolerance_sec": float(options.get("external_rt_tolerance_sec", 120.0)),
+        "min_support_runs": int(options.get(
+            "external_min_support_runs", DEFAULT_MIN_SUPPORT_RUNS
+        )),
+        "max_support_runs": int(options.get(
+            "external_max_support_runs", DEFAULT_MAX_SUPPORT_RUNS
+        )),
     })
-    evidence = _evidence_rows(outcomes, float(options.get("external_q_value_max", 0.05)))
-    q_value_max = float(options.get("external_q_value_max", 0.05))
+    evidence = _evidence_rows(outcomes, float(options.get("external_q_value_max", 0.10)))
+    q_value_max = float(options.get("external_q_value_max", 0.10))
+    min_support_runs = int(options.get(
+        "external_min_support_runs", DEFAULT_MIN_SUPPORT_RUNS
+    ))
+    max_support_runs = int(options.get(
+        "external_max_support_runs", DEFAULT_MAX_SUPPORT_RUNS
+    ))
     summaries = {}
     for run in successful:
         all_outcomes = [item for values in outcomes.values() for item in values if item["target_run"] == run.run_id]
@@ -829,11 +889,31 @@ def run_feature_mbr_stage(runs, results, options):
         statuses = Counter(
             _outcome_status(item, q_value_max) for item in all_outcomes
         )
+        target_support_counts = Counter(
+            len(item["targets"]) for item in all_outcomes
+        )
+        decoy_support_counts = Counter(
+            len(item["decoys"]) for item in all_outcomes
+        )
+        rescued_support_counts = Counter(
+            len(item["targets"]) for item in accepted
+        )
         summaries[run.run_id] = {
             "run_id": run.run_id, "planned_assay_count": len(weak.get(run.run_id, ())),
             "evaluated_assay_count": len(all_outcomes), "new_external_feature_count": count,
             "new_strict_external_feature_count": 0, "new_weak_external_feature_count": count,
             "status_counts": dict(sorted(statuses.items())),
+            "external_min_support_runs": min_support_runs,
+            "external_max_support_runs": max_support_runs,
+            "target_support_run_count_distribution": dict(
+                sorted(target_support_counts.items())
+            ),
+            "decoy_support_run_count_distribution": dict(
+                sorted(decoy_support_counts.items())
+            ),
+            "rescued_support_run_count_distribution": dict(
+                sorted(rescued_support_counts.items())
+            ),
         }
         logger.info(
             "Feature-MBR run %s: weak=%d evaluated=%d rescued=%d statuses=%s",
@@ -844,8 +924,20 @@ def run_feature_mbr_stage(runs, results, options):
         model.status for _declared, model in models.values()
     )
     project_statuses = Counter()
+    project_target_support_counts = Counter()
+    project_decoy_support_counts = Counter()
+    project_rescued_support_counts = Counter()
     for summary in summaries.values():
         project_statuses.update(summary["status_counts"])
+        project_target_support_counts.update(
+            summary["target_support_run_count_distribution"]
+        )
+        project_decoy_support_counts.update(
+            summary["decoy_support_run_count_distribution"]
+        )
+        project_rescued_support_counts.update(
+            summary["rescued_support_run_count_distribution"]
+        )
     return {
         "summaries": summaries,
         "alignment_models": _alignment_model_rows(models),
@@ -857,6 +949,18 @@ def run_feature_mbr_stage(runs, results, options):
             }),
             "alignment_status_counts": dict(sorted(alignment_statuses.items())),
             "candidate_status_counts": dict(sorted(project_statuses.items())),
+            "external_min_support_runs": min_support_runs,
+            "external_max_support_runs": max_support_runs,
+            "support_scoring": "sum",
+            "target_support_run_count_distribution": dict(
+                sorted(project_target_support_counts.items())
+            ),
+            "decoy_support_run_count_distribution": dict(
+                sorted(project_decoy_support_counts.items())
+            ),
+            "rescued_support_run_count_distribution": dict(
+                sorted(project_rescued_support_counts.items())
+            ),
             "planned_weak_candidate_count": sum(
                 summary["planned_assay_count"] for summary in summaries.values()
             ),
