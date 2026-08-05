@@ -1,4 +1,5 @@
 pyteomics>=4.7,<5
+pynumpress>=0.0.9
 psims
 scipy
 numpy>=1.17
