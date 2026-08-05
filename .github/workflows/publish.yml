@@ -21,6 +21,9 @@ jobs:
         CIBW_BUILD: "cp312-*"
         CIBW_SKIP: "*-win32 *_i686 pp*"
         CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
+    - name: Check Linux wheel runtime paths
+      if: matrix.os == 'ubuntu-latest'
+      run: python tools/check_linux_wheel_rpath.py wheelhouse/*.whl
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
