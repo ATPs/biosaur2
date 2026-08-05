@@ -372,56 +372,51 @@ Confidence is evidence-family specific:
 - Percolator q-values control direct PSM entry, default <= 0.01;
 - direct MS1 extraction must still pass chromatographic/isotope gates;
 - generic candidates use paired target/decoy extraction q-values;
-- external assays have a separate aligned-transfer target/decoy q-value;
+- external weak-feature transfers have a separate aligned-transfer target/decoy q-value;
 - relaxed direct and generic candidates carry explicit relaxed origin/flags;
 - strict features retain strict confidence independent of MS2 association.
 
 Audit reason codes remain visible so coverage cannot be increased by silently
 dropping difficult events from the denominator.
 
-## Project and external-assay workflow
+## Project feature match-between-runs workflow
 
 Project mode reads a deterministic manifest containing at least `run_id` and
 `mzml_path`, plus optional PSM/configuration and experimental grouping fields.
 Each run first completes its own single-run workflow and publishes atomically.
 
-For compatible alignment groups, the project stage then:
+With `--external-id`, each local hybrid run additionally persists calibrated
+isotope envelopes that lose the ordinary conflict selection.  These private
+weak candidates require at least two mono points, one secondary isotope raw
+point, isotope cosine >= 0.6 and positive quantification.  They are not public
+features unless Project transfer accepts them.  Normal output remains the
+strong population; every default feature, including direct/generic recovery,
+is a valid strong reference and PSMs are not required for external acceptance.
 
-1. builds a sparse run-by-direct-ion anchor matrix and deterministically keeps
-   at most four high-overlap reference candidates per run, excluding itself;
-2. fits bidirectional robust monotonic RT mappings only along those candidates,
-   accepting a bounded reference-rooted forest after minimum-anchor and MAD
-   checks;
-3. composes donor-to-recipient predictions through the component reference.
-   Direct two-leg paths are `reference_star`; a failed preferred leg may use a
-   bounded fallback path reported as `reference_forest`;
-4. plans missing exact assays in recipient runs;
-5. extracts and quantifies recipient-run MS1 signal; predicted RT is a local
-   centre rather than a required exact event scan;
-6. applies separate target/decoy and isotope-quality controls; a separate
-   donor-guided weak family can accept a 2-point mono plus 2-point secondary
-   isotope component at q <= 0.05 after residual-overlap control computed
-   against strict external claims already accepted for that recipient;
-7. writes external evidence and project summaries.
+For each compatible alignment group, Project then:
 
-Donor intensity is never copied into a recipient. An external assay may add no
-feature when the recipient lacks defensible MS1 evidence. Weak recovery rejects
-candidates whose intensity is more than 20% already explained by accepted
-recipient features, subtracts the remaining assigned intensity, and quantifies
-only the residual recipient component. Raw workers return compact sparse
-raw-point footprints; the recipient process compares them only after current
-strict ownership has been allocated. On resume, it deterministically rebuilds
-claims for published external features from the pre-external ownership cache
-before new recovery. Weak transferred features never become donors themselves.
-Each recipient-only ion chooses one deterministic strict direct-ID donor;
-project rescue results never enter the donor population.  Metadata alignment
-groups are subdivided by accepted anchor connectivity; donors cannot cross the
-resulting component boundary.  Candidate construction uses sparse overlap and
-limits every run to four reference candidates, so directional model attempts
-are bounded by `8n` rather than all run pairs. Reference-edge anchor fitting is
-deterministically RT-stratified and capped by
-`--external-alignment-max-anchors` (256 by default), which bounds Theil-Sen
-work without collapsing retention-time coverage.
+1. builds charge/FAIMS/mz mutual-nearest anchors from strong features only and
+   fits a bounded reference-star RT forest; default minimum anchors is 20 and
+   fitting is capped at 256 anchors per edge;
+2. matches each recipient weak candidate to source-run strong features using
+   exact charge/FAIMS, 8 ppm and the unchanged 120 second aligned RT window;
+3. keeps one best support per source run, then at most four supports from
+   distinct source runs.  Supports are ranked by normalized joint m/z/RT
+   distance with deterministic error, quality and feature-ID tie breaks;
+4. repeats the match after a deterministic neutral-mass decoy shift, competes
+   the best target and decoy for every weak candidate, and estimates q-values
+   independently inside each alignment group using the conservative +1 decoy
+   correction;
+5. promotes target winners at q <= 0.05 into the normal feature output with
+   `feature_origin=aligned_external_weak`, `external_support_count` and a
+   complete evidence record.
+
+The Project stage does not open mzML or raw MS1 caches and never creates a new
+feature by donor-guided extraction.  It only validates measured recipient weak
+candidates against measured strong features.  Source strong features may
+support multiple recipient weak candidates, as matching is candidate-centric.
+Evidence has one row per accepted support; unmatched candidates remain summary
+counts rather than producing a large evidence table.
 
 ## Caching and performance design
 
@@ -437,10 +432,10 @@ results:
    by the residual ownership state.
 4. **Residual-ownership cache**: final sparse raw-point intensity claims used
    by project external recovery to prevent double quantification.
-5. **External-observation sidecar**: compact direct donor anchors materialized
-   during single-run hybrid postprocessing, before project external recovery.
-   Its v2 provenance is the mzML/PSM source fingerprints and direct-observation
-   policy, so later DuckDB external evidence/feature writes do not invalidate it.
+5. **External feature-MBR sidecars**: source-provenanced compact strong-feature
+   and full weak-candidate Parquet sidecars written during local hybrid
+   postprocessing. They are invalidated by source or weak-gate changes and let
+   Project matching run without raw MS1 access.
 
 Cache keys include source fingerprints, scientific parameters and relevant
 implementation signatures. Scheduling-only/downstream options do not
@@ -448,7 +443,7 @@ unnecessarily invalidate upstream caches. A stale or partially published cache
 is rejected rather than reused. Outputs and cache directories use staging plus
 atomic publication.
 
-`--cache-dir` defines one root for all three layers in single-run and project
+`--cache-dir` defines one root for all cache layers in single-run and project
 processing. The default root is `.biosaur2_cache` in the current directory.
 Single-run commands use an isolated invocation namespace without
 `--keep-cache`. Project mode instead uses a deterministic project workspace and
@@ -464,10 +459,11 @@ four-worker cohort and samples the owned process tree's CPU/PSS plus system
 available memory from Linux `/proc`. After three low-CPU samples it adds
 one-worker runs; declared allocations are capped at 1.5 times the target and
 new submission stops when CPU or `--max-memory` (integer GiB, no swap) would be
-exceeded. Local and external-recipient work share this manager. Atomic per-run
-and per-recipient checkpoint records make default resume skip published work.
-Each recipient record fingerprints its exact donor plans, alignment model,
-external science options, implementation and published outputs. A changed plan
+exceeded. Local work uses this manager while feature-MBR matching is a bounded
+in-memory Project stage. Atomic per-run and external checkpoint records make
+default resume skip published work. Each external record fingerprints its
+strong/weak sidecars, alignment model, external science options,
+implementation and published outputs. A changed plan
 recomputes only affected recipients; a missing or changed output is never
 treated as complete. Checkpoint records are independently atomically published
 per run, with a heartbeat lease for cross-host recovery, so large Projects do

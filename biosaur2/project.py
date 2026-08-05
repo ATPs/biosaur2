@@ -35,6 +35,7 @@ from .external import (
     read_external_observations,
     run_external_recipient,
 )
+from .external_mbr import run_feature_mbr_stage
 from .project_validation import validate_project
 
 
@@ -120,10 +121,9 @@ def _external_option_signature(options):
         "external_alignment_min_anchors",
         "external_alignment_max_mad_sec",
         "external_alignment_max_anchors",
-        "external_min_isotope_cosine",
-        "external_weak_feature",
-        "external_weak_q_value_max",
-        "external_weak_overlap_max",
+        "external_weak_min_mono_points",
+        "external_weak_min_secondary_points",
+        "external_weak_min_isotope_cosine",
         "quant_method",
         "feature_baseline",
     )
@@ -139,6 +139,7 @@ def _external_implementation_signature():
         "external_alignment.py",
         "external_evidence.py",
         "external_observations.py",
+        "external_mbr.py",
         "alignment.py",
         "residual.py",
         "project.py",
@@ -379,6 +380,12 @@ def _command_for_run(run, paths, options):
         command.extend(("--feature-baseline", options["feature_baseline"]))
         command.append("--direct-id" if options["direct_id"] else "--no-direct-id")
         command.append("--external-id" if options["external_id"] else "--no-external-id")
+        for key, default in (
+            ("external_weak_min_mono_points", 2),
+            ("external_weak_min_secondary_points", 1),
+            ("external_weak_min_isotope_cosine", 0.6),
+        ):
+            command.extend(("--" + key.replace("_", "-"), str(options.get(key, default))))
         command.append(
             "--generic-ms2-refine"
             if options["generic_ms2_refine"]
@@ -903,7 +910,7 @@ def _write_project_database(
                 [stage, json.dumps(summary, sort_keys=True)],
             )
         connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', '7')"
+            "INSERT INTO project_metadata VALUES ('project_schema_version', '8')"
         )
         connection.execute(
             "INSERT INTO project_metadata VALUES ('resolved_options', ?)",
@@ -931,6 +938,11 @@ def _external_worker_options(options):
 def _run_external_stage(
     runs, results, options, checkpoint=None, refresh_local=None, refresh_rounds=2
 ):
+    # The feature-MBR path consumes local sidecars only.  Retain the legacy
+    # implementation below for direct callers that still supply the removed
+    # raw-extraction option set while downstream migrations complete.
+    if "external_weak_min_mono_points" in options:
+        return run_feature_mbr_stage(runs, results, options)
     successful_runs = [
         run
         for index, run in enumerate(runs)
@@ -1453,4 +1465,3 @@ def run_project(manifest, output_dir, project_db, **options):
     if checkpoint:
         checkpoint.release()
     return results
-

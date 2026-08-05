@@ -35,14 +35,11 @@ from .output import input_stem
 
 logger = logging.getLogger(__name__)
 
-
 FINAL_RESIDUAL_CALIBRATION_MAX_SIGMA = 4.0
-
 
 def _debug_stage_start(name, **details):
     logger.debug('Stage start: %s details=%s', name, details)
     return time.monotonic()
-
 
 def _debug_stage_complete(name, started, **details):
     logger.debug(
@@ -51,7 +48,6 @@ def _debug_stage_complete(name, started, **details):
         time.monotonic() - started,
         details,
     )
-
 
 def _final_residual_detector_supported(strict_contexts, args):
     if int(args.get("combine_every", 1)) != 1:
@@ -65,7 +61,6 @@ def _final_residual_detector_supported(strict_contexts, args):
     if any(float(context.get("paseftol", 0.0)) > 0 for context in strict_contexts):
         return False, "ion_mobility_provenance_unavailable"
     return True, "supported"
-
 
 def _strict_reference_isotope_calibration(strict_contexts, faims_cv, args):
     """Estimate residual-detector isotope calibration from accepted strict features."""
@@ -142,7 +137,6 @@ def _strict_reference_isotope_calibration(strict_contexts, faims_cv, args):
         }
     return calibration, diagnostics
 
-
 def _final_residual_calibration_deviation(candidate, calibration):
     """Return the largest calibrated isotope error for a residual candidate."""
 
@@ -160,7 +154,6 @@ def _final_residual_calibration_deviation(candidate, calibration):
         deviation = abs(float(isotope["mass_diff_ppm"]) - shift) / sigma
         maximum = max(maximum, deviation)
     return maximum
-
 
 def _detect_final_residual_strict(
     residual_store,
@@ -306,7 +299,6 @@ def _detect_final_residual_strict(
 def _split_peaks_task(*args):
     return list(split_peaks(*args))
 
-
 def _candidate_hill_ids(candidate):
     return tuple(
         sorted(
@@ -314,7 +306,6 @@ def _candidate_hill_ids(candidate):
             + [int(value['isotope_hill_idx']) for value in candidate['isotopes']]
         )
     )
-
 
 def _candidate_conflict_key(candidate, hills_dict):
     mono_index = int(candidate['monoisotope idx'])
@@ -335,7 +326,6 @@ def _candidate_conflict_key(candidate, hills_dict):
         int(candidate['charge']),
         _candidate_hill_ids(candidate),
     )
-
 
 def _final_feature_key(candidate, hills_dict, RT_dict, data_start_id):
     mono_index = int(candidate['monoisotope idx'])
@@ -431,7 +421,6 @@ def _generate_initial_isotope_candidates(
         candidate['FAIMS'] = faims_val
     logger.info('Number of potential isotope clusters: %d', len(ready))
     return ready
-
 
 def _calibrate_and_filter_isotope_candidates(ready, faims_val, args):
     isotope_calibration_override = args.get(
@@ -552,7 +541,6 @@ def _calibrate_and_filter_isotope_candidates(ready, faims_val, args):
     )
     return ready
 
-
 def _capture_direct_competitors(
     ready, hills_dict, RT_dict, data_for_analyse_tmp, args, direct_assays,
     direct_events_by_id, direct_competitor_sink,
@@ -578,7 +566,6 @@ def _capture_direct_competitors(
             )
         )
     return captured_direct_competitors
-
 
 def _select_nonconflicting_isotope_candidates(
     ready, hills_dict, RT_dict, data_start_id
@@ -655,7 +642,6 @@ def _select_nonconflicting_isotope_candidates(
     logger.info('Number of detected isotope clusters: %d', len(ready_final))
     return ready_set, ready_final
 
-
 def _record_losing_direct_competitors(
     ready_final, captured_direct_competitors, direct_competitor_sink
 ):
@@ -694,7 +680,6 @@ def _record_losing_direct_competitors(
             direct_competitor_sink.append(competitor)
             losing_per_psm[psm_id] = count + 1
 
-
 def _assign_feature_indices_and_write(
     ready_final, hills_dict, faims_val, RT_dict, data_start_id, write_header,
     args, next_feature_idx, data_for_analyse_tmp,
@@ -730,7 +715,6 @@ def _assign_feature_indices_and_write(
         utils.write_output(peptide_features, args, write_header)
     return hill_to_feature_idx, next_feature_idx
 
-
 def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict, data_start_id, write_header, args, next_feature_idx=1, data_for_analyse_tmp=None, direct_assays=(), direct_events_by_id=None, direct_competitor_sink=None):
     if not len(hills_dict.get('hills_idx_array_unique', ())):
         utils.write_output([], args, write_header)
@@ -740,6 +724,12 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
         hills_dict, faims_val, mz_step, paseftol, args
     )
     ready = _calibrate_and_filter_isotope_candidates(ready, faims_val, args)
+    # Project feature-MBR can later reconsider calibrated isotope envelopes
+    # that lose only the ordinary greedy conflict selection.  Keep this data
+    # private to hybrid external mode; normal feature output is unchanged.
+    weak_pool = tuple(ready) if (
+        args.get('feature_mode') == 'hybrid' and args.get('external_id')
+    ) else ()
     captured_direct_competitors = _capture_direct_competitors(
         ready, hills_dict, RT_dict, data_for_analyse_tmp, args, direct_assays,
         direct_events_by_id, direct_competitor_sink,
@@ -747,6 +737,15 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
     ready_set, ready_final = _select_nonconflicting_isotope_candidates(
         ready, hills_dict, RT_dict, data_start_id
     )
+    if weak_pool:
+        hills_dict['_external_weak_candidates'] = tuple(
+            candidate for candidate in weak_pool
+            if int(candidate['monoisotope hill idx']) not in ready_set
+            and not any(
+                int(value['isotope_hill_idx']) in ready_set
+                for value in candidate['isotopes']
+            )
+        )
     _record_losing_direct_competitors(
         ready_final, captured_direct_competitors, direct_competitor_sink
     )
@@ -922,7 +921,6 @@ def process_file(args):
             next_feature_idx, next_hill_idx, process_started,
         )
 
-
 def _prepare_mzml_processing(
     args, input_file_path, strict_stage_cache_args, identification_result
 ):
@@ -1041,7 +1039,6 @@ def _prepare_mzml_processing(
 
     return ingestion, assay_result, direct_events_by_id, strict_stage_payload, strict_stage_cache
 
-
 def _run_cached_mzml_hybrid(
     args, input_file_path, process_started, ingestion, assay_result,
     strict_stage_payload,
@@ -1072,8 +1069,6 @@ def _run_cached_mzml_hybrid(
         _debug_stage_complete('process_file', process_started)
         return
 
-
-
 def _process_mzml_faims_contexts(
     args, ingestion, assay_result, direct_events_by_id, md_correction_int,
     next_feature_idx, next_hill_idx, write_header, stop_after_hills,
@@ -1102,7 +1097,6 @@ def _process_mzml_faims_contexts(
             local_index: spectrum['rt_sec']
             for local_index, spectrum in enumerate(data_for_analyse_tmp)
         }
-
 
         hill_mass_accuracy = args['htol']
         max_mz_value = 0
@@ -1151,11 +1145,9 @@ def _process_mzml_faims_contexts(
             counter_hills_idx = Counter(hills_dict['hills_idx_array'])
             min_length_hill = args['minlh']
 
-
             tmp_hill_length = np.array([counter_hills_idx[hill_idx] for hill_idx in hills_dict['hills_idx_array']])
             idx_minl = tmp_hill_length >= min_length_hill
             total_mass_diff = total_mass_diff[idx_minl]
-
 
             calibration = fit_mass_calibration(total_mass_diff, bin_width=0.05)
             args['hill_calibration'] = calibration.to_dict()
@@ -1181,8 +1173,6 @@ def _process_mzml_faims_contexts(
             hills_started,
             hill_count=len(set(hills_dict['hills_idx_array'])),
         )
-
-
 
         logger.info('Detected number of hills before splitting: %d', len(set(hills_dict['hills_idx_array'])))
 
@@ -1292,7 +1282,6 @@ def _process_mzml_faims_contexts(
 
     return strict_contexts, next_feature_idx, next_hill_idx, write_header, stop_after_logged
 
-
 def _finalize_mzml_processing(
     args, input_file_path, strict_stage_cache_args, strict_stage_cache,
     ingestion, assay_result, strict_contexts, next_feature_idx, stop_after_hills,
@@ -1370,7 +1359,6 @@ def _finalize_mzml_processing(
             next_feature_id=next_feature_idx,
         )
 
-
 def _process_mzml_file(
     args, input_file_path, strict_stage_cache_args, identification_result,
     md_correction_int, process_started,
@@ -1399,7 +1387,6 @@ def _process_mzml_file(
         bool(args.get('stop_after_hills')),
     )
     _debug_stage_complete('process_file', process_started)
-
 
 def _process_hills_file(
     args, input_file_path, stop_after_hills, stop_after_logged,
@@ -1441,7 +1428,6 @@ def _process_hills_file(
         else:
             paseftol = 0
 
-
     if paseftol == 0:
         faims_set = sorted(set(faims_values), key=faims_sort_key)
     else:
@@ -1481,7 +1467,6 @@ def _process_hills_file(
             hill_count=len(set(hills_dict['hills_idx_array_unique'])),
         )
 
-
         logger.info('Detected number of hills: %d', len(set(hills_dict['hills_idx_array_unique'])))
 
         feature_detection_started = _debug_stage_start(
@@ -1504,7 +1489,6 @@ def _process_hills_file(
             feature_detection_started,
             strict_features=len(ready_final),
         )
-
 
         write_header = False
         _debug_stage_complete(

@@ -612,6 +612,7 @@ def _quant_row(
         "extraction_q_value": extraction_q_value,
         "supporting_psm_count": supporting_psm_count,
         "supporting_ms2_count": supporting_ms2_count,
+        "external_support_count": 0,
         "points_across_peak": observed_point_count,
         "rt_start_sec": float(rt[0]) if len(rt) else None,
         "rt_apex_sec": float(rt[apex_index]) if apex_index is not None else None,

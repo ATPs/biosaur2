@@ -9,6 +9,11 @@ from .external_observations import (
     observations_from_hybrid_rows,
     write_observation_sidecar,
 )
+from .external_mbr import (
+    sidecar_rows,
+    weak_feature_rows_from_contexts,
+    write_feature_sidecars,
+)
 
 
 def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts, manager, args, direct, generic, residual):
@@ -44,6 +49,15 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         final_feature_rows.extend(
             recovered_feature_rows + generic_recovered_feature_rows
         )
+    # Weak candidates are private Project sidecar rows.  They are never
+    # appended to the ordinary run output until cross-run FDR accepts them.
+    weak_feature_rows = (
+        weak_feature_rows_from_contexts(
+            run_id, strict_contexts, final_feature_rows, args
+        )
+        if args.get("external_id") and args.get("external_weak_candidates_cache_path")
+        else []
+    )
     args["_hybrid_summary"] = {
         "trace_extractor": "cython",
         "relaxed_ms2_feature_enabled": bool(
@@ -120,6 +134,23 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
                 assay_rows,
             ),
         )
+    if args.get("external_id") and args.get("external_weak_candidates_cache_path"):
+        strong_rows, weak_rows = sidecar_rows(
+            run_id, final_feature_rows, final_quant_rows, weak_feature_rows
+        )
+        write_feature_sidecars(
+            args["file"],
+            {
+                "external_strong_features": args.get("external_strong_features_cache_path"),
+                "external_weak_candidates": args.get("external_weak_candidates_cache_path"),
+            },
+            strong_rows,
+            weak_rows,
+        )
+        args["_hybrid_summary"]["external_feature_mbr"] = {
+            "strong_feature_count": len(strong_rows),
+            "weak_candidate_count": len(weak_rows),
+        }
     output_started = time.monotonic()
     manager.append_hybrid_results(
         final_feature_rows,

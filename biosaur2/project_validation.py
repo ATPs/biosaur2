@@ -75,7 +75,7 @@ def validate_project(project_db):
                 try:
                     with duckdb.connect(str(external), read_only=True) as connection:
                         external_rows = connection.execute(
-                            "SELECT status, feature_id, acceptance_q_value, extraction_q_value "
+                            "SELECT status, feature_id, acceptance_q_value "
                             "FROM external_id_evidence"
                         ).fetch_arrow_table().to_pylist()
                 except Exception:
@@ -85,7 +85,6 @@ def validate_project(project_db):
                     external,
                     columns=[
                         "status", "feature_id", "acceptance_q_value",
-                        "extraction_q_value",
                     ],
                 ).to_pylist()
             elif Path(external).suffix.lower() == ".tsv":
@@ -95,8 +94,6 @@ def validate_project(project_db):
                     external_rows = list(csv.DictReader(handle, delimiter="\t"))
         for row in external_rows:
             accepted_q_value = row.get("acceptance_q_value")
-            if accepted_q_value in {None, ""}:
-                accepted_q_value = row.get("extraction_q_value")
             if row["status"].startswith("accepted_") and (
                 row["feature_id"] in {None, ""}
                 or int(row["feature_id"]) <= 0

@@ -1,4 +1,5 @@
-pyteomics
+pyteomics>=4.7,<5
+psims
 scipy
 numpy>=1.17
 pandas
