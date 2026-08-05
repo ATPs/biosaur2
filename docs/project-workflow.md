@@ -1,9 +1,9 @@
 # Project workflow
 
-Project mode runs several files under one CPU/cache budget and records status
-in a project DuckDB. In Hybrid mode, comparable runs can assist one another:
-shared high-confidence peptide/charge observations align retention time, then
-a missing assay can be searched in the recipient run.
+Project mode runs multiple mzML files under one adaptive CPU and memory budget
+and records run, alignment, rescue and validation status in a Project DuckDB.
+In Hybrid mode, comparable runs can support weak features that were already
+observed locally but did not pass ordinary strong-feature selection.
 
 ## Manifest
 
@@ -11,72 +11,69 @@ Only `run_id` and `mzml_path` are required:
 
 ```tsv
 run_id	mzml_path
-run_a	mzml/run_a.mzML.gz
-run_b	mzml/run_b.mzML.gz
+run_a	mzML/run_a.mzML.gz
+run_b	mzML/run_b.mzML.gz
 ```
 
-Add same-run PSM files and an alignment group for identification-aware work:
+PSM paths are optional. Add an alignment group when a manifest contains
+scientifically distinct fractions, batches or conditions:
 
 ```tsv
 run_id	mzml_path	psm_path	alignment_group
-run_a	mzml/run_a.mzML.gz	psm/run_a.psms.tsv	batch_1
-run_b	mzml/run_b.mzML.gz	psm/run_b.psms.tsv	batch_1
-run_c	mzml/run_c.mzML.gz	psm/run_c.psms.tsv	batch_2
+run_a	mzML/run_a.mzML.gz	psm/run_a.psms.tsv	batch_1
+run_b	mzML/run_b.mzML.gz	psm/run_b.psms.tsv	batch_1
+run_c	mzML/run_c.mzML.gz		batch_2
 ```
 
-Only place scientifically comparable runs in one alignment group. In this
-example, runs A and B can assist one another; run C cannot donate to them. The
-manifest may also override `q_value_max` and `fixed_mods` per run and retain
-sample/fraction/batch metadata. See
+Only runs in the same alignment group may support one another. PSMs still
+control same-run direct Hybrid assays, but external RT alignment and rescue use
+features only and work for runs without PSM files. The manifest may override
+`q_value_max` and `fixed_mods` per run and retain sample, fraction and batch
+metadata. See
 [`examples/hybrid_project_manifest.tsv`](../examples/hybrid_project_manifest.tsv).
 
-## Same-run versus cross-run
+## Local and cross-run stages
 
-| Same-run local search | Cross-run project assistance |
+| Local Hybrid stage | Project external stage |
 | --- | --- |
-| Starts from one MS2 event in one mzML. | Starts from a peptide/charge observed in another comparable run. |
-| Searches nearby MS1 scans directly. | Fits a robust RT mapping from shared direct-identification anchors. |
-| Uses `--ms2-rt-tolerance-sec`. | Uses alignment anchor/MAD and external-extraction controls. |
-| May run without PSMs through generic evidence. | Requires donor identifications and a valid alignment. |
+| Detects and quantifies final strong features in each mzML. | Aligns final strong features between comparable runs. |
+| With `--external-id`, screens rejected envelopes into a private weak sidecar. | Matches those existing weak candidates against strong features in other runs. |
+| Weak gates cover points, isotope cosine, positive quantification, strong equivalence and same-run ownership overlap. | Requires charge/FAIMS identity, ppm and aligned-RT agreement, then applies target/decoy transfer FDR. |
+| Does not publish weak sidecar rows as features. | Publishes only accepted weak rows; it never performs donor-guided raw extraction. |
 
 ```mermaid
 sequenceDiagram
-    participant D as Donor run
-    participant A as RT alignment
-    participant R as Recipient run
-    D->>A: Peptide/charge anchors and RT
-    R->>A: Shared anchors and RT
-    A->>R: Predicted RT for donor-only assay
-    R->>R: Extract recipient MS1 isotope traces
-    R-->>A: Recipient feature or rejected attempt
+    participant T as Target run
+    participant A as RT alignment forest
+    participant S as Source runs
+    T->>T: Strong features + private weak candidates
+    S->>A: Final strong feature coordinates
+    T->>A: Final strong feature coordinates
+    A->>T: Accepted source-to-target RT paths
+    T->>S: Match each weak candidate to strong features
+    S-->>T: Best support from each distinct run
+    T->>T: Sum target/shifted-decoy supports and estimate q-value
+    T->>T: Publish accepted weak feature with target-run quantification
 ```
 
-Donor abundance is never copied. The donor says what ion to look for and the
-alignment says approximately when; the final signal is measured from the
-recipient mzML and competes with a recipient-run decoy.
+The source run never supplies abundance. The weak candidate's boundaries and
+quantification were measured in the target mzML during local processing.
+Cross-run evidence only supports whether that existing weak signal is likely
+real. Rescued features are written with feature origin
+`aligned_external_weak` and confidence tier `external_id_weak`; they are not
+fed back into the strong support index during the same Project run.
 
-## Feature-only external weak rescue
+RT anchors are mutual-nearest strong features with equal charge and FAIMS.
+After 8 ppm matching, a longest increasing RT chain removes crossing matches.
+Held-out anchors validate bias, MAD and q90 before an alignment edge is used.
+Accepted bidirectional edges form reference-rooted forest components. Each
+source run contributes at most one best strong match to a weak candidate;
+scores from up to four distinct source runs are summed by default. One source
+run is sufficient for eligibility, but multi-run evidence receives a much
+larger summed score. Target and shifted-decoy sides use identical rules.
 
-Hybrid runs with external-ID enabled retain detector rejects as private weak
-candidates. The default local gates require at least two monoisotopic points,
-two points in a secondary isotope, isotope cosine at least 0.6, positive
-quantification, and no equivalent same-run strong feature. Candidates with
-more than `--external-weak-max-strong-overlap` (0.30 by default) of their raw
-hill intensity already owned by final same-run strong features are rejected.
-
-The Project stage aligns strong features between runs and matches each weak
-candidate using exact charge and FAIMS, 8 ppm m/z tolerance, and the configured
-RT window. Each source run contributes at most its best feature. By default at
-least one distinct source run is required, and scores from at most four source
-runs are summed; configure these bounds with
-`--external-min-support-runs` and `--external-max-support-runs`. Target and
-shifted-decoy supports use identical rules, and
-`--external-q-value-max` defaults to 0.10.
-
-Only weak candidates accepted by this project-level competition are published
-as `aligned_external_weak` / `external_id_weak` features. Donor abundance is
-never copied, and rescued weak features are not promoted into the strong donor
-index.
+See [Parameter guide](parameters.md#external-weak-feature-rescue-help-all)
+for the exact gate definitions, defaults and tuning consequences.
 
 ## Run a project
 
@@ -92,26 +89,31 @@ biosaur2 project run \
 biosaur2 project validate --project-db results/project.duckdb
 ```
 
-`--workers` is the Project manager's target number of busy CPU cores. It starts
-with four-worker runs, then adds one-worker runs only while measured project
-CPU remains below target and memory is available. Declared allocations are
-bounded at 1.5 times the target, so phase overlap is controlled rather than
-unbounded. `--max-memory` is an integer GiB admission cap (default: physical
-RAM/cgroup limit; swap is excluded).
+External-ID is enabled by default for Hybrid projects. Use
+`--no-external-id` to avoid both local weak-candidate generation and the
+cross-run stage. A single-file Hybrid command may create private sidecars for
+later Project use, but cannot rescue candidates by itself.
 
-For Parquet or TSV, every run directory contains its own `features` and
-`identifications` files. A single-file Hybrid command stops there. A successful
-Hybrid project also runs cross-run external-ID processing by default and writes
-one `external_id_evidence` file per run; use `--no-external-id` to disable that
-stage. With `--format duckdb`, every run instead receives one
-`<run_id>.biosaur2.duckdb` containing `features`, `identifications`, `runs` and,
-after cross-run processing, `external_id_evidence`. The separate
-`project.duckdb` is an index and status database, not a replacement for those
-per-run outputs.
+`--workers` is the Project manager's busy-core target. It starts with
+multi-worker runs, adds lower-allocation runs while sampled CPU is below target,
+and admits work only while the configured physical-memory budget permits.
+`--max-memory` is an integer GiB admission cap; swap is excluded.
 
-## Reuse project caches
+For Parquet or TSV, every run directory contains its own `features`,
+`identifications` and Project external evidence files. With
+`--format duckdb`, each run receives one `<run_id>.biosaur2.duckdb` with
+`features`, `identifications`, `runs` and, after Project rescue,
+`external_id_evidence`. The separate `project.duckdb` indexes run status,
+resolved options, RT models, funnel summaries and output paths.
 
-Retain all cache layers under one root on the first run:
+## Resume and caches
+
+Project resume is enabled by default. A completed local run is reused only when
+its input fingerprint, scientific command and local option signature still
+match. Weak point, cosine or overlap changes are local changes, so they rebuild
+the weak sidecar. External q-value, alignment or support-run changes do not
+invalidate local output; they rerun the Project in-memory alignment and
+competition from compatible strong/weak sidecars.
 
 ```bash
 biosaur2 project run --manifest runs.tsv --output-dir results \
@@ -119,36 +121,19 @@ biosaur2 project run --manifest runs.tsv --output-dir results \
   --cache-dir project-cache --keep-cache
 ```
 
-Re-run with the same cache root and a new output location:
+`--keep-cache` retains fingerprinted raw MS1, strict-stage, candidate and
+external strong/weak sidecars for later reuse. Without it, an interrupted
+Project keeps its deterministic private workspace for resume, while completed
+local raw/strict/candidate layers are removed after their sidecars and outputs
+are safely published. A fully successful Project removes the remaining private
+workspace. There is no recipient raw-ownership cache and no separate
+external-recipient checkpoint: feature-MBR competition is deterministic and is
+rerun from the compact sidecars.
 
-```bash
-biosaur2 project run --manifest runs.tsv --output-dir results-recheck \
-  --project-db results-recheck/project.duckdb --mode hybrid --workers 16 \
-  --cache-dir project-cache --keep-cache
-```
+Use `--no-resume --overwrite` for a deliberate fresh replacement run. Cache
+manifests fingerprint source and relevant scientific state; incompatible or
+partially published layers are rejected rather than silently reused.
 
-Project resume is on by default. Reusing the original locations skips completed
-local runs and external recipients only when their inputs, scientific options,
-exact donor/alignment plan and published outputs still match. A changed plan
-recomputes only affected recipients. If a required recipient cache was cleaned
-after a prior success, Project automatically refreshes that recipient's local
-stage before external recovery; use `--no-resume --overwrite` for a fresh
-replacement run.
-
-Cache manifests fingerprint the source and relevant scientific state. A
-downstream option change does not invalidate raw ingestion unnecessarily;
-incompatible or partially published layers are recomputed. Without
-`--keep-cache`, an interrupted Project retains its deterministic private
-workspace for resume. After each checkpoint, strict/candidate layers are
-removed once external-ID no longer needs them; raw/ownership layers are removed
-after the recipient succeeds. The remaining workspace is removed after a fully
-successful Project. `--keep-cache` preserves all compatible layers.
-
-`--max-memory` is an admission limit in GiB and excludes swap. The Project
-manager samples `MemAvailable` before launching its first run and waits when
-free memory is temporarily insufficient. It fails immediately only when the
-configured limit cannot admit even one conservatively estimated run.
-
-Advanced alignment and external-extraction tolerances appear under
-`biosaur2 project run --help-all`. Keep defaults unless a representative
-validation set supports a change.
+Advanced external controls appear under
+`biosaur2 project run --help-all`. Change them only after inspecting alignment
+and rescue funnel statistics on representative data.

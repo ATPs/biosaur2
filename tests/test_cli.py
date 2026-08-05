@@ -206,7 +206,7 @@ def test_help_all_explains_defaults_and_advanced_evidence_controls():
         "(default: False)",
         "same-run Percolator",
         "target/decoy",
-        "no donor runs",
+        "collect private weak feature candidates",
         "0,1,2,3",
         "99th percentile",
         "clamped to 15-60 s",
@@ -326,13 +326,13 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     assert "(default: 0.01)" in help_result.stdout
     assert "(default: all)" in help_result.stdout
     assert "input project manifest TSV (required)" in help_result.stdout
-    assert "aligned external assays" in help_result.stdout
+    assert "weak-candidate generation" in help_result.stdout
     assert "README.md and examples/hybrid_project_manifest.tsv" in help_result.stdout
 
     all_help = _run("project", "run", "--help-all")
     assert all_help.returncode == 0
     assert "--relaxed-ms2-feature" in all_help.stdout
-    assert "recipient-run m/z tolerance" in all_help.stdout
+    assert "strong-feature RT anchors" in all_help.stdout
     assert "--external-q-value-max" in all_help.stdout
     assert "--external-weak-max-strong-overlap" in all_help.stdout
     assert "--external-min-support-runs" in all_help.stdout

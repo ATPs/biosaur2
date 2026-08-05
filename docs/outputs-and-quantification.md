@@ -19,7 +19,7 @@ legacy mode and Parquet in Hybrid mode.
 | `--write-hills` | `sample.hills.<format>` | One chromatographic hill. |
 | `--write-ms1` | `sample.ms1.<format>` | One MS1 scan summary. |
 | Legacy `--write-ms2` | `sample.ms2.<format>` | One normalized precursor entry from an MS2 spectrum. |
-| Project Hybrid external stage only | `sample.external_id_evidence.<format>` or DuckDB table | One cross-run donor-assay attempt in a recipient run. |
+| Project Hybrid external stage only | `sample.external_id_evidence.<format>` or DuckDB table | One source-run support row for a weak candidate, plus compact rejected-candidate audit rows. |
 | Project index | `project.duckdb` | Run status, QC, alignment and stage summaries. |
 | Experimental `-dia`/`-dia2` | requested `.mgf` | One text block per exported spectrum. |
 
@@ -156,41 +156,45 @@ inside `features.ms2_events`, while PSM-bearing events remain in
 
 ## Cross-run external evidence
 
-This is a project-only output, not a sidecar of a single-file
-`biosaur2 sample.mzML.gz --feature-mode hybrid` command. `biosaur2 project run
---mode hybrid` writes `sample.external_id_evidence.parquet` (or TSV), or an
-`external_id_evidence` table in the per-run DuckDB, after every scheduled run
-succeeds and the external-ID stage is enabled. It is enabled by default for
-Hybrid projects and can be disabled with `--no-external-id`. Each row is one
-donor-assay attempt evaluated against the recipient's own MS1 data.
+This output is produced only by a Hybrid Project with external-ID enabled.
+Single-file Hybrid processing may create private strong/weak sidecars, but it
+does not write public external evidence because no cross-run competition has
+occurred.
+
+For Parquet and TSV, each run receives
+`<run>.external_id_evidence.<format>`; DuckDB output receives an
+`external_id_evidence` table. One accepted weak candidate may have several
+rows, one for each distinct source-run support retained up to
+`--external-max-support-runs`. A rejected candidate normally has one compact
+audit row, or a row with nullable source fields when it had no support.
 
 ```text
-target_run  source_run  canonical_peptidoform  charge  predicted_rt_sec  target_score  decoy_score  competition_winner  extraction_q_value  status                             feature_id
-run_b       run_a       PEPTIDEK               2       755.8             14.2          5.1          target              0.0031              accepted_matched_existing_feature  87
-run_b       run_a       ACDEK                  2       826.4              4.0          6.2          decoy               1.0000              decoy_winner                       null
-run_b       run_c       MPEPTIDE               3       901.3             11.8          3.7          target              0.0064              accepted_new_external_feature      91
+target_run  weak_candidate_id  source_run  source_feature_id  support_rank  support_score  target_score  decoy_score  acceptance_q_value  status
+run_b       1842               run_a       9173               1             0.96           3.71          0.81         0.024               accepted_matched_weak_feature
+run_b       1842               run_c       8821               2             0.94           3.71          0.81         0.024               accepted_matched_weak_feature
+run_b       1901               null        null               null          null           null          0.72         1.000               no_external_support
+run_b       1917               run_d       1044               null          0.66           0.66          0.83         1.000               decoy_winner
 ```
 
-The donor provides identity and RT guidance only. Accepted intensity is
-extracted from the recipient run. Rejected attempts remain in this evidence
-table for audit, but do not become features. A successfully completed
-project-level stage can write an empty evidence table when no compatible
-cross-run donor assay is available; that is distinct from a single-file run,
-which has no external-evidence output at all.
+`support_score` is one source run's best strong-feature match.
+`target_score` and `decoy_score` are sums from up to the configured maximum
+number of distinct runs. `acceptance_q_value` is the Project feature-transfer
+q-value. Alignment method, anchor count, held-out MAD, predicted RT, ppm error
+and RT error make each reported support auditable.
 
-When a standard aligned extraction fails, Project Hybrid can recover a weaker
-recipient feature from a two-point mono hill plus a two-point secondary isotope
-hill. These rows have `acceptance_family=weak_external`, feature origin
-`aligned_external_weak`, and confidence tier `external_id_weak`. Their
-`weak_extraction_q_value` belongs to a separate q-value family (default <=
-0.05). Evidence schema v3 separates raw screening from residual extraction:
-`weak_raw_*` records the raw candidate and its current-ownership overlap,
-while `weak_target_*` and `weak_decoy_*` describe residual candidates only and
-are null when raw screening prunes that side. The boolean
-`weak_residual_*_evaluated` fields make this distinction explicit.
-`weak_overlap_fraction` remains a deprecated compatibility alias for
-`weak_raw_target_overlap_fraction`. Accepted weak quantification uses only
-recipient intensity not already assigned to another feature.
+Accepted weak rows are appended to the target run's ordinary feature table with
+origin `aligned_external_weak`, confidence tier `external_id_weak`, and
+`external_support_count` equal to the number of distinct source runs used.
+Their feature boundaries and abundance come from the pre-existing target-run
+weak candidate; source abundance is never copied and Project does not re-read
+raw mzML for targeted extraction.
+
+Rejected candidates remain absent from the feature table. Common statuses are
+`no_accepted_alignment`, `no_external_support`,
+`insufficient_target_support_runs`, `decoy_winner` and
+`target_q_value_above_limit`. An empty evidence table is valid when no weak
+candidate can be evaluated; Project funnel summaries distinguish that state
+from an external stage that was disabled.
 
 ## Per-input DuckDB
 

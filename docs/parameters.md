@@ -35,6 +35,122 @@ peptide assignment is reliable. `--generic-q-value-max` asks whether an
 unidentified MS2 precursor was associated with MS1 signal more convincingly
 than shifted decoys. See [Hybrid workflow](hybrid-workflow.md).
 
+## External weak-feature rescue (`--help-all`)
+
+External rescue is feature match-between-runs, not peptide-ID transfer and not
+targeted extraction from raw mzML. It has three distinct layers:
+
+1. Each Hybrid run performs normal strict detection. Only when `--external-id`
+   is enabled, detector rejects are also screened and written to private weak
+   sidecars. They are not yet public features.
+2. Project mode aligns runs using their final strong features. It then asks
+   whether strong features in other runs support each weak candidate already
+   measured in the target run.
+3. Target matches compete with deterministically shifted decoy matches. Only a
+   target winner below the external q-value threshold is appended to the
+   target run's feature output.
+
+A single-file Hybrid run can create the sidecars but has no other runs from
+which to obtain support. `biosaur2 project run --mode hybrid` performs all
+three layers. `--no-external-id` skips weak-candidate collection and the
+Project external stage entirely.
+
+### Run alignment
+
+| Option | Default | Valid values | Detailed effect |
+| --- | ---: | --- | --- |
+| `--external-ppm` | 8 | finite, >0 | m/z tolerance used both to construct mutual-nearest strong-feature RT anchors and to match a target-run weak candidate to source-run strong features. Charge and FAIMS must also match exactly. This does not alter hill detection or feature boundaries. |
+| `--external-rt-tolerance-sec` | 120 | finite, >=0 | Maximum absolute difference between the target weak apex and the source strong apex after RT alignment. The same value is the maximum held-out alignment q90 absolute error. It does not change local weak detection and is unrelated to `--ms2-rt-tolerance-sec`. |
+| `--external-alignment-min-anchors` | 20 | integer, >=1 | Minimum number of **fit** anchors required for one directed RT-alignment edge after validation anchors have been reserved. Anchors are mutual-nearest final strong features with the same charge and FAIMS and within `--external-ppm`; a longest strictly increasing RT chain removes crossing/isobaric matches. Every fifth chain anchor is held out, so the default normally needs at least 20 fit plus 5 validation anchors. An edge below either minimum is rejected. |
+| `--external-alignment-max-mad-sec` | 30 | finite, >=0 | Acceptance limit applied separately to the absolute median signed error (bias) and median absolute deviation (MAD) on held-out anchors. This measures whether an alignment generalizes; it is not the 120-second feature matching window. `0` is allowed but accepts only exactly zero held-out bias and MAD. |
+| `--external-alignment-max-anchors` | 256 | integer, >=1 | Maximum number of non-validation anchors fitted for one directed edge. If more survive, deterministic RT-stratified sampling retains at most this many, preferring higher-quality anchors within each stratum. Held-out validation anchors are not consumed by this cap. Raising it increases fit work and memory; lowering it does not lower `--external-alignment-min-anchors` and can make the configuration impossible when set below that minimum. |
+
+For each declared `alignment_group`, runs are ranked by strong-feature count.
+Each run tries up to four high-coverage reference candidates. Accepted
+bidirectional edges form a deterministic reference-rooted forest; disconnected
+runs remain in separate components and cannot support one another. A support
+may traverse multiple accepted edges. Besides the two limits above, held-out
+validation requires q90 absolute RT error no greater than
+`--external-rt-tolerance-sec`. Alignment counts, bias, MAD, q90 and rejection
+status are recorded in `project.duckdb.rt_alignment_models`.
+
+Lowering `--external-alignment-min-anchors` may connect sparse runs, but also
+increases the chance that an accidental m/z ordering produces an unstable RT
+map. Raising it is more conservative but can split the forest and produce
+`no_accepted_alignment` outcomes. Increasing the RT window cannot repair a
+rejected edge; it only relaxes the q90 validation limit and subsequent support
+matching.
+
+### Local weak-candidate gates
+
+| Option | Default | Valid values | Detailed effect |
+| --- | ---: | --- | --- |
+| `--external-weak-min-mono-points` | 2 | integer, >=1 | Minimum raw points in the monoisotopic hill of a detector reject. |
+| `--external-weak-min-secondary-points` | 2 | integer, >=1 | Minimum points required in at least one non-mono isotope hill. With both point defaults at 2, the local structural minimum is often called the `2+2` gate. |
+| `--external-weak-min-isotope-cosine` | 0.60 | finite [0,1] | Minimum cosine similarity between integrated observed isotope intensities and the expected averagine envelope. Lower values admit less isotope-like candidates; higher values improve shape specificity but reduce the pool. |
+| `--external-weak-max-strong-overlap` | 0.30 | finite [0,1] | Maximum fraction of the weak candidate's original raw hill intensity already claimed by final same-run strong features. The comparison is inclusive: exactly 0.30 passes at the default. |
+
+The overlap fraction is
+
+```text
+intensity at the candidate's raw points already owned by the final strong ledger
+-------------------------------------------------------------------------------
+              all original raw intensity in the candidate footprint
+```
+
+It is an ownership guard against publishing the same signal twice. It is not
+the chromatographic RT-overlap percentage and not the fraction of isotope
+channels shared. A separate strong-equivalence gate rejects any candidate
+already represented by a final same-run strong feature with matching charge,
+FAIMS, 8 ppm m/z and RT interval, even when its ownership fraction is below
+the configured limit.
+
+Lowering `--external-weak-max-strong-overlap` is conservative and removes
+more candidates sharing strong-feature signal. Raising it enlarges the weak
+pool, but increases the risk of shared-signal or double-counted quantitative
+features. `1.0` disables only this fractional gate; the strong-equivalence,
+point, cosine and positive-quantification gates still apply. Candidate
+quantification must be finite and positive. Candidates are de-duplicated by
+FAIMS, charge and monoisotopic hill before sidecar persistence.
+
+These four options exist on both the single-run Hybrid advanced CLI and the
+Project CLI because they control local sidecar production. They have no cost
+in ordinary mode: weak candidates are generated only for Hybrid runs with
+external-ID enabled. Changing any one invalidates the local weak sidecar and
+replays local weak postprocessing; compatible raw MS1 and strong-stage caches
+remain independently reusable.
+
+### Cross-run support and transfer FDR
+
+| Option | Default | Valid values | Detailed effect |
+| --- | ---: | --- | --- |
+| `--external-min-support-runs` | 1 | integer 1-16 | Minimum number of distinct source runs needed for a target score or a decoy score to be valid. The rule is symmetric. At the default, one run makes a candidate eligible for competition but does not guarantee rescue. |
+| `--external-max-support-runs` | 4 | integer 1-16, >= min | Maximum distinct-run supports retained, summed and reported on each target or decoy side. |
+| `--external-q-value-max` | 0.10 | finite [0,1] | Maximum project-level feature-transfer q-value for publishing a weak candidate. This q-value is independent of Percolator PSM q-values and generic-MS2 extraction q-values. |
+
+Within an accepted alignment component, each source run contributes only its
+single best matching strong feature. Supports are ranked by match score, and
+the best supports from at most `--external-max-support-runs` distinct runs are
+summed. The score decreases with normalized m/z and aligned-RT error. There is
+no average or per-run voting mode: scoring is a fixed sum. Consequently, four
+similarly good run supports score much higher than one, while one remains
+eligible under the default minimum.
+
+The exact same minimum, maximum, m/z/RT rules and sum scoring are applied to a
+deterministically m/z-shifted decoy candidate. Target/decoy competition is
+calibrated within each alignment component. A weak candidate is published only
+when the target wins, its target support count reaches the minimum, and its
+external q-value is at most the configured threshold. Typical funnel outcomes
+are `no_accepted_alignment`, `no_external_support`,
+`insufficient_target_support_runs`, `decoy_winner`,
+`target_q_value_above_limit`, and `accepted_matched_weak_feature`.
+
+Changing q-value or min/max support settings reruns only the in-memory Project
+competition when local sidecars remain compatible. Accepted evidence contains
+up to the configured maximum support rows; `external_support_count` records
+the actual number of distinct source runs used. Rescued weak features are not
+promoted into the strong donor index during the same Project run.
+
 ## Generic local recovery (`--help-all`)
 
 | Option | Default | Meaning |

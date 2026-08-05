@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import logging
 import os
@@ -13,7 +12,6 @@ import subprocess
 import sys
 import threading
 import time
-from functools import lru_cache
 
 import pyarrow.parquet as pq
 
@@ -27,16 +25,8 @@ from .parallel import (
 )
 from .project_manifest import read_manifest
 from .raw_ms1 import source_fingerprint
-from .external import (
-    _read_table,
-    alignment_model_rows,
-    build_alignment_models,
-    plan_external_assays,
-    read_external_observations,
-    run_external_recipient,
-)
 from .external_mbr import run_feature_mbr_stage
-from .project_validation import validate_project
+from .project_validation import _read_output_table, validate_project as validate_project
 
 
 logger = logging.getLogger(__name__)
@@ -76,7 +66,6 @@ def _resume_option_signature(options):
         "_max_memory_bytes",
         "_effective_workers",
         "_local_scheduler_summary",
-        "_resumed_external_summaries",
     }
     signature = {
         key: value
@@ -111,133 +100,6 @@ def _checkpoint_identity(manifest, output_dir, database, options):
         "output_dir": str(Path(output_dir).resolve()),
         "project_db": str(Path(database).resolve()),
     }
-
-
-def _fingerprint_payload(value):
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), default=str
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _external_option_signature(options):
-    keys = (
-        "external_ppm",
-        "external_rt_tolerance_sec",
-        "external_q_value_max",
-        "external_alignment_min_anchors",
-        "external_alignment_max_mad_sec",
-        "external_alignment_max_anchors",
-        "external_weak_min_mono_points",
-        "external_weak_min_secondary_points",
-        "external_weak_min_isotope_cosine",
-        "external_weak_max_strong_overlap",
-        "external_min_support_runs",
-        "external_max_support_runs",
-        "quant_method",
-        "feature_baseline",
-    )
-    return {key: options.get(key) for key in keys}
-
-
-@lru_cache(maxsize=1)
-def _external_implementation_signature():
-    package = Path(__file__).resolve().parent
-    digest = hashlib.sha256()
-    for name in (
-        "external.py",
-        "external_alignment.py",
-        "external_evidence.py",
-        "external_observations.py",
-        "external_mbr.py",
-        "external_weak.py",
-        "alignment.py",
-        "residual.py",
-        "project.py",
-    ):
-        digest.update(name.encode("ascii"))
-        digest.update((package / name).read_bytes())
-    return digest.hexdigest()
-
-
-def _alignment_model_signature(model):
-    return {
-        "source_run": model.source_run,
-        "target_run": model.target_run,
-        "method": model.method,
-        "anchor_count": model.anchor_count,
-        "inlier_count": model.inlier_count,
-        "x_knots": model.x_knots,
-        "y_knots": model.y_knots,
-        "slope": model.slope,
-        "intercept": model.intercept,
-        "residual_mad_sec": model.residual_mad_sec,
-        "validation_anchor_count": model.validation_anchor_count,
-        "validation_median_bias_sec": model.validation_median_bias_sec,
-        "validation_mad_sec": model.validation_mad_sec,
-        "validation_q90_abs_error_sec": model.validation_q90_abs_error_sec,
-        "status": model.status,
-    }
-
-
-def _external_plan_signature(plan):
-    observation = plan.observation
-    alignment = plan.alignment
-    return {
-        "target_run": plan.target_run,
-        "source_run": plan.source_run,
-        "alignment_group": plan.alignment_group,
-        "observation": {
-            "run_id": observation.run_id,
-            "ion_key": observation.ion_key,
-            "canonical_peptidoform": observation.canonical_peptidoform,
-            "charge": observation.charge,
-            "faims_cv": observation.faims_cv,
-            "rt_apex_sec": observation.rt_apex_sec,
-            "q_value": observation.q_value,
-            "assay_id": observation.assay_id,
-            "psm_id": observation.psm_id,
-        },
-        "predicted_rt_sec": plan.predicted_rt_sec,
-        "alignment": {
-            "method": alignment.method,
-            "status": alignment.status,
-            "source_to_reference": [
-                _alignment_model_signature(model)
-                for model in alignment.source_to_reference
-            ],
-            "reference_to_target": [
-                _alignment_model_signature(model)
-                for model in alignment.reference_to_target
-            ],
-        },
-    }
-
-
-def _external_task_fingerprint(run, result, plans, options):
-    return _fingerprint_payload(
-        {
-            "version": 1,
-            "implementation": _external_implementation_signature(),
-            "recipient": run.run_id,
-            "input": _input_fingerprint(run),
-            "local_command": _scientific_command(result["command"]),
-            "external_options": _external_option_signature(options),
-            "plans": [_external_plan_signature(plan) for plan in plans],
-        }
-    )
-
-
-def _external_output_fingerprints(paths):
-    candidates = [paths.get("external_evidence"), paths.get("features")]
-    if paths.get("run_output"):
-        candidates = [paths["run_output"]]
-    result = {}
-    for candidate in candidates:
-        if not candidate or not Path(candidate).is_file():
-            return None
-        result[str(Path(candidate).resolve())] = source_fingerprint(candidate)
-    return result
 
 
 def _tail_append(chunks, chunk, limit):
@@ -321,12 +183,6 @@ def _project_worker_budgeted(task, allocated_workers):
     result = _project_worker(execution_task)
     result["allocated_workers"] = allocated_workers
     return result
-
-
-def _external_worker_budgeted(task, allocated_workers):
-    """Use one Project slot's full CPU allocation inside a recipient."""
-
-    return run_external_recipient(task, workers=allocated_workers)
 
 
 def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
@@ -488,52 +344,6 @@ def _read_successful_runs(database):
         return {}
 
 
-def _read_successful_external_runs(database):
-    """Return completed recipient summaries from a completed project index."""
-
-    if not database.is_file():
-        return {}
-    import duckdb
-
-    try:
-        with duckdb.connect(str(database), read_only=True) as connection:
-            columns = {
-                row[1]
-                for row in connection.execute(
-                    "PRAGMA table_info('external_summary')"
-                ).fetchall()
-            }
-            if not {
-                "task_fingerprint", "output_fingerprints_json"
-            }.issubset(columns):
-                return {}
-            rows = connection.execute(
-                "SELECT external.run_id, external.planned_assay_count, "
-                "external.evaluated_assay_count, external.new_external_feature_count, "
-                "external.new_strict_external_feature_count, "
-                "external.new_weak_external_feature_count, external.status_counts_json, "
-                "external.task_fingerprint, external.output_fingerprints_json "
-                "FROM external_summary AS external "
-                "JOIN stage_status AS stage ON stage.run_id = external.run_id "
-                "WHERE stage.stage = 'external_id' AND stage.status = 'success'"
-            ).fetchall()
-        return {
-            row[0]: {
-                "planned_assay_count": row[1],
-                "evaluated_assay_count": row[2],
-                "new_external_feature_count": row[3],
-                "new_strict_external_feature_count": row[4],
-                "new_weak_external_feature_count": row[5],
-                "status_counts": json.loads(row[6] or "{}"),
-                "task_fingerprint": row[7],
-                "output_fingerprints": json.loads(row[8] or "{}"),
-            }
-            for row in rows
-        }
-    except Exception:
-        return {}
-
-
 def _input_fingerprint(run):
     return {
         "mzml": source_fingerprint(run.mzml_path),
@@ -587,7 +397,7 @@ def _summary_for_result(result):
                 bool(row.get("assay_id")) for row in identification_rows
             )
         return summary
-    features = _read_table(feature_path, "features")
+    features = _read_output_table(feature_path, "features")
     feature_rows = features.to_pylist()
     summary["feature_count"] = len(feature_rows)
     summary["quant_feature_count"] = len(feature_rows)
@@ -598,7 +408,7 @@ def _summary_for_result(result):
     identification_path = Path(paths["identifications"])
     if identification_path.is_file():
         try:
-            identifications = _read_table(
+            identifications = _read_output_table(
                 identification_path, "identifications"
             )
         except Exception:
@@ -650,7 +460,6 @@ def _write_project_database(
             "output_format VARCHAR, run_output_path VARCHAR, "
             "features_path VARCHAR, identification_path VARCHAR, "
             "external_evidence_path VARCHAR, raw_ms1_cache_path VARCHAR, "
-            "residual_ownership_cache_path VARCHAR, "
             "input_fingerprint_json VARCHAR, command_json VARCHAR)"
         )
         connection.execute(
@@ -691,15 +500,14 @@ def _write_project_database(
             "CREATE TABLE external_summary (run_id VARCHAR, "
             "planned_assay_count BIGINT, evaluated_assay_count BIGINT, "
             "new_external_feature_count BIGINT, new_strict_external_feature_count BIGINT, "
-            "new_weak_external_feature_count BIGINT, status_counts_json VARCHAR, "
-            "task_fingerprint VARCHAR, output_fingerprints_json VARCHAR)"
+            "new_weak_external_feature_count BIGINT, status_counts_json VARCHAR)"
         )
         for index, run in enumerate(runs):
             result = results[index]
             paths = result["paths"]
             summary = _summary_for_result(result)
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     index,
                     run.run_id,
@@ -718,7 +526,6 @@ def _write_project_database(
                     paths["identifications"],
                     paths.get("external_evidence"),
                     paths["raw_ms1_cache"],
-                    paths.get("residual_ownership_cache"),
                     json.dumps(_input_fingerprint(run), sort_keys=True),
                     json.dumps(result.get("command", [])),
                 ],
@@ -787,19 +594,6 @@ def _write_project_database(
                         run.run_id,
                         strict_cache_status,
                         strict_cache_detail,
-                    ],
-                )
-                ownership_cache_path = paths.get("residual_ownership_cache")
-                ownership_manifest = (
-                    Path(ownership_cache_path, "manifest.json")
-                    if ownership_cache_path else None
-                )
-                connection.execute(
-                    "INSERT INTO stage_status VALUES (?, 'residual_ownership_cache', ?, ?)",
-                    [
-                        run.run_id,
-                        "success" if ownership_manifest and ownership_manifest.is_file() else "missing",
-                        ownership_cache_path,
                     ],
                 )
                 external_summary = (external_stage or {}).get(
@@ -884,7 +678,7 @@ def _write_project_database(
                 run.run_id, {}
             )
             connection.execute(
-                "INSERT INTO external_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO external_summary VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                     run.run_id,
                     external.get("planned_assay_count"),
@@ -894,10 +688,6 @@ def _write_project_database(
                     external.get("new_weak_external_feature_count"),
                     json.dumps(
                         external.get("status_counts", {}), sort_keys=True
-                    ),
-                    external.get("task_fingerprint"),
-                    json.dumps(
-                        external.get("output_fingerprints", {}), sort_keys=True
                     ),
                 ],
             )
@@ -937,7 +727,7 @@ def _write_project_database(
                 [stage, json.dumps(summary, sort_keys=True)],
             )
         connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', '9')"
+            "INSERT INTO project_metadata VALUES ('project_schema_version', '10')"
         )
         connection.execute(
             "INSERT INTO project_metadata VALUES ('resolved_options', ?)",
@@ -948,201 +738,8 @@ def _write_project_database(
     publish_staged_files([(temporary, database)])
 
 
-def _external_worker_options(options):
-    return {
-        "ppm": options.get("external_ppm", 8.0),
-        "rt_tolerance_sec": options.get("external_rt_tolerance_sec", 120.0),
-        "min_isotope_cosine": options.get("external_min_isotope_cosine", 0.8),
-        "q_value_max": options.get("external_q_value_max", 0.10),
-        "quant_method": options["quant_method"],
-        "baseline": options["feature_baseline"],
-        "weak_feature": options.get("external_weak_feature", True),
-        "weak_q_value_max": options.get("external_weak_q_value_max", 0.05),
-        "weak_overlap_max": options.get("external_weak_overlap_max", 0.20),
-    }
-
-
-def _run_external_stage(
-    runs, results, options, checkpoint=None, refresh_local=None, refresh_rounds=2
-):
-    # The feature-MBR path consumes local sidecars only.  Retain the legacy
-    # implementation below for direct callers that still supply the removed
-    # raw-extraction option set while downstream migrations complete.
-    if "external_weak_min_mono_points" in options:
-        return run_feature_mbr_stage(runs, results, options)
-    successful_runs = [
-        run
-        for index, run in enumerate(runs)
-        if results[index]["status"] in {"success", "skipped_resume"}
-    ]
-    result_index = {run.run_id: index for index, run in enumerate(runs)}
-    observations = {
-        run.run_id: read_external_observations(
-            run, results[result_index[run.run_id]]["paths"]
-        )
-        for run in successful_runs
-    }
-    models = build_alignment_models(
-        successful_runs,
-        observations,
-        min_anchors=int(options.get("external_alignment_min_anchors", 5)),
-        max_residual_mad_sec=float(
-            options.get("external_alignment_max_mad_sec", 30.0)
-        ),
-        max_anchors=int(options.get("external_alignment_max_anchors", 256)),
-    )
-    plans = plan_external_assays(
-        successful_runs, observations, models
-    )
-    logger.info(
-        "External-ID reference-star alignment: groups=%d references=%s models=%d plans=%d",
-        len(models.reference_runs),
-        models.reference_runs,
-        len(models),
-        sum(len(value) for value in plans.values()),
-    )
-    tasks = []
-    summaries = {}
-    refresh_ids = []
-    for run in successful_runs:
-        result = results[result_index[run.run_id]]
-        paths = result["paths"]
-        task_fingerprint = _external_task_fingerprint(
-            run, result, plans.get(run.run_id, ()), options
-        )
-        prior = checkpoint.external_record(run.run_id) if checkpoint else None
-        if prior is None:
-            prior = options.get("_resumed_external_summaries", {}).get(run.run_id)
-        output_fingerprints = _external_output_fingerprints(paths)
-        if (
-            prior
-            and prior.get("status", "success") == "success"
-            and prior.get("task_fingerprint") == task_fingerprint
-            and prior.get("output_fingerprints") == output_fingerprints
-        ):
-            summaries[run.run_id] = {
-                key: value
-                for key, value in prior.items()
-                if key not in {"status", "summary"}
-            }
-            summaries[run.run_id].update(prior.get("summary", {}))
-            continue
-        if not (
-            Path(paths["raw_ms1_cache"]).is_dir()
-            and Path(paths["residual_ownership_cache"]).is_dir()
-        ):
-            refresh_ids.append(run.run_id)
-            continue
-        tasks.append(
-            {
-                "run": run,
-                "paths": paths,
-                "plans": plans.get(run.run_id, ()),
-                "options": _external_worker_options(options),
-                "task_fingerprint": task_fingerprint,
-            }
-        )
-
-    if refresh_ids:
-        if refresh_local is None or refresh_rounds < 1:
-            raise RuntimeError(
-                "external-ID needs local cache refresh for: %s"
-                % ", ".join(sorted(refresh_ids))
-            )
-        refresh_local(tuple(sorted(refresh_ids)))
-        return _run_external_stage(
-            runs,
-            results,
-            options,
-            checkpoint=checkpoint,
-            refresh_local=refresh_local,
-            refresh_rounds=refresh_rounds - 1,
-        )
-
-    def checkpoint_external_start(position, _args, _allocation):
-        if checkpoint:
-            task = tasks[position]
-            checkpoint.put_external(
-                task["run"].run_id,
-                {"status": "pending", "task_fingerprint": task["task_fingerprint"]},
-            )
-
-    def checkpoint_external_result(position, value):
-        if isinstance(value, WorkerFailure):
-            return
-        task = tasks[position]
-        run_id = task["run"].run_id
-        completed = dict(value)
-        completed["task_fingerprint"] = task["task_fingerprint"]
-        completed["output_fingerprints"] = _external_output_fingerprints(
-            task["paths"]
-        )
-        value.clear()
-        value.update(completed)
-        if checkpoint:
-            checkpoint.put_external(
-                run_id,
-                {
-                    "status": "success",
-                    "task_fingerprint": completed["task_fingerprint"],
-                    "output_fingerprints": completed["output_fingerprints"],
-                    "summary": completed,
-                },
-            )
-        if not options.get("keep_cache"):
-            remove_cache_layers(
-                task["paths"],
-                ("raw", "strict", "candidate", "ownership"),
-            )
-
-    if tasks:
-        raw, _started, scheduler_summary = run_adaptive_process_tasks(
-            _external_worker_budgeted,
-            ((task,) for task in tasks),
-            int(options.get("_effective_workers", options.get("workers", 4))),
-            int(options["_max_memory_bytes"]),
-            lambda result: isinstance(result, WorkerFailure),
-            on_result=checkpoint_external_result,
-            on_start=checkpoint_external_start,
-        )
-    else:
-        raw, scheduler_summary = {}, {}
-    logger.info(
-        "External-ID adaptive manager: target=%d summary=%s",
-        int(options.get("_effective_workers", options.get("workers", 4))),
-        scheduler_summary,
-    )
-    failures = []
-    for position, value in raw.items():
-        run_id = tasks[position]["run"].run_id
-        if isinstance(value, WorkerFailure):
-            failures.append(
-                "%s: %s: %s" % (
-                    run_id,
-                    value.exception_type,
-                    value.message,
-                )
-            )
-        else:
-            summaries[run_id] = value
-    if failures:
-        raise RuntimeError("external-ID stage failed: " + "; ".join(failures))
-    for run_id in sorted(summaries):
-        summary = summaries[run_id]
-        logger.info(
-            "External-ID run %s: planned=%d evaluated=%d new_features=%d statuses=%s",
-            run_id,
-            summary["planned_assay_count"],
-            summary["evaluated_assay_count"],
-            summary["new_external_feature_count"],
-            summary["status_counts"],
-        )
-    return {
-        "summaries": summaries,
-        "alignment_models": alignment_model_rows(models),
-        "reference_runs": models.reference_runs,
-        "scheduler_summary": scheduler_summary,
-    }
+def _run_external_stage(runs, results, options):
+    return run_feature_mbr_stage(runs, results, options)
 
 
 def run_project(manifest, output_dir, project_db, **options):
@@ -1191,10 +788,6 @@ def run_project(manifest, output_dir, project_db, **options):
             raise ValueError("unsupported psm_format for %s: %s" % (run.run_id, run.psm_format))
 
     successful = _read_successful_runs(database) if options["resume"] else {}
-    resumed_external = (
-        _read_successful_external_runs(database) if options["resume"] else {}
-    )
-    options["_resumed_external_summaries"] = resumed_external
     if checkpoint and options["resume"]:
         for run_id, record in checkpoint.state.get("runs", {}).items():
             if record.get("status") != "success":
@@ -1312,11 +905,9 @@ def run_project(manifest, output_dir, project_db, **options):
             },
         )
         if value.get("status") == "success" and not options.get("keep_cache"):
-            if options["mode"] == "hybrid" and options.get("external_id", False):
-                remove_cache_layers(task["paths"], ("strict", "candidate"))
-            elif options["mode"] == "hybrid":
+            if options["mode"] == "hybrid":
                 remove_cache_layers(
-                    task["paths"], ("raw", "strict", "candidate", "ownership")
+                    task["paths"], ("raw", "strict", "candidate")
                 )
 
     raw, _started, scheduler_summary = run_adaptive_process_tasks(
@@ -1389,83 +980,6 @@ def run_project(manifest, output_dir, project_db, **options):
             "" if not results[index].get("error") else " - " + results[index]["error"].splitlines()[-1],
         )
 
-    def refresh_local(run_ids):
-        """Rebuild only recipient caches needed by invalid external records."""
-
-        refresh_tasks = []
-        for run_id in run_ids:
-            index = next(
-                position for position, run in enumerate(runs) if run.run_id == run_id
-            )
-            prior = results[index]
-            paths = prior["paths"]
-            refresh_tasks.append(
-                (
-                    index,
-                    {
-                        "run_id": run_id,
-                        "paths": paths,
-                        "command": _scientific_command(prior["command"]),
-                        "cache_root": str(Path(paths["cache_run_dir"]).parent.parent),
-                        "force_overwrite": True,
-                    },
-                )
-            )
-
-        def refresh_start(position, _args, _allocation):
-            if not checkpoint:
-                return
-            task = refresh_tasks[position][1]
-            run = runs[refresh_tasks[position][0]]
-            checkpoint.put_run(
-                run.run_id,
-                {
-                    "status": "pending",
-                    "input_fingerprint": _input_fingerprint(run),
-                    "command": task["command"],
-                    "project_option_signature": _local_resume_option_signature(options),
-                },
-            )
-
-        def refresh_result(position, value):
-            if isinstance(value, WorkerFailure):
-                return
-            task = refresh_tasks[position][1]
-            run = runs[refresh_tasks[position][0]]
-            if checkpoint:
-                checkpoint.put_run(
-                    run.run_id,
-                    {
-                        "status": value.get("status", "failed"),
-                        "input_fingerprint": _input_fingerprint(run),
-                        "command": task["command"],
-                        "project_option_signature": _local_resume_option_signature(options),
-                        "result": value,
-                    },
-                )
-            if value.get("status") == "success" and not options.get("keep_cache"):
-                remove_cache_layers(task["paths"], ("strict", "candidate"))
-
-        raw, _started, summary = run_adaptive_process_tasks(
-            _project_worker_budgeted,
-            ((task,) for _index, task in refresh_tasks),
-            effective_workers,
-            options["_max_memory_bytes"],
-            lambda value: isinstance(value, WorkerFailure)
-            or value.get("status") == "failed",
-            on_result=refresh_result,
-            on_start=refresh_start,
-        )
-        options["_local_scheduler_summary"]["refreshes"].append(summary)
-        failures = []
-        for position, value in raw.items():
-            index, task = refresh_tasks[position]
-            if isinstance(value, WorkerFailure):
-                failures.append("%s: %s" % (task["run_id"], value.message))
-                continue
-            results[index] = value
-        if failures:
-            raise RuntimeError("local cache refresh failed: " + "; ".join(failures))
     external_stage = None
     if (
         options["mode"] == "hybrid"
@@ -1476,13 +990,7 @@ def run_project(manifest, output_dir, project_db, **options):
         )
     ):
         logger.info("Starting project-level RT alignment and external-ID stage")
-        external_stage = _run_external_stage(
-            runs,
-            results,
-            options,
-            checkpoint=checkpoint,
-            refresh_local=refresh_local,
-        )
+        external_stage = _run_external_stage(runs, results, options)
         logger.info("Project-level external-ID stage complete")
     _write_project_database(
         database, runs, results, options, external_stage=external_stage

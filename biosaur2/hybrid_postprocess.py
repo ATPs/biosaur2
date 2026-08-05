@@ -4,11 +4,6 @@ from .hybrid_runtime import *
 from .hybrid_direct_stage import run_direct_stage
 from .hybrid_generic_stage import run_generic_stage
 from .hybrid_residual_stage import run_final_residual_stage
-from .residual import save_residual_ownership_cache
-from .external_observations import (
-    observations_from_hybrid_rows,
-    write_observation_sidecar,
-)
 from .external_mbr import (
     sidecar_rows,
     write_feature_sidecars,
@@ -127,19 +122,6 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         },
         "local_candidate_cache": local_candidate_cache_telemetry,
     }
-    observation_sidecar = args.get("external_observations_cache_path")
-    if args.get("external_id") and observation_sidecar:
-        write_observation_sidecar(
-            args["file"],
-            args.get("psm_path"),
-            observation_sidecar,
-            observations_from_hybrid_rows(
-                run_id,
-                final_quant_rows,
-                audit_by_event.values(),
-                assay_rows,
-            ),
-        )
     if args.get("external_id") and args.get("external_weak_candidates_cache_path"):
         strong_rows, weak_rows = sidecar_rows(
             run_id, final_feature_rows, final_quant_rows, weak_feature_rows
@@ -168,20 +150,6 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         assay_result.audit,
         assay_rows,
     )
-    ownership_cache = args.get("residual_ownership_cache_dir")
-    if ownership_cache:
-        source_path = args.get("file")
-        if not source_path:
-            raise RuntimeError("cannot persist residual ownership without input path")
-        cache_path = save_residual_ownership_cache(
-            residual_ledger, ownership_cache, source_path
-        )
-        args["_residual_ownership_cache"] = {
-            "status": "created",
-            "path": str(cache_path),
-            "claim_count": residual_ledger.claimed_point_count,
-            "state_fingerprint": residual_ledger.state_fingerprint(),
-        }
     logger.debug(
         'Hybrid output append complete: runtime_sec=%.3f feature_rows=%d quant_rows=%d audit_rows=%d',
         time.monotonic() - output_started,

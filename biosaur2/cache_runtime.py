@@ -43,19 +43,12 @@ def run_cache_paths(workspace, source_path, run_id=None):
         "raw_ms1_cache": str(run_dir / "raw-ms1"),
         "strict_stage_cache": str(run_dir / "strict-stage"),
         "candidate_cache": str(run_dir / "candidates"),
-        "external_observations": str(
-            run_dir / "external" / "observations-v2.parquet"
-        ),
         "external_strong_features": str(
             run_dir / "external" / "strong-features-v2.parquet"
         ),
         "external_weak_candidates": str(
             run_dir / "external" / "weak-candidates-v2.parquet"
         ),
-        # Final ownership is consumed only by the project-level external-ID
-        # stage.  Keep it separate from reusable upstream caches because it
-        # represents the complete postprocessing population.
-        "residual_ownership_cache": str(run_dir / "residual-ownership"),
     }
 
 
@@ -142,7 +135,6 @@ def remove_cache_layers(paths, layers):
         "raw": "raw_ms1_cache",
         "strict": "strict_stage_cache",
         "candidate": "candidate_cache",
-        "ownership": "residual_ownership_cache",
     }
     for layer in layers:
         path = Path(paths[keys[layer]])
@@ -169,7 +161,6 @@ class ProjectCheckpoint:
         self.path = Path(path)
         self.records_dir = self.path.with_name(self.path.stem + ".records")
         self.runs_dir = self.records_dir / "runs"
-        self.external_dir = self.records_dir / "external"
         self.lease_dir = self.path.with_name(self.path.stem + ".lease")
         self.state = {}
         self._owner = None
@@ -252,12 +243,6 @@ class ProjectCheckpoint:
         self.records_dir.mkdir(parents=True, exist_ok=True)
         for run_id, record in legacy.get("runs", {}).items():
             self._write_record(self.runs_dir, run_id, record)
-        for run_id, record in legacy.get("external", {}).items():
-            # v1 external completion has no dependency/output fingerprints.
-            # It must be recomputed before it can be safely reused.
-            migrated = dict(record)
-            migrated.pop("status", None)
-            self._write_record(self.external_dir, run_id, migrated)
         self._write_json(
             self.path,
             {"version": self.VERSION, "identity": identity},
@@ -292,7 +277,6 @@ class ProjectCheckpoint:
             "version": self.VERSION,
             "identity": identity,
             "runs": self._load_records(self.runs_dir),
-            "external": self._load_records(self.external_dir),
         }
 
     def _lease_owner(self):
@@ -400,10 +384,3 @@ class ProjectCheckpoint:
     def put_run(self, run_id, record):
         self.state.setdefault("runs", {})[run_id] = record
         self._write_record(self.runs_dir, run_id, record)
-
-    def external_record(self, run_id):
-        return self.state.get("external", {}).get(run_id)
-
-    def put_external(self, run_id, record):
-        self.state.setdefault("external", {})[run_id] = record
-        self._write_record(self.external_dir, run_id, record)

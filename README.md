@@ -9,7 +9,7 @@ fragment intensity into the measurement.
 This repository extends [markmipt/biosaur2](https://github.com/markmipt/biosaur2)
 with a complete Hybrid workflow: PSM-guided and unidentified-MS2 evidence,
 target/decoy-controlled local recovery, three named abundance measures,
-multi-run RT alignment, recipient-run extraction, unified reusable caches, and
+multi-run RT alignment, strong-to-weak feature matching, unified reusable caches, and
 bounded multi-file execution. The strict upstream-style detector remains
 available as `legacy` mode. See [the update and validation record](updates/2026-07-30.md)
 for scope and limitations.
@@ -94,7 +94,7 @@ biosaur2 project validate --project-db results/project.duckdb
 ```
 
 Each input still receives its own features and identifications outputs. The
-project database records run status, paths, alignment and external-extraction
+project database records run status, paths, alignment and weak-feature rescue
 summaries. Read [Project workflow](docs/project-workflow.md) for the manifest
 and the difference between same-run search and cross-run matching.
 

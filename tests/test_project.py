@@ -7,9 +7,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from biosaur2 import project_cli
-from biosaur2.alignment import RTAlignmentModel
-from biosaur2.external import ExternalObservation, ExternalPlan
-from biosaur2.external_alignment import ReferenceStarAlignment
 from biosaur2.schema import compact_schemas
 from biosaur2.project import (
     _command_for_run,
@@ -17,8 +14,6 @@ from biosaur2.project import (
     _local_resume_option_signature,
     _resume_option_signature,
     _input_fingerprint,
-    _external_task_fingerprint,
-    _read_successful_external_runs,
     _read_successful_runs,
     _scientific_command,
     _write_project_database,
@@ -209,81 +204,6 @@ def test_resume_command_ignores_worker_and_cache_location():
     assert _scientific_command(executed) == base
 
 
-def test_external_recipient_fingerprint_tracks_exact_plan(tmp_path):
-    source = tmp_path / "run.mzML.gz"
-    source.write_bytes(b"source")
-    run = SimpleNamespace(run_id="recipient", mzml_path=source, psm_path=None)
-    observation = ExternalObservation(
-        run_id="donor",
-        ion_key="PEPTIDE/2",
-        canonical_peptidoform="PEPTIDE",
-        charge=2,
-        faims_cv=None,
-        rt_apex_sec=30.0,
-        q_value=0.001,
-        assay_id=4,
-        psm_id="psm-4",
-    )
-    source_model = RTAlignmentModel(
-        "donor", "reference", "median_shift", 2, 2, (), (), 1.0, 2.0, 1.0, "accepted"
-    )
-    target_model = RTAlignmentModel(
-        "reference", "recipient", "median_shift", 2, 2, (), (), 1.0, 2.0, 1.0, "accepted"
-    )
-    alignment = ReferenceStarAlignment(
-        "donor", "recipient", (source_model,), (target_model,)
-    )
-    plan = ExternalPlan("recipient", "donor", "explicit:g", observation, 34.0, alignment)
-    result = {"command": ["python", "-m", "biosaur2.search", str(source)]}
-    options = {
-        "external_ppm": 8.0,
-        "external_rt_tolerance_sec": 120.0,
-        "external_q_value_max": 0.01,
-        "external_alignment_min_anchors": 5,
-        "external_alignment_max_mad_sec": 30.0,
-        "external_alignment_max_anchors": 256,
-        "external_weak_max_strong_overlap": 0.30,
-        "external_min_support_runs": 1,
-        "external_max_support_runs": 4,
-        "external_min_isotope_cosine": 0.8,
-        "external_weak_feature": True,
-        "external_weak_q_value_max": 0.05,
-        "external_weak_overlap_max": 0.2,
-        "quant_method": "all",
-        "feature_baseline": "edge_linear",
-    }
-    first = _external_task_fingerprint(run, result, (plan,), options)
-    changed = ExternalPlan("recipient", "donor", "explicit:g", observation, 35.0, alignment)
-    assert first != _external_task_fingerprint(run, result, (changed,), options)
-    changed_alignment = ReferenceStarAlignment(
-        "donor",
-        "recipient",
-        (source_model,),
-        (RTAlignmentModel(
-            "reference", "recipient", "median_shift", 2, 2, (), (), 1.0, 3.0, 1.0, "accepted"
-        ),),
-    )
-    changed_path = ExternalPlan(
-        "recipient", "donor", "explicit:g", observation, 34.0, changed_alignment
-    )
-    assert first != _external_task_fingerprint(run, result, (changed_path,), options)
-    options["external_ppm"] = 7.0
-    assert first != _external_task_fingerprint(run, result, (plan,), options)
-    options["external_ppm"] = 8.0
-    options["external_alignment_max_anchors"] = 128
-    assert first != _external_task_fingerprint(run, result, (plan,), options)
-    options["external_alignment_max_anchors"] = 256
-    for key, value in (
-        ("external_weak_max_strong_overlap", 0.25),
-        ("external_min_support_runs", 2),
-        ("external_max_support_runs", 8),
-    ):
-        changed_options = {**options, key: value}
-        assert first != _external_task_fingerprint(
-            run, result, (plan,), changed_options
-        )
-
-
 def test_project_worker_captures_cpu_and_peak_rss(tmp_path):
     result = _project_worker(
         {
@@ -377,8 +297,6 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
                 "evaluated_assay_count": 9,
                 "new_external_feature_count": 2,
                 "status_counts": {"accepted_new_external_feature": 2},
-                "task_fingerprint": "external-task",
-                "output_fingerprints": {"features": {"size": 1}},
             }
         },
         "alignment_models": [
@@ -415,9 +333,6 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert successful["run"]["command"] == command
     assert successful["run"]["input_fingerprint"] == _input_fingerprint(run)
     assert successful["run"]["peak_rss_kib"] == 123456
-    assert _read_successful_external_runs(database)["run"][
-        "new_external_feature_count"
-    ] == 2
     assert validate_project(database) == {"run_count": 1, "problems": ()}
 
     import duckdb
@@ -455,7 +370,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert alignment == (
         "explicit:g", "run", "run", "other", "accepted", 7, 0.5, 1.0, 2.5
     )
-    assert schema_version == "9"
+    assert schema_version == "10"
     assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")

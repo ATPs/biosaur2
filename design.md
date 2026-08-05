@@ -388,7 +388,8 @@ Each run first completes its own single-run workflow and publishes atomically.
 With `--external-id`, each local hybrid run additionally persists calibrated
 isotope envelopes that lose the ordinary conflict selection.  These private
 weak candidates require at least two mono points, one secondary isotope raw
-point, isotope cosine >= 0.6 and positive quantification.  They are not public
+hill with at least two points, isotope cosine >= 0.6, positive quantification,
+and at most 0.30 final-strong ownership overlap. They are not public
 features unless Project transfer accepts them.  Normal output remains the
 strong population; every default feature, including direct/generic recovery,
 is a valid strong reference and PSMs are not required for external acceptance.
@@ -407,7 +408,7 @@ For each compatible alignment group, Project then:
    the best target and decoy for every weak candidate, and estimates q-values
    independently inside each alignment group using the conservative +1 decoy
    correction;
-5. promotes target winners at q <= 0.05 into the normal feature output with
+5. promotes target winners at q <= 0.10 into the normal feature output with
    `feature_origin=aligned_external_weak`, `external_support_count` and a
    complete evidence record.
 
@@ -415,13 +416,12 @@ The Project stage does not open mzML or raw MS1 caches and never creates a new
 feature by donor-guided extraction.  It only validates measured recipient weak
 candidates against measured strong features.  Source strong features may
 support multiple recipient weak candidates, as matching is candidate-centric.
-Evidence has one row per accepted support; unmatched candidates remain summary
-counts rather than producing a large evidence table.
+Evidence has one row per accepted support and one compact audit row for each
+rejected candidate.
 
 ## Caching and performance design
 
 Four cache layers accelerate repeated development without changing scientific
-results:
 results:
 
 1. **Raw MS1 cache**: compact memory-mappable original centroids and scan
@@ -430,9 +430,7 @@ results:
    bounded direct processed-hill competitors. Current format is cache v2.
 3. **Candidate cache**: expensive generic target/decoy local candidates keyed
    by the residual ownership state.
-4. **Residual-ownership cache**: final sparse raw-point intensity claims used
-   by project external recovery to prevent double quantification.
-5. **External feature-MBR sidecars**: source-provenanced compact strong-feature
+4. **External feature-MBR sidecars**: source-provenanced compact strong-feature
    and full weak-candidate Parquet sidecars written during local hybrid
    postprocessing. They are invalidated by source or weak-gate changes and let
    Project matching run without raw MS1 access.
@@ -448,9 +446,9 @@ processing. The default root is `.biosaur2_cache` in the current directory.
 Single-run commands use an isolated invocation namespace without
 `--keep-cache`. Project mode instead uses a deterministic project workspace and
 an atomic checkpoint: interruption retains compatible cache layers and the next
-invocation resumes automatically. On a successful Project, strict/candidate
-layers are deleted after their local consumer, raw/ownership layers after the
-external recipient, and the remaining workspace is deleted. With
+invocation resumes automatically. Completed local raw, strict and candidate
+layers are deleted after their compact external sidecars and outputs are
+published, and the remaining workspace is deleted after Project success. With
 `--keep-cache`, stable source-keyed run directories allow later compatible
 commands to reuse every layer.
 
@@ -460,14 +458,13 @@ available memory from Linux `/proc`. After three low-CPU samples it adds
 one-worker runs; declared allocations are capped at 1.5 times the target and
 new submission stops when CPU or `--max-memory` (integer GiB, no swap) would be
 exceeded. Local work uses this manager while feature-MBR matching is a bounded
-in-memory Project stage. Atomic per-run and external checkpoint records make
-default resume skip published work. Each external record fingerprints its
-strong/weak sidecars, alignment model, external science options,
-implementation and published outputs. A changed plan
-recomputes only affected recipients; a missing or changed output is never
-treated as complete. Checkpoint records are independently atomically published
-per run, with a heartbeat lease for cross-host recovery, so large Projects do
-not rewrite a growing global checkpoint after every completion.
+in-memory Project stage. Atomic per-run checkpoint records make default resume
+skip compatible local work. Project alignment and competition are then rerun
+deterministically from source-fingerprinted strong/weak sidecars; there is no
+raw-recipient or external-recipient checkpoint. Run checkpoint records are
+independently atomically published with a heartbeat lease for cross-host
+recovery, so large Projects do not rewrite a growing global checkpoint after
+every completion.
 CLI startup fixes implicit OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O pools
 at one thread before numerical modules load.
 
@@ -479,7 +476,7 @@ Hybrid mode publishes a single de-duplicated population in two primary tables:
 |---|---|
 | `<stem>.features.parquet` | One row per accepted MS1 feature, including its quantification fields and a typed list of zero or more linked MS2 event/audit structs. |
 | `<stem>.identifications.parquet` | One accepted parsed PSM row with nullable direct-assay fields merged into the same row. PSM-bearing events may remain even when no feature was obtained. |
-| `<stem>.external_id_evidence.parquet` | Project-only donor-assay attempts in a recipient run, including accepted and rejected target/decoy outcomes. |
+| `<stem>.external_id_evidence.parquet` | Project-only source-run support rows and rejected weak-candidate target/decoy outcomes. |
 | `<stem>.biosaur2.duckdb` | Per-input alternative containing the same run tables; project processing adds external evidence to that run's database. |
 | `project.duckdb` | Run status, paths, resolved options, stage/cache summaries, alignment and validation metadata. |
 
@@ -532,7 +529,7 @@ events with features and PSM-bearing events with identifications.
 | `direct_competitors.py` | Pre-conflict capture of bounded direct-relevant losing hill candidates. |
 | `confidence.py` | Deterministic decoys, competitions and extraction q-values. |
 | `quantification.py` | Area/apex calculations and baseline handling. |
-| `external.py`, `external_alignment.py`, `alignment.py` | Multi-run RT alignment and recipient-run external assay extraction. |
+| `external_weak.py`, `external_mbr.py`, `external_alignment.py`, `alignment.py` | Private weak-candidate gates, feature-only RT alignment, strong support indexing and Project target/decoy transfer competition. |
 | `stage_cache.py`, `postprocess_cache.py` | Fingerprinted strict and local candidate caches. |
 | `project.py`, `project_manifest.py` | Bounded multi-run execution, resume/validation and project metadata. |
 | `output.py`, `legacy_output.py`, `duckdb_output.py` | Atomic output lifecycle, schemas and compact formats. |

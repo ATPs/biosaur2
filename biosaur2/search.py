@@ -293,12 +293,6 @@ def _run_args_for_file(args, filename, multiple_inputs, allocated_workers=None):
         run_args["raw_ms1_cache_dir"] = cache_paths["raw_ms1_cache"]
         run_args["hybrid_stage_cache_dir"] = cache_paths["strict_stage_cache"]
         run_args["hybrid_candidate_cache_dir"] = cache_paths["candidate_cache"]
-        run_args["residual_ownership_cache_dir"] = cache_paths[
-            "residual_ownership_cache"
-        ]
-        run_args["external_observations_cache_path"] = cache_paths[
-            "external_observations"
-        ]
         run_args["external_strong_features_cache_path"] = cache_paths[
             "external_strong_features"
         ]
@@ -593,7 +587,7 @@ Advanced output notes:
     )
     parser.add_argument(
         '--external-id', action=argparse.BooleanOptionalAction, default=True,
-        help=_advanced_help(show_all, 'project compatibility switch for aligned external assays; single-run commands have no donor runs'),
+        help=_advanced_help(show_all, 'collect private weak feature candidates for Project match-between-runs; a single-run command cannot rescue them'),
     )
     parser.add_argument('--external-weak-min-mono-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum monoisotopic points for a Project external weak candidate'))
     parser.add_argument('--external-weak-min-secondary-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum raw points in one secondary isotope for a Project external weak candidate'))

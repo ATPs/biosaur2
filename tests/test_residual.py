@@ -4,11 +4,7 @@ import numpy as np
 import pytest
 
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
-from biosaur2.residual import (
-    ResidualMS1Ledger,
-    load_residual_ownership_cache,
-    save_residual_ownership_cache,
-)
+from biosaur2.residual import ResidualMS1Ledger
 
 
 def _store():
@@ -55,37 +51,16 @@ def test_residual_ledger_supports_rt_split_and_revert():
     assert ledger.claimed_point_count == 0
 
 
-def test_residual_ownership_cache_round_trip_preserves_fractional_claims(tmp_path):
-    source = tmp_path / "input.mzML"
-    source.write_bytes(b"synthetic mzML fingerprint")
-    store = _store()
-    ledger = ResidualMS1Ledger(store)
-    trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
-    assert ledger.allocate_component("feature", (trace,), 0, [trace.intensity * 0.4]).accepted
-    cache = save_residual_ownership_cache(
-        ledger, tmp_path / "residual-ownership", source
-    )
-    restored = load_residual_ownership_cache(cache, source, store)
-    assert restored.state_fingerprint() == ledger.state_fingerprint()
-    np.testing.assert_allclose(
-        restored.extract_trace(500.0, 2.0, 0.0, 2.0).intensity,
-        trace.intensity * 0.6,
-    )
-
-
-def test_component_overlap_uses_claimed_intensity_fraction():
+def test_observed_point_footprint_is_compact_and_tracks_later_claims():
     ledger = ResidualMS1Ledger(_store())
     trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
-    assert ledger.allocate_component("existing", (trace,), 0, [trace.intensity * 0.21]).accepted
-    overlap = ledger.component_overlap((trace,), 0, [trace.intensity])
-    assert overlap.status == "accepted"
-    assert overlap.fraction == pytest.approx(0.21)
-
-
-def test_component_footprint_is_compact_and_tracks_later_claims():
-    ledger = ResidualMS1Ledger(_store())
-    trace = ledger.extract_trace(500.0, 2.0, 0.0, 2.0)
-    footprint = ledger.component_footprint((trace,), 0, [trace.intensity])
+    footprint = ledger.observed_point_footprint(
+        [
+            (10 + scan, mz, intensity * scale)
+            for scan, scale in enumerate((1.0, 2.0, 1.0))
+            for mz, intensity in ((500.0, 60.0), (500.0005, 40.0))
+        ]
+    )
 
     assert footprint.status == "accepted"
     assert footprint.requested_intensity == pytest.approx(400.0)
@@ -97,7 +72,6 @@ def test_component_footprint_is_compact_and_tracks_later_claims():
         "strict-external", (trace,), 0, [trace.intensity * 0.30]
     ).accepted
     assert ledger.footprint_overlap(footprint).fraction == pytest.approx(0.30)
-    assert ledger.component_overlap((trace,), 0, [trace.intensity]).fraction == pytest.approx(0.30)
 
 
 def test_residual_ledger_supports_conserved_intensity_split():

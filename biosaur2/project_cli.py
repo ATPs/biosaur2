@@ -97,7 +97,7 @@ def run_project_cli(arguments):
             description=(
                 "Run a deterministic multi-file Biosaur2 project. Hybrid mode "
                 "can add direct/generic MS2 processing and a post-run aligned "
-                "external-assay stage."
+                "strong-to-weak feature match-between-runs stage."
             ),
             epilog='''
 Examples:
@@ -157,20 +157,20 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument("--quant-method", choices=("all", "envelope_area", "mono_area", "envelope_apex"), default="all", help="quantification output; all reports every metric and uses envelope area as quant_value")
         parser.add_argument("--feature-baseline", choices=("none", "edge_linear"), default="edge_linear", help=_advanced_help(show_all, "baseline preprocessing before hybrid feature quantification"))
         parser.add_argument("--direct-id", action=argparse.BooleanOptionalAction, default=True, help=_advanced_help(show_all, "enable/disable q-filtered same-run direct PSM assays in hybrid mode"))
-        parser.add_argument("--external-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable aligned external assays inside compatible alignment groups")
+        parser.add_argument("--external-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable weak-candidate generation and cross-run strong-feature support inside compatible alignment groups")
         parser.add_argument("--external-q-value-max", type=float, default=0.10, help=_advanced_help(show_all, "maximum target/decoy q-value for feature match-between-runs rescue"))
-        parser.add_argument("--external-ppm", type=float, default=8.0, help=_advanced_help(show_all, "recipient-run m/z tolerance in ppm for aligned external assays"))
+        parser.add_argument("--external-ppm", type=float, default=8.0, help=_advanced_help(show_all, "m/z tolerance in ppm for strong-feature RT anchors and weak-to-strong support matches"))
         parser.add_argument(
             "--external-rt-tolerance-sec", type=float, default=120.0,
             help=_advanced_help(show_all, "maximum recipient apex distance from aligned donor RT in seconds"),
         )
         parser.add_argument(
             "--external-alignment-min-anchors", type=int, default=20,
-            help=_advanced_help(show_all, "minimum shared direct peptide/charge anchors required for RT alignment"),
+            help=_advanced_help(show_all, "minimum feature-only mutual-nearest fit anchors required after held-out RT validation anchors are reserved"),
         )
         parser.add_argument(
             "--external-alignment-max-mad-sec", type=float, default=30.0,
-            help=_advanced_help(show_all, "maximum robust RT-alignment residual MAD in seconds"),
+            help=_advanced_help(show_all, "maximum held-out RT-alignment absolute median bias and residual MAD in seconds"),
         )
         parser.add_argument(
             "--external-alignment-max-anchors", type=int, default=256,

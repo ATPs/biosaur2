@@ -1,4 +1,4 @@
-pyteomics>=4.7,<5
+pyteomics>=4.7
 pynumpress>=0.0.9
 psims
 scipy

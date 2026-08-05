@@ -6,9 +6,57 @@ import csv
 import json
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .external import _read_table
+from .schema import compact_schemas
+
+
+def _parse_tsv_value(value, data_type):
+    if value == "":
+        return None
+    if pa.types.is_dictionary(data_type):
+        data_type = data_type.value_type
+    if pa.types.is_list(data_type) or pa.types.is_struct(data_type):
+        return json.loads(value)
+    if pa.types.is_integer(data_type):
+        return int(value)
+    if pa.types.is_floating(data_type):
+        return float(value)
+    if pa.types.is_boolean(data_type):
+        return value.lower() in {"1", "true", "yes"}
+    return value
+
+
+def _read_output_table(path, table_name):
+    """Read one normal run output table independent of its container format."""
+
+    source = Path(path)
+    if source.suffix.lower() == ".duckdb":
+        import duckdb
+
+        with duckdb.connect(str(source), read_only=True) as connection:
+            return connection.execute(
+                'SELECT * FROM "%s"' % table_name.replace('"', '""')
+            ).fetch_arrow_table()
+    if source.suffix.lower() == ".tsv":
+        schema_name = (
+            "hybrid_features"
+            if table_name == "features"
+            else "merged_identifications"
+        )
+        schema = compact_schemas()[schema_name]
+        fields = {field.name: field for field in schema}
+        with source.open("r", encoding="utf-8", newline="") as handle:
+            rows = [
+                {
+                    name: _parse_tsv_value(value, fields[name].type)
+                    for name, value in raw.items()
+                }
+                for raw in csv.DictReader(handle, delimiter="\t")
+            ]
+        return pa.Table.from_pylist(rows, schema=schema)
+    return pq.read_table(source)
 
 
 def validate_project(project_db):
@@ -48,7 +96,7 @@ def validate_project(project_db):
             continue
         if mode == "legacy" and output_format == "tsv":
             continue
-        feature_table = _read_table(features, "features")
+        feature_table = _read_output_table(features, "features")
         feature_ids = feature_table.column("feature_idx").to_pylist()
         if (
             any(value is None or value <= 0 for value in feature_ids)
@@ -63,7 +111,7 @@ def validate_project(project_db):
                 )
             else:
                 try:
-                    _read_table(identifications, "identifications")
+                    _read_output_table(identifications, "identifications")
                 except Exception as error:
                     problems.append(
                         "%s has an unreadable identifications table: %s"

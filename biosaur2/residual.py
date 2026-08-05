@@ -9,22 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import json
 import math
-import os
-from pathlib import Path
-import shutil
 import struct
-import tempfile
 from typing import Hashable, Sequence
 
 import numpy as np
 
 from .raw_ms1 import ExtractedTrace, RawMS1Store
-from .raw_ms1 import source_fingerprint
-
-
-RESIDUAL_OWNERSHIP_CACHE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -116,117 +107,6 @@ class ResidualMS1Ledger:
         for point_index, amount in sorted(self._claimed.items()):
             digest.update(struct.pack("<Qd", int(point_index), float(amount)))
         return digest.hexdigest()
-
-    def claimed_arrays(self):
-        """Return sparse claims in stable raw-point order for persistence."""
-
-        if not self._claimed:
-            return (
-                np.empty(0, dtype=np.int64),
-                np.empty(0, dtype=np.float64),
-            )
-        ordered = sorted(self._claimed.items())
-        return (
-            np.asarray([item[0] for item in ordered], dtype=np.int64),
-            np.asarray([item[1] for item in ordered], dtype=np.float64),
-        )
-
-    def restore_claims(self, point_indices, intensities):
-        """Restore validated sparse claims into an otherwise empty ledger."""
-
-        indices = np.asarray(point_indices, dtype=np.int64)
-        values = np.asarray(intensities, dtype=np.float64)
-        if indices.ndim != 1 or values.ndim != 1 or indices.size != values.size:
-            raise ValueError("ownership cache arrays must be equally sized vectors")
-        if indices.size and (
-            np.any(indices < 0)
-            or np.any(indices >= self.store.point_count)
-            or np.any(np.diff(indices) <= 0)
-        ):
-            raise ValueError("ownership cache has invalid point indices")
-        if np.any(~np.isfinite(values)) or np.any(values <= 0):
-            raise ValueError("ownership cache has invalid claimed intensities")
-        raw = np.asarray(self.store.intensity[indices], dtype=np.float64)
-        if np.any(values > raw + np.maximum(self.tolerance, raw * self.tolerance)):
-            raise ValueError("ownership cache overallocates raw intensity")
-        self._claimed = {int(index): float(value) for index, value in zip(indices, values)}
-        self._allocations = {}
-
-    def component_overlap(
-        self,
-        traces: Sequence[ExtractedTrace],
-        segment_start: int,
-        allocated_trace_values,
-    ) -> ComponentOverlap:
-        """Measure candidate intensity already explained by existing claims.
-
-        The preview distributes each fitted trace value over the original raw
-        centroids, exactly as allocation does, but deliberately ignores the
-        residual availability check.  It is therefore suitable for deciding
-        whether a donor-guided weak feature is too overlapping before it is
-        re-extracted on residual signal.
-        """
-
-        footprint = self.component_footprint(
-            traces, segment_start, allocated_trace_values
-        )
-        return self.footprint_overlap(footprint)
-
-    def component_footprint(
-        self,
-        traces: Sequence[ExtractedTrace],
-        segment_start: int,
-        allocated_trace_values,
-    ) -> ComponentFootprint:
-        """Build a serializable raw-point footprint for one component."""
-
-        matrix = np.asarray(allocated_trace_values, dtype=np.float64)
-        if matrix.ndim != 2 or matrix.shape[0] != len(traces):
-            raise ValueError("allocated component must be channels by scans")
-        if np.any(matrix < 0) or not np.all(np.isfinite(matrix)):
-            raise ValueError("allocated component intensity must be finite and nonnegative")
-        requested = float(np.sum(matrix, dtype=np.float64))
-        if requested <= self.tolerance:
-            return ComponentFootprint("no_candidate_intensity", requested, ())
-        proposed = {}
-        for channel, trace in enumerate(traces):
-            for local_position in np.flatnonzero(matrix[channel] > self.tolerance):
-                position = segment_start + int(local_position)
-                local_scan = self._local_scan_index(int(trace.scan_index[position]))
-                if local_scan is None:
-                    return ComponentFootprint("source_scan_not_found", requested, ())
-                scan_start = int(self.store.offsets[local_scan])
-                scan_end = int(self.store.offsets[local_scan + 1])
-                mz_values = self.store.mz[scan_start:scan_end]
-                tolerance = float(trace.target_mz) * float(trace.ppm) * 1e-6
-                start = int(np.searchsorted(mz_values, float(trace.target_mz) - tolerance, side="left"))
-                end = int(np.searchsorted(mz_values, float(trace.target_mz) + tolerance, side="right"))
-                if end <= start:
-                    return ComponentFootprint("candidate_point_not_found", requested, ())
-                indices = np.arange(scan_start + start, scan_start + end, dtype=np.int64)
-                raw = np.asarray(self.store.intensity[indices], dtype=np.float64)
-                positive = raw > self.tolerance
-                if not np.any(positive):
-                    return ComponentFootprint("candidate_point_not_found", requested, ())
-                indices = indices[positive]
-                raw = raw[positive]
-                available = float(np.sum(raw, dtype=np.float64))
-                amount = float(matrix[channel, local_position])
-                if amount > available + max(self.tolerance, self.tolerance * available):
-                    return ComponentFootprint("candidate_raw_overallocation", requested, ())
-                distributed = amount * raw / available
-                distributed[-1] += amount - float(np.sum(distributed, dtype=np.float64))
-                for point_index, value in zip(indices, distributed):
-                    proposed[int(point_index)] = proposed.get(int(point_index), 0.0) + float(value)
-        return ComponentFootprint(
-            "accepted",
-            requested,
-            tuple(
-                RawPointAllocation(int(point_index), float(value))
-                for point_index, value in sorted(proposed.items())
-                if value > self.tolerance
-            ),
-        )
 
     def footprint_overlap(self, footprint: ComponentFootprint) -> ComponentOverlap:
         """Measure a raw footprint against this ledger's current claims."""
@@ -730,79 +610,3 @@ class ResidualMS1Ledger:
             rt_sec=self.store.rt_sec,
             faims_cv=self.store.faims_cv,
         )
-
-
-def save_residual_ownership_cache(ledger: ResidualMS1Ledger, directory, source_path):
-    """Atomically publish final sparse ownership for project external recovery."""
-
-    target = Path(directory).resolve()
-    indices, claims = ledger.claimed_arrays()
-    manifest = {
-        "cache_version": RESIDUAL_OWNERSHIP_CACHE_VERSION,
-        "source_fingerprint": source_fingerprint(source_path),
-        "scan_count": ledger.store.scan_count,
-        "point_count": ledger.store.point_count,
-        "claim_count": int(indices.size),
-        "state_fingerprint": ledger.state_fingerprint(),
-        "point_index_array": "point_index.npy",
-        "claimed_intensity_array": "claimed_intensity.npy",
-    }
-    if target.is_dir():
-        try:
-            existing = _load_residual_ownership_manifest(target)
-            if existing == manifest:
-                return target
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix="." + target.name + ".tmp-", dir=target.parent))
-    backup = None
-    try:
-        np.save(staging / manifest["point_index_array"], indices, allow_pickle=False)
-        np.save(staging / manifest["claimed_intensity_array"], claims, allow_pickle=False)
-        with (staging / "manifest.json").open("w", encoding="utf-8") as handle:
-            json.dump(manifest, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-        if target.exists():
-            backup = target.parent / ("." + target.name + ".old-" + next(tempfile._get_candidate_names()))
-            os.replace(target, backup)
-        os.replace(staging, target)
-        if backup is not None:
-            shutil.rmtree(backup, ignore_errors=True)
-        return target
-    except BaseException:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        if backup is not None and backup.exists() and not target.exists():
-            os.replace(backup, target)
-        raise
-
-
-def _load_residual_ownership_manifest(directory):
-    with (Path(directory) / "manifest.json").open(encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def load_residual_ownership_cache(directory, source_path, store: RawMS1Store):
-    """Load final ownership and return a ledger over the supplied raw store."""
-
-    cache = Path(directory).resolve()
-    manifest = _load_residual_ownership_manifest(cache)
-    if manifest.get("cache_version") != RESIDUAL_OWNERSHIP_CACHE_VERSION:
-        raise ValueError("unsupported residual ownership cache version")
-    if manifest.get("source_fingerprint") != source_fingerprint(source_path):
-        raise ValueError("residual ownership cache source fingerprint mismatch")
-    if (
-        manifest.get("scan_count") != store.scan_count
-        or manifest.get("point_count") != store.point_count
-    ):
-        raise ValueError("residual ownership cache raw-store shape mismatch")
-    indices = np.load(cache / manifest["point_index_array"], allow_pickle=False)
-    claims = np.load(cache / manifest["claimed_intensity_array"], allow_pickle=False)
-    if int(manifest.get("claim_count", -1)) != int(indices.size):
-        raise ValueError("residual ownership cache claim count mismatch")
-    ledger = ResidualMS1Ledger(store)
-    ledger.restore_claims(indices, claims)
-    if ledger.state_fingerprint() != manifest.get("state_fingerprint"):
-        raise ValueError("residual ownership cache fingerprint mismatch")
-    return ledger
