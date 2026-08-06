@@ -9,7 +9,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .schema import LINKED_MS2_EVENT_COLUMNS, compact_schemas
+from .schema import (
+    LINKED_MS2_EVENT_COLUMNS,
+    PROJECT_SCHEMA_VERSION,
+    compact_schemas,
+)
 
 
 def _parse_tsv_value(value, data_type):
@@ -42,6 +46,7 @@ def _read_output_table(path, table_name):
     if source.suffix.lower() == ".tsv":
         schema_name = {
             "features": "hybrid_features",
+            "ms1": "ms1",
             "ms2_events": "linked_ms2_events",
             "identifications": "merged_identifications",
         }[table_name]
@@ -65,21 +70,30 @@ def validate_project(project_db):
     database = Path(project_db).resolve()
     problems = []
     with duckdb.connect(str(database), read_only=True) as connection:
-        runs = connection.execute(
-            "SELECT run_id, status, output_format, run_output_path, "
-            "features_path, ms2_events_path, identification_path, "
-            "external_evidence_path "
-            "FROM runs ORDER BY run_order"
-        ).fetchall()
         metadata = dict(
             connection.execute(
                 "SELECT key, value_json FROM project_metadata"
             ).fetchall()
         )
+        project_schema = metadata.get("project_schema_version")
+        if project_schema != PROJECT_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported Project schema %s; expected %s"
+                % (project_schema or "missing", PROJECT_SCHEMA_VERSION)
+            )
+        runs = connection.execute(
+            "SELECT run_id, status, output_format, run_output_path, "
+            "features_path, ms2_events_path, identification_path, ms1_path, "
+            "external_evidence_path "
+            "FROM runs ORDER BY run_order"
+        ).fetchall()
     resolved_options = json.loads(metadata.get("resolved_options", "{}"))
     mode = resolved_options.get("mode", "legacy")
     external_expected = (
         mode == "hybrid" and resolved_options.get("external_id", True)
+    )
+    ms1_expected = bool(
+        resolved_options.get("write_ms1", mode == "hybrid")
     )
     for (
         run_id,
@@ -89,6 +103,7 @@ def validate_project(project_db):
         features,
         ms2_events,
         identifications,
+        ms1,
         external,
     ) in runs:
         if status not in {"success", "skipped_resume"}:
@@ -98,6 +113,36 @@ def validate_project(project_db):
         if not primary.is_file():
             problems.append("%s is missing output %s" % (run_id, primary))
             continue
+        ms1_ids = None
+        if ms1_expected:
+            if not ms1 or not Path(ms1).is_file():
+                problems.append(
+                    "%s is missing MS1 output %s" % (run_id, ms1 or "")
+                )
+            else:
+                try:
+                    ms1_table = _read_output_table(ms1, "ms1")
+                    expected_schema = compact_schemas()["ms1"]
+                    if ms1_table.schema.remove_metadata() != expected_schema:
+                        problems.append(
+                            "%s has an unexpected MS1 schema" % run_id
+                        )
+                    else:
+                        scan_ids = ms1_table.column("scan_id").to_pylist()
+                        if (
+                            any(value is None for value in scan_ids)
+                            or len(scan_ids) != len(set(scan_ids))
+                        ):
+                            problems.append(
+                                "%s has null/duplicate MS1 scan IDs" % run_id
+                            )
+                        else:
+                            ms1_ids = set(scan_ids)
+                except Exception as error:
+                    problems.append(
+                        "%s has an unreadable MS1 table: %s"
+                        % (run_id, error)
+                    )
         if mode == "legacy" and output_format == "tsv":
             continue
         feature_table = _read_output_table(features, "features")
@@ -108,6 +153,42 @@ def validate_project(project_db):
         ):
             problems.append("%s has invalid/duplicate feature IDs" % run_id)
         if mode == "hybrid":
+            removed_rt = {
+                "rt_start_sec", "rt_apex_sec", "rt_end_sec"
+            }.intersection(feature_table.column_names)
+            if removed_rt:
+                problems.append(
+                    "%s still exposes Hybrid RT-second columns" % run_id
+                )
+            scan_columns = ("scanStart", "scanApex", "scanEnd")
+            if any(
+                name not in feature_table.column_names
+                for name in scan_columns
+            ):
+                problems.append(
+                    "%s is missing Hybrid MS1 scan columns" % run_id
+                )
+            else:
+                scan_values = {}
+                for name in scan_columns:
+                    scan_values[name] = feature_table.column(name).to_pylist()
+                if any(
+                    value is None
+                    for values in scan_values.values()
+                    for value in values
+                ):
+                    problems.append(
+                        "%s has null Hybrid MS1 scan IDs" % run_id
+                    )
+                if ms1_expected and ms1_ids is not None and any(
+                    value is not None and value not in ms1_ids
+                    for values in scan_values.values()
+                    for value in values
+                ):
+                    problems.append(
+                        "%s has feature scan IDs absent from MS1 output"
+                        % run_id
+                    )
             if "ms2_events" in feature_table.column_names:
                 problems.append(
                     "%s still embeds ms2_events in its feature table" % run_id

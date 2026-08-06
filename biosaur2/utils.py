@@ -518,6 +518,15 @@ def calc_peptide_features(
             if apex_source
             else (local_numbers[apex_position] if local_numbers else None)
         )
+        if spectra is not None:
+            pep_feature['scanStart'] = spectra[mono_scans[0]].get('scan_number')
+            pep_feature['scanEnd'] = spectra[mono_scans[-1]].get('scan_number')
+        elif local_numbers:
+            pep_feature['scanStart'] = local_numbers[0]
+            pep_feature['scanEnd'] = local_numbers[-1]
+        else:
+            pep_feature['scanStart'] = None
+            pep_feature['scanEnd'] = None
         pep_feature['FAIMS'] = None if faims_val is None else float(faims_val)
         pep_feature['im'] = None
         if 'hills_im_median' in hills_dict:

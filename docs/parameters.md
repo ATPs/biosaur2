@@ -197,6 +197,10 @@ legacy-only `--write-ms2` diagnostics, Hybrid `--write-mono-hills` and
 engine/compression/row-group/sort controls. These options are hidden from the
 ordinary help screen to keep the common workflow readable.
 
+`--write-ms1` writes `scan_id`, RT seconds and total intensity. It is enabled
+by default in Hybrid and disabled by default in Legacy; `--no-write-ms1`
+suppresses it explicitly.
+
 `--write-ms2` exports normalized precursor-event metadata only in legacy mode.
 Hybrid writes compact linked events in its `ms2_events` table and keeps
 PSM-only events in `identifications`, so using `--write-ms2` with Hybrid is an

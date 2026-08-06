@@ -16,10 +16,17 @@ def _run(*arguments):
 
 
 @pytest.mark.parametrize(
-    ("extra", "expected"),
-    [([], "tsv"), (["--feature-mode", "hybrid"], "parquet")],
+    ("extra", "expected_format", "expected_ms1"),
+    [
+        ([], "tsv", False),
+        (["--feature-mode", "hybrid"], "parquet", True),
+        (["--feature-mode", "hybrid", "--no-write-ms1"], "parquet", False),
+        (["--write-ms1"], "tsv", True),
+    ],
 )
-def test_mode_selects_default_format(monkeypatch, tmp_path, extra, expected):
+def test_mode_selects_default_format_and_ms1(
+    monkeypatch, tmp_path, extra, expected_format, expected_ms1
+):
     captured = {}
     source = tmp_path / "sample.mzML"
     source.write_bytes(b"")
@@ -33,7 +40,8 @@ def test_mode_selects_default_format(monkeypatch, tmp_path, extra, expected):
         sys, "argv", ["biosaur2", str(source), *extra]
     )
     search_module.run()
-    assert captured["format"] == expected
+    assert captured["format"] == expected_format
+    assert captured["write_ms1"] is expected_ms1
 
 
 @pytest.mark.parametrize(

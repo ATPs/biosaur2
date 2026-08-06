@@ -17,6 +17,7 @@ from biosaur2.project import (
     _read_successful_runs,
     _scientific_command,
     _write_project_database,
+    _run_paths,
     validate_project,
 )
 
@@ -81,6 +82,7 @@ def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
         ]
     ) == 0
     assert captured["options"]["mode"] == "legacy"
+    assert captured["options"]["write_ms1"] is False
     assert captured["options"]["resume"] is True
     assert captured["options"]["max_memory"] > 0
 
@@ -98,6 +100,7 @@ def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
         ]
     )
     assert captured["options"]["mode"] == "hybrid"
+    assert captured["options"]["write_ms1"] is True
     assert captured["options"]["external_q_value_max"] == 0.10
     assert captured["options"]["external_weak_max_strong_overlap"] == 0.30
     assert captured["options"]["external_min_support_runs"] == 1
@@ -142,12 +145,53 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
     assert "--relaxed-ms2-feature" in command
     assert "--write-mono-hills" in command
     assert "--write-quant-details" in command
+    assert "--write-ms1" in command
     assert "--write-ms2" not in command
     assert command[command.index("--format") + 1] == "parquet"
     assert command[command.index("--generic-ms2-isotope-errors") + 1] == "0,1,2,3"
     assert command[command.index("--external-weak-max-strong-overlap") + 1] == "0.3"
     assert "--workers" not in command
     assert "--cache-dir" not in command
+
+
+def test_project_hybrid_command_propagates_disabled_ms1(tmp_path):
+    run = SimpleNamespace(
+        mzml_path=tmp_path / "run.mzML.gz",
+        psm_path=None,
+        q_value_max=None,
+        fixed_mods=None,
+    )
+    command = _command_for_run(
+        run,
+        {"features": str(tmp_path / "features.parquet")},
+        {
+            "mode": "legacy",
+            "overwrite": False,
+            "write_ms1": False,
+            "max_charge": 7,
+        },
+    )
+    assert "--no-write-ms1" in command
+
+
+def test_project_run_paths_include_ms1_only_when_enabled(tmp_path):
+    run = SimpleNamespace(
+        run_id="run", mzml_path=tmp_path / "run.mzML.gz"
+    )
+    parquet = _run_paths(
+        run, tmp_path / "output", tmp_path / "cache", "parquet",
+        write_ms1=True,
+    )
+    assert parquet["ms1"].endswith("/run/run.ms1.parquet")
+    assert _run_paths(
+        run, tmp_path / "output", tmp_path / "cache", "parquet",
+        write_ms1=False,
+    )["ms1"] is None
+    duckdb = _run_paths(
+        run, tmp_path / "output", tmp_path / "cache", "duckdb",
+        write_ms1=True,
+    )
+    assert duckdb["ms1"] == duckdb["run_output"]
 
 
 def test_resume_signature_ignores_scheduling_but_tracks_external_science():
@@ -236,6 +280,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         "features": str(run_dir / "features.parquet"),
         "ms2_events": str(run_dir / "ms2_events.parquet"),
         "identifications": str(run_dir / "identifications.parquet"),
+        "ms1": str(run_dir / "ms1.parquet"),
         "external_evidence": str(run_dir / "external.parquet"),
         "raw_ms1_cache": str(run_dir / "raw_ms1_cache"),
     }
@@ -251,7 +296,13 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     }
     schemas = compact_schemas()
     feature_table = pa.Table.from_pylist(
-        [{"feature_idx": 1, "quant_value": 10.0}],
+        [{
+            "feature_idx": 1,
+            "quant_value": 10.0,
+            "scanStart": 100,
+            "scanApex": 101,
+            "scanEnd": 102,
+        }],
         schema=schemas["hybrid_features"],
     ).replace_schema_metadata(
         {
@@ -283,6 +334,17 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         schema=schemas["merged_identifications"],
     )
     pq.write_table(identification_table, paths["identifications"])
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"scan_id": 100, "RT": 60.0, "total_intensity": 10.0},
+                {"scan_id": 101, "RT": 120.0, "total_intensity": 20.0},
+                {"scan_id": 102, "RT": 180.0, "total_intensity": 10.0},
+            ],
+            schema=schemas["ms1"],
+        ),
+        paths["ms1"],
+    )
     pq.write_table(
         pa.Table.from_pylist([], schema=schemas["external_evidence"]),
         paths["external_evidence"],
@@ -341,7 +403,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         database,
         [run],
         results,
-        {"mode": "hybrid", "external_id": True},
+        {"mode": "hybrid", "external_id": True, "write_ms1": True},
         external_stage=external_stage,
     )
 
@@ -350,6 +412,25 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert successful["run"]["input_fingerprint"] == _input_fingerprint(run)
     assert successful["run"]["peak_rss_kib"] == 123456
     assert validate_project(database) == {"run_count": 1, "problems": ()}
+
+    Path(paths["ms1"]).unlink()
+    try:
+        validate_project(database)
+    except ValueError as error:
+        assert "missing MS1 output" in str(error)
+    else:
+        raise AssertionError("missing MS1 output was not detected")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"scan_id": 100, "RT": 60.0, "total_intensity": 10.0},
+                {"scan_id": 101, "RT": 120.0, "total_intensity": 20.0},
+                {"scan_id": 102, "RT": 180.0, "total_intensity": 10.0},
+            ],
+            schema=schemas["ms1"],
+        ),
+        paths["ms1"],
+    )
 
     pq.write_table(
         pa.Table.from_pylist(
@@ -419,8 +500,31 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert alignment == (
         "explicit:g", "run", "run", "other", "accepted", 7, 0.5, 1.0, 2.5
     )
-    assert schema_version == "11"
+    assert schema_version == "12"
     assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")
     assert successful["run"]["input_fingerprint"] != _input_fingerprint(run)
+
+
+def test_project_validator_rejects_old_schema_before_new_column_queries(
+    tmp_path,
+):
+    import duckdb
+
+    database = tmp_path / "old-project.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            "CREATE TABLE project_metadata (key VARCHAR, value_json VARCHAR)"
+        )
+        connection.execute(
+            "INSERT INTO project_metadata VALUES "
+            "('project_schema_version', '11')"
+        )
+
+    try:
+        validate_project(database)
+    except ValueError as error:
+        assert "Unsupported Project schema 11; expected 12" in str(error)
+    else:
+        raise AssertionError("old Project schema was not rejected")

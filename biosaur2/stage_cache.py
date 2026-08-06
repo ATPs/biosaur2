@@ -16,7 +16,7 @@ import tempfile
 import numpy as np
 
 from .raw_ms1 import source_fingerprint
-STRICT_STAGE_CACHE_VERSION = 3
+STRICT_STAGE_CACHE_VERSION = 4
 PAYLOAD_NAME = "strict_stage.pkl"
 MANIFEST_NAME = "manifest.json"
 logger = logging.getLogger(__name__)

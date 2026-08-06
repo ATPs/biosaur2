@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 import logging
 import math
+import shutil
 
 import numpy as np
 
@@ -19,6 +20,7 @@ from .schema import (
 )
 from .spectra import extract_scan_number, faims_value, retention_time_seconds
 from .raw_ms1 import (
+    IncompatibleRawMS1CacheError,
     RawMS1StoreBuilder,
     load_raw_ms1_cache,
     save_raw_ms1_cache,
@@ -332,7 +334,10 @@ def ingest_mzml(args):
     if combine_every > 1:
         logger.info("Combining every %s MS1 scans.", combine_every)
 
-    collect_ms1 = bool(args.get("write_ms1"))
+    collect_ms1 = (
+        bool(args.get("write_ms1"))
+        or args.get("feature_mode") == "hybrid"
+    )
     # Hybrid association needs MS2 metadata internally even though --write-ms2
     # remains a legacy diagnostic output option.
     collect_ms2 = bool(args.get("write_ms2")) or args.get("feature_mode") == "hybrid"
@@ -350,6 +355,7 @@ def ingest_mzml(args):
     ms2_count = 0
     preceding_ms1 = None
     ms1_by_native_id = {}
+    ms1_scan_ids = set()
     ms1_metadata = {}
     raw_builder = (
         RawMS1StoreBuilder()
@@ -383,7 +389,13 @@ def ingest_mzml(args):
         rt_sec = retention_time_seconds(
             scan_info["scan start time"], args.get("input_rt_unit", "seconds")
         )
-        scan_number = extract_scan_number(spectrum)
+        scan_number = _extract_ms1_scan_id(spectrum, fallback_index)
+        if collect_ms1 and scan_number in ms1_scan_ids:
+            raise ValueError(
+                "Duplicate canonical MS1 scan_id %d" % scan_number
+            )
+        if collect_ms1:
+            ms1_scan_ids.add(scan_number)
         spectrum_faims = faims_value(spectrum)
         if raw_builder is not None:
             raw_builder.append(
@@ -417,7 +429,7 @@ def ingest_mzml(args):
             )
         spectrum["scan_index"] = fallback_index
         spectrum["scan_number"] = scan_number
-        spectrum["scan_id"] = _extract_ms1_scan_id(spectrum, fallback_index)
+        spectrum["scan_id"] = scan_number
         spectrum["rt_sec"] = rt_sec
         if "mean inverse reduced ion mobility array" not in spectrum:
             spectrum["ignore_ion_mobility"] = True
@@ -462,7 +474,22 @@ def ingest_mzml(args):
 
         cache_path = Path(raw_cache)
         if cache_path.exists():
-            cached = load_raw_ms1_cache(cache_path, args["file"], mmap=True)
+            try:
+                cached = load_raw_ms1_cache(
+                    cache_path, args["file"], mmap=True
+                )
+            except IncompatibleRawMS1CacheError:
+                if cache_path.is_symlink() or cache_path.is_file():
+                    cache_path.unlink()
+                else:
+                    shutil.rmtree(cache_path)
+                save_raw_ms1_cache(raw_store, cache_path, args["file"])
+                cached = load_raw_ms1_cache(
+                    cache_path, args["file"], mmap=True
+                )
+                logger.info(
+                    "Replaced incompatible raw MS1 cache: %s", cache_path
+                )
             if (
                 cached.scan_count != raw_store.scan_count
                 or cached.point_count != raw_store.point_count

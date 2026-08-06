@@ -119,6 +119,9 @@ def test_weak_ownership_uses_configurable_inclusive_boundary():
         "run", [_context(candidate)], [], _args(), ledger
     )
     assert len(rows) == 1
+    assert (
+        rows[0]["scanStart"], rows[0]["scanApex"], rows[0]["scanEnd"]
+    ) == (100, 101, 102)
     assert rows[0]["external_strong_overlap_fraction"] == pytest.approx(0.30)
     assert audit["persisted_weak_candidates"] == 1
     assert audit["reject_source_counts"] == {"smart_filter_reject": 1}

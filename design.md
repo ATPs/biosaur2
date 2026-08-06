@@ -473,11 +473,12 @@ at one thread before numerical modules load.
 
 ## Output contract
 
-Hybrid mode publishes a single de-duplicated population in three primary tables:
+Hybrid mode publishes a single de-duplicated population in four primary tables:
 
 | Output | Contract |
 |---|---|
 | `<stem>.features.parquet` | One row per accepted MS1 feature, including compact quantification and evidence fields. |
+| `<stem>.ms1.parquet` | One row per MS1 survey scan with canonical `scan_id`, RT seconds and total intensity. |
 | `<stem>.ms2_events.parquet` | One row per feature-linked MS2 event, containing `feature_idx`, stable/raw spectrum references, RT, precursor m/z and charge. |
 | `<stem>.identifications.parquet` | One accepted parsed PSM row with nullable direct-assay fields merged into the same row. PSM-bearing events may remain even when no feature was obtained. |
 | `<stem>.external_id_evidence.parquet` | Project-only source-run support rows and rejected weak-candidate target/decoy outcomes. |
@@ -487,6 +488,10 @@ Hybrid mode publishes a single de-duplicated population in three primary tables:
 Feature IDs are positive and unique. Every feature has exactly one merged
 quantitative record. Every persisted `ms2_events.feature_idx` references its
 parent positive-quant feature and every `ms2_event_id` is unique within a run.
+Every Hybrid feature has `scanStart`, `scanApex` and `scanEnd` values that
+resolve to `ms1.scan_id`. The legacy-compatible `rtStart`, `rtApex` and
+`rtEnd` minute columns remain in features; duplicate Hybrid RT-second columns
+are not public.
 Internal audit finalization still classifies every MS2
 event, but an event with neither a feature nor a PSM is retained only in
 summary counts, not as a public row. Project validation checks the published
@@ -496,6 +501,8 @@ One public `--format {tsv,parquet,duckdb}` controls all requested outputs.
 Legacy defaults to TSV and Hybrid defaults to Parquet. `--write-ms2` is a
 legacy-only normalized-precursor diagnostic because Hybrid stores compact
 linked-event references separately and PSM-bearing events in identifications.
+MS1 output defaults on in Hybrid and off in Legacy; `--write-ms1` and
+`--no-write-ms1` override the mode default.
 
 ## Important defaults
 
@@ -506,6 +513,7 @@ linked-event references separately and PSM-bearing events in identifications.
 | targeted MS2 RT tolerance | 120 s | Initial bounded local search window; run calibration may tighten retries. |
 | maximum charge | 7 | Charge hypotheses/features up to z=7. |
 | output format | legacy: `tsv`; hybrid: `parquet` | One format control for all run tables. |
+| MS1 basic table | legacy: omitted; hybrid: written | `--write-ms1`/`--no-write-ms1` override the mode default. |
 | quantification | `all` | Report envelope area, mono area and envelope apex; envelope area is `quant_value`. |
 | Hybrid mono traces | omitted | `--write-mono-hills` adds the two monoisotopic point arrays. |
 | Hybrid raw/corrected areas | omitted | `--write-quant-details` adds four baseline diagnostic columns. |

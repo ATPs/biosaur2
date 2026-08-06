@@ -18,7 +18,7 @@ import numpy as np
 from .cutils import extract_traces_values
 
 
-RAW_MS1_CACHE_VERSION = 1
+RAW_MS1_CACHE_VERSION = 2
 _CACHE_ARRAYS = (
     "offsets",
     "mz",
@@ -28,6 +28,10 @@ _CACHE_ARRAYS = (
     "rt_sec",
     "faims_cv",
 )
+
+
+class IncompatibleRawMS1CacheError(ValueError):
+    """Raised when a cache uses an older raw-MS1 representation."""
 
 
 def source_fingerprint(path, *, block_bytes=1024 * 1024):
@@ -189,7 +193,7 @@ class RawMS1Store:
                     if int(self.scan_number[local_index]) < 0
                     else int(self.scan_number[local_index])
                 ),
-                "scan_id": int(self.source_scan_index[local_index]),
+                "scan_id": int(self.scan_number[local_index]),
                 "rt_sec": float(self.rt_sec[local_index]),
             }
             if math.isfinite(faims_cv):
@@ -347,7 +351,9 @@ def load_raw_ms1_cache(directory, source_path, *, mmap=True):
     with (cache / "manifest.json").open(encoding="utf-8") as handle:
         manifest = json.load(handle)
     if manifest.get("cache_version") != RAW_MS1_CACHE_VERSION:
-        raise ValueError("unsupported raw MS1 cache version")
+        raise IncompatibleRawMS1CacheError(
+            "unsupported raw MS1 cache version"
+        )
     if manifest.get("arrays") != list(_CACHE_ARRAYS):
         raise ValueError("raw MS1 cache array manifest is incomplete")
     actual = source_fingerprint(source_path)

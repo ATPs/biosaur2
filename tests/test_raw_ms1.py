@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -12,7 +14,11 @@ from biosaur2.hybrid import (
     _allocate_strict_feature_population,
     _strict_feature_records,
 )
-from biosaur2.raw_ms1 import load_raw_ms1_cache, save_raw_ms1_cache
+from biosaur2.raw_ms1 import (
+    IncompatibleRawMS1CacheError,
+    load_raw_ms1_cache,
+    save_raw_ms1_cache,
+)
 from biosaur2.residual import ResidualMS1Ledger
 
 
@@ -169,6 +175,63 @@ def test_hybrid_ingestion_retains_subthreshold_raw_points_from_one_reader(monkey
     np.testing.assert_array_equal(trace.intensity, [5.0, 8.0, 12.0])
     np.testing.assert_array_equal(trace.point_present, [True, True, True])
     assert result.raw_ms1_store.scan_count == 3
+    assert [row["scan_number"] for row in result.ms1_rows] == [1, 2, 3]
+
+
+def test_hybrid_ingestion_canonicalizes_missing_native_scan_ids(monkeypatch):
+    indexed = _spectrum("controllerType=0", 10.0, [500.0], [100.0])
+    indexed["index"] = 6
+    fallback = _spectrum("controllerType=0", 11.0, [500.0], [90.0])
+    monkeypatch.setattr(
+        utils,
+        "iter_ms1_and_ms2_metadata",
+        lambda _path: iter((indexed, fallback)),
+    )
+
+    result = preprocessing.ingest_mzml(
+        {
+            "file": "run.mzML",
+            "combine_every": 1,
+            "mini": 10.0,
+            "minmz": 350.0,
+            "maxmz": 1500.0,
+            "input_rt_unit": "seconds",
+            "write_ms1": False,
+            "write_ms2": False,
+            "feature_mode": "hybrid",
+        }
+    )
+
+    assert [row["scan_number"] for row in result.ms1_rows] == [7, 2]
+    assert [row["scan_number"] for row in result.spectra] == [7, 2]
+    np.testing.assert_array_equal(result.raw_ms1_store.scan_number, [7, 2])
+
+
+def test_hybrid_ingestion_rejects_duplicate_canonical_scan_ids(monkeypatch):
+    spectra = (
+        _spectrum("scan=2", 10.0, [500.0], [100.0]),
+        _spectrum("controllerType=0", 11.0, [500.0], [90.0]),
+    )
+    monkeypatch.setattr(
+        utils,
+        "iter_ms1_and_ms2_metadata",
+        lambda _path: iter(spectra),
+    )
+
+    with pytest.raises(ValueError, match="Duplicate canonical MS1 scan_id 2"):
+        preprocessing.ingest_mzml(
+            {
+                "file": "run.mzML",
+                "combine_every": 1,
+                "mini": 10.0,
+                "minmz": 350.0,
+                "maxmz": 1500.0,
+                "input_rt_unit": "seconds",
+                "write_ms1": False,
+                "write_ms2": False,
+                "feature_mode": "hybrid",
+            }
+        )
 
 
 def test_hybrid_ingestion_reads_ms2_metadata_without_legacy_ms2_output(monkeypatch):
@@ -283,6 +346,26 @@ def test_persisted_and_mmap_raw_stores_are_identical_and_fingerprint_safe(tmp_pa
 
     source.write_bytes(source.read_bytes() + b"changed")
     with pytest.raises(ValueError, match="fingerprint"):
+        load_raw_ms1_cache(cache, source)
+
+
+def test_raw_ms1_cache_rejects_precanonical_scan_id_version(tmp_path):
+    source = tmp_path / "run.mzML.gz"
+    source.write_bytes(b"source")
+    builder = preprocessing.RawMS1StoreBuilder()
+    builder.append(
+        [500.0], [10.0], source_scan_index=0, scan_number=101,
+        rt_sec=1.0, faims_cv=None,
+    )
+    cache = save_raw_ms1_cache(
+        builder.finalize(), tmp_path / "raw-cache", source
+    )
+    manifest_path = cache / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["cache_version"] = 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(IncompatibleRawMS1CacheError):
         load_raw_ms1_cache(cache, source)
 
 

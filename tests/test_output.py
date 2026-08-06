@@ -52,7 +52,9 @@ def _feature(feature_idx=1, mz=500.0):
         "rtEnd": 180.0,
         "faims_cv": None,
         "ion_mobility_1_over_k0": None,
+        "scanStart": 100,
         "scan_apex_number": 101,
+        "scanEnd": 102,
         "isoerror": 0.25,
         "isoerror2": -100,
         "feature_idx": feature_idx,
@@ -68,9 +70,11 @@ def test_planned_hybrid_and_duckdb_paths_are_per_input(tmp_path):
         "o": str(output / "sample.features.parquet"),
         "format": "parquet",
         "feature_mode": "hybrid",
+        "write_ms1": True,
     }
     assert planned_output_paths(hybrid) == [
         output / "sample.features.parquet",
+        output / "sample.ms1.parquet",
         output / "sample.ms2_events.parquet",
         output / "sample.identifications.parquet",
     ]
@@ -208,7 +212,7 @@ def test_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     metadata = pq.ParquetFile(
         tmp_path / "hybrid.features.parquet"
     ).metadata.metadata
-    assert metadata[b"biosaur2_hybrid_schema_version"] == b"8"
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"9"
     assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
         "_hybrid_summary"
     ]
@@ -256,6 +260,9 @@ def test_hybrid_splits_compact_linked_ms2_rows_from_features(tmp_path):
     assert feature_schema.names == list(hybrid_feature_columns())
     for removed in (
         "ms2_events",
+        "rt_start_sec",
+        "rt_apex_sec",
+        "rt_end_sec",
         "mono_hills_scan_lists",
         "area_envelope_raw",
         "area_envelope_corrected",
@@ -265,6 +272,10 @@ def test_hybrid_splits_compact_linked_ms2_rows_from_features(tmp_path):
         "feature_quality_score",
     ):
         assert removed not in feature_schema.names
+    feature = pq.read_table(tmp_path / "hybrid.features.parquet").to_pylist()[0]
+    assert (feature["scanStart"], feature["scanApex"], feature["scanEnd"]) == (
+        100, 101, 102
+    )
 
     event_table = pq.read_table(tmp_path / "hybrid.ms2_events.parquet")
     assert event_table.column_names == list(LINKED_MS2_EVENT_COLUMNS)
@@ -306,16 +317,23 @@ def test_hybrid_tsv_writes_only_tsv_feature_and_identification_tables(tmp_path):
         tmp_path,
         o=str(tmp_path / "hybrid.features.tsv"),
         feature_mode="hybrid",
+        write_ms1=True,
     )
     manager = CompactOutputManager(args)
+    manager.append_ms1(
+        [{"scan_number": 101, "rt_sec": 120.0, "total_intensity": 2.5}]
+    )
     manager.finalize()
 
     feature_path = tmp_path / "hybrid.features.tsv"
     ms2_events_path = tmp_path / "hybrid.ms2_events.tsv"
     identification_path = tmp_path / "hybrid.identifications.tsv"
+    ms1_path = tmp_path / "hybrid.ms1.tsv"
     assert feature_path.is_file()
     assert ms2_events_path.is_file()
     assert identification_path.is_file()
+    assert ms1_path.is_file()
+    assert ms1_path.read_text().splitlines()[0] == "scan_id\tRT\ttotal_intensity"
     assert "canonical_peptidoform" in identification_path.read_text().splitlines()[0]
     assert not list(tmp_path.glob("*.parquet"))
 

@@ -38,6 +38,7 @@ from biosaur2.hybrid import (
     extract_local_feature,
     match_assay_to_strict_feature,
 )
+from biosaur2.hybrid_strict import _recovered_feature_row
 from biosaur2.generic_association import GENERIC_ASSOCIATION_SCORE_WEIGHTS, composite_association_support
 from biosaur2.identifications import (
     IdentificationMappingResult,
@@ -109,6 +110,10 @@ def test_local_exact_assay_recovers_three_point_subthreshold_feature():
     assert candidate.rt_apex_sec == 2.0
     assert candidate.rt_end_sec == 3.0
     assert candidate.quantification.value == pytest.approx(21.0)
+    row = _recovered_feature_row(candidate, 1)
+    assert (row["scanStart"], row["scanApex"], row["scanEnd"]) == (
+        101, 102, 103
+    )
 
 
 def test_local_exact_assay_requires_selected_isotope_at_precursor_scan():

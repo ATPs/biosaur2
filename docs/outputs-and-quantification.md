@@ -14,17 +14,17 @@ legacy mode and Parquet in Hybrid mode.
 | --- | --- | --- |
 | Legacy | `sample.features.tsv` | One accepted strict MS1 feature. |
 | Legacy `--format parquet` | `sample.features.parquet` | The same feature table in typed Parquet. |
-| Hybrid | `sample.features.parquet`, `sample.ms2_events.parquet`, `sample.identifications.parquet` | One feature; one linked MS2 event; one accepted parsed PSM. |
+| Hybrid | `sample.features.parquet`, `sample.ms1.parquet`, `sample.ms2_events.parquet`, `sample.identifications.parquet` | One feature; one MS1 scan; one linked MS2 event; one accepted parsed PSM. |
 | `--format duckdb` | `sample.biosaur2.duckdb` | One database per input with the same tables. |
 | `--write-hills` | `sample.hills.<format>` | One chromatographic hill. |
-| `--write-ms1` | `sample.ms1.<format>` | One MS1 scan summary. |
+| Legacy `--write-ms1` | `sample.ms1.<format>` | One optional MS1 scan summary. Hybrid writes it by default. |
 | Legacy `--write-ms2` | `sample.ms2.<format>` | One normalized precursor entry from an MS2 spectrum. |
 | Project Hybrid external stage only | `sample.external_id_evidence.<format>` or DuckDB table | One source-run support row for a weak candidate, plus compact rejected-candidate audit rows. |
 | Project index | `project.duckdb` | Run status, QC, alignment and stage summaries. |
 | Experimental `-dia`/`-dia2` | requested `.mgf` | One text block per exported spectrum. |
 
 For one input, `-o results/sample.features.parquet` fixes the feature path and
-places `results/sample.ms2_events.parquet` and
+places `results/sample.ms1.parquet`, `results/sample.ms2_events.parquet` and
 `results/sample.identifications.parquet` beside it. With several
 inputs, `-o results` is a directory and each input gets its own stem. DuckDB
 also creates one database per input, never one shared run database.
@@ -40,15 +40,16 @@ also creates one database per input, never one shared run database.
 Selected scalar columns look like this:
 
 ```text
-feature_idx  mz        charge  rtStart  rtApex  rtEnd  feature_origin     quant_value  quant_envelope_area  quant_mono_area  quant_envelope_apex  supporting_ms2_count
-42           499.7001  2       12.18    12.34   12.51  direct_identified  428519.7     428519.7            241006.2        9831.0               2
-43           401.2052  3       18.64    18.76   18.87  strict_untargeted  231480.4     231480.4            152704.9        6412.0               0
-44           612.3210  2       21.02    21.14   21.27  generic_local      118042.8     118042.8             72011.5        4208.0               1
+feature_idx  mz        charge  scanStart  scanApex  scanEnd  rtStart  rtApex  rtEnd  feature_origin     quant_value
+42           499.7001  2       1528       1542      1559     12.18    12.34   12.51  direct_identified  428519.7
+43           401.2052  3       1831       1844      1856     18.64    18.76   18.87  strict_untargeted  231480.4
+44           612.3210  2       1888       1902      1919     21.02    21.14   21.27  generic_local      118042.8
 ```
 
 `rtStart`, `rtApex` and `rtEnd` are minutes for compatibility with legacy
-features. Hybrid also includes `rt_start_sec`, `rt_apex_sec` and `rt_end_sec`
-in seconds. `feature_idx` is the stable positive feature key.
+features. Join `scanStart`, `scanApex` or `scanEnd` to `ms1.scan_id` to obtain
+the corresponding RT in seconds. `feature_idx` is the stable positive feature
+key.
 
 ## Linked Hybrid MS2 table
 
@@ -115,9 +116,10 @@ hill_idx  mz        rtStart  rtApex  rtEnd  nScans  intensityApex  feature_idx
 `feature_idx = -1` means the hill was not assigned to a final feature. Point
 lists are included unless `--no-hill-list` is supplied.
 
-## MS1 scan diagnostic
+## MS1 scan table
 
-`--write-ms1` creates `sample.ms1.<format>`:
+Hybrid creates `sample.ms1.<format>` by default; Legacy creates it with
+`--write-ms1`. Use `--no-write-ms1` to suppress it explicitly:
 
 ```text
 scan_id  RT      total_intensity
@@ -126,8 +128,9 @@ scan_id  RT      total_intensity
 1285     742.6   19011782
 ```
 
-Here `RT` is seconds. This is a scan-level summary, not a feature abundance
-table.
+Here `RT` is seconds. `scan_id` uses native mzML `scan=` when present and a
+stable spectrum-index fallback otherwise. It is the join key for Hybrid
+feature scan boundaries. This is a scan-level summary, not feature abundance.
 
 ## Normalized MS2 event diagnostic
 
@@ -210,6 +213,7 @@ database normally contains:
 ```text
 table_name             example rows
 features               42, 43, 44 ...
+ms1                    scan_id/RT/total intensity ...
 ms2_events              feature_idx/MS2 references ...
 identifications         scan1542_1, scan1543_1 ...
 runs                    one provenance row
@@ -235,9 +239,9 @@ LIMIT 3;
 feature rows. Its `runs` table resembles:
 
 ```text
-run_order  run_id  status   output_format  features_path                         ms2_events_path
-0          run_a   success  parquet        results/run_a/run_a.features.parquet  results/run_a/run_a.ms2_events.parquet
-1          run_b   success  parquet        results/run_b/run_b.features.parquet  results/run_b/run_b.ms2_events.parquet
+run_order  run_id  status   output_format  features_path                         ms1_path
+0          run_a   success  parquet        results/run_a/run_a.features.parquet  results/run_a/run_a.ms1.parquet
+1          run_b   success  parquet        results/run_b/run_b.features.parquet  results/run_b/run_b.ms1.parquet
 ```
 
 Selected `qc_metrics` and `hybrid_summary` rows look like:

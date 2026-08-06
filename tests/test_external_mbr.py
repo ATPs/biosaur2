@@ -41,7 +41,8 @@ def _candidate_row(mz=700.0):
         "rtApex": 170.0, "intensityApex": 100.0, "intensitySum": 200.0,
         "charge": 2, "nIsotopes": 2, "nScans": 2, "mz": mz,
         "rtStart": 168.0, "rtEnd": 172.0, "FAIMS": None, "im": None,
-        "scanApex": 1, "isoerror": 0.0, "isoerror2": 0.0,
+        "scanStart": 100, "scanApex": 101, "scanEnd": 102,
+        "isoerror": 0.0, "isoerror2": 0.0,
         "area_sum": 100.0, "feature_origin": "aligned_external_weak",
         "confidence_tier": "external_id_weak", "quant_value": 100.0,
         "quant_method": "all", "quant_status": "quantified",
@@ -170,7 +171,10 @@ def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
     assert output[0]["feature_origin"] == "aligned_external_weak"
     assert output[0]["quant_envelope_apex"] == pytest.approx(100.0)
     assert output[0]["rtApex"] == pytest.approx(170.0 / 60.0)
-    assert output[0]["rt_apex_sec"] == pytest.approx(170.0)
+    assert (
+        output[0]["scanStart"], output[0]["scanApex"], output[0]["scanEnd"]
+    ) == (100, 101, 102)
+    assert "rt_apex_sec" not in output[0]
     evidence = pq.read_table(paths_by_run["target"]["external_evidence"]).to_pylist()
     assert evidence[0]["status"] == "accepted_matched_weak_feature"
     assert evidence[0]["target_support_count"] == 4

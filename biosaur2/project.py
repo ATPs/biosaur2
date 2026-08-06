@@ -27,6 +27,7 @@ from .project_manifest import read_manifest
 from .raw_ms1 import source_fingerprint
 from .external_mbr import run_feature_mbr_stage
 from .project_validation import _read_output_table, validate_project as validate_project
+from .schema import PROJECT_SCHEMA_VERSION
 
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,13 @@ def _project_worker_budgeted(task, allocated_workers):
     return result
 
 
-def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
+def _run_paths(
+    run,
+    output_dir,
+    cache_workspace=None,
+    output_format="parquet",
+    write_ms1=False,
+):
     directory = output_dir / run.run_id
     cache_paths = run_cache_paths(
         cache_workspace or (output_dir / ".biosaur2_cache"),
@@ -194,6 +201,7 @@ def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
     if output_format == "duckdb":
         run_output = directory / (run.run_id + ".biosaur2.duckdb")
         features = ms2_events = identifications = str(run_output)
+        ms1 = str(run_output) if write_ms1 else None
     else:
         run_output = None
         features = str(directory / (run.run_id + ".features." + output_format))
@@ -203,6 +211,11 @@ def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
         identifications = str(
             directory / (run.run_id + ".identifications." + output_format)
         )
+        ms1 = (
+            str(directory / (run.run_id + ".ms1." + output_format))
+            if write_ms1
+            else None
+        )
     paths = {
         "run_dir": str(directory),
         "format": output_format,
@@ -210,6 +223,7 @@ def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
         "features": features,
         "ms2_events": ms2_events,
         "identifications": identifications,
+        "ms1": ms1,
         "external_evidence": (
             str(run_output)
             if output_format == "duckdb"
@@ -239,6 +253,10 @@ def _command_for_run(run, paths, options):
     ]
     if options["overwrite"]:
         command.append("--overwrite")
+    write_ms1 = options.get("write_ms1")
+    if write_ms1 is None:
+        write_ms1 = options.get("mode", "legacy") == "hybrid"
+    command.append("--write-ms1" if write_ms1 else "--no-write-ms1")
     if options["mode"] == "hybrid":
         if run.psm_path is not None:
             command.extend(("--psm-path", str(run.psm_path)))
@@ -475,7 +493,7 @@ def _write_project_database(
             "allocated_workers INTEGER, "
             "output_format VARCHAR, run_output_path VARCHAR, "
             "features_path VARCHAR, ms2_events_path VARCHAR, "
-            "identification_path VARCHAR, "
+            "identification_path VARCHAR, ms1_path VARCHAR, "
             "external_evidence_path VARCHAR, raw_ms1_cache_path VARCHAR, "
             "input_fingerprint_json VARCHAR, command_json VARCHAR)"
         )
@@ -524,7 +542,7 @@ def _write_project_database(
             paths = result["paths"]
             summary = _summary_for_result(result)
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     index,
                     run.run_id,
@@ -542,6 +560,7 @@ def _write_project_database(
                     paths["features"],
                     paths["ms2_events"],
                     paths["identifications"],
+                    paths.get("ms1"),
                     paths.get("external_evidence"),
                     paths["raw_ms1_cache"],
                     json.dumps(_input_fingerprint(run), sort_keys=True),
@@ -745,7 +764,8 @@ def _write_project_database(
                 [stage, json.dumps(summary, sort_keys=True)],
             )
         connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', '11')"
+            "INSERT INTO project_metadata VALUES ('project_schema_version', ?)",
+            [PROJECT_SCHEMA_VERSION],
         )
         connection.execute(
             "INSERT INTO project_metadata VALUES ('resolved_options', ?)",
@@ -764,6 +784,8 @@ def run_project(manifest, output_dir, project_db, **options):
     runs = read_manifest(manifest)
     output_dir = Path(output_dir).resolve()
     database = Path(project_db).resolve()
+    if options.get("write_ms1") is None:
+        options["write_ms1"] = options.get("mode", "legacy") == "hybrid"
     cache_workspace = Path(
         options.get("_cache_workspace")
         or options.get("cache_dir")
@@ -822,7 +844,13 @@ def run_project(manifest, output_dir, project_db, **options):
     tasks = []
     skipped = {}
     for index, run in enumerate(runs):
-        paths = _run_paths(run, output_dir, cache_workspace, options.get("format", "parquet"))
+        paths = _run_paths(
+            run,
+            output_dir,
+            cache_workspace,
+            options.get("format", "parquet"),
+            write_ms1=bool(options.get("write_ms1")),
+        )
         Path(paths["run_dir"]).mkdir(parents=True, exist_ok=True)
         command = _command_for_run(run, paths, options)
         logger.debug(
@@ -838,6 +866,8 @@ def run_project(manifest, output_dir, project_db, **options):
         if options["mode"] == "hybrid":
             required_paths.append(paths["run_output"] or paths["ms2_events"])
             required_paths.append(paths["run_output"] or paths["identifications"])
+        if options.get("write_ms1"):
+            required_paths.append(paths["run_output"] or paths["ms1"])
         resume_valid = (
             resume_record is not None
             and resume_record["input_fingerprint"] == _input_fingerprint(run)
@@ -989,6 +1019,7 @@ def run_project(manifest, output_dir, project_db, **options):
                     output_dir,
                     cache_workspace,
                     options.get("format", "parquet"),
+                    write_ms1=bool(options.get("write_ms1")),
                 ),
                 "command": [],
             }

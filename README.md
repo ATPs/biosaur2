@@ -59,10 +59,11 @@ biosaur2 sample.mzML.gz \
   -o results/sample.features.parquet
 ```
 
-Hybrid writes three primary files for this input:
+Hybrid writes four primary files for this input:
 
 - `results/sample.features.parquet`: feature coordinates, quality,
   and quantification.
+- `results/sample.ms1.parquet`: MS1 scan IDs, RT seconds and total intensity.
 - `results/sample.ms2_events.parquet`: feature-linked MS2 references, joined
   to features by `feature_idx`.
 - `results/sample.identifications.parquet`: parsed PSM and direct-assay fields.
@@ -101,9 +102,9 @@ biosaur2 project run \
 biosaur2 project validate --project-db results/project.duckdb
 ```
 
-Each input still receives its own features, linked-MS2 and identifications outputs. The
-project database records run status, paths, alignment and weak-feature rescue
-summaries. Read
+Each input receives its own features, MS1, linked-MS2 and identifications
+outputs. The project database records their paths, run status, alignment and
+weak-feature rescue summaries. Read
 [Project workflow](https://github.com/ATPs/biosaur2/blob/main/docs/project-workflow.md)
 for the manifest and the difference between same-run search and cross-run
 matching.

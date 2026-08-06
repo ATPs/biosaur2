@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyarrow as pa
 
 
-SCHEMA_VERSION = "5.0"
+SCHEMA_VERSION = "6.0"
 
 FEATURE_BASE_COLUMNS = (
     "massCalib",
@@ -83,7 +83,8 @@ MS2_COLUMNS = (
     "metadata_flags",
 )
 
-HYBRID_SCHEMA_VERSION = "8"
+HYBRID_SCHEMA_VERSION = "9"
+PROJECT_SCHEMA_VERSION = "12"
 
 HYBRID_FEATURE_QUANT_COLUMNS = (
     "run_id", "feature_id", "feature_origin", "confidence_tier",
@@ -93,7 +94,7 @@ HYBRID_FEATURE_QUANT_COLUMNS = (
     "quant_envelope_apex", "feature_quality_score", "quality_flags",
     "extraction_q_value", "supporting_psm_count", "supporting_ms2_count",
     "external_support_count",
-    "points_across_peak", "rt_start_sec", "rt_apex_sec", "rt_end_sec",
+    "points_across_peak",
     "isotope_cosine", "mass_error_ppm_median",
 )
 HYBRID_MS2_AUDIT_COLUMNS = (
@@ -245,10 +246,11 @@ def hybrid_feature_columns(
     extra_details=False,
     quant_details=False,
 ):
-    return (
-        feature_columns(include_mono, extra_details)
-        + hybrid_quant_output_columns(quant_details)
-    )
+    base = list(feature_columns(include_mono, extra_details))
+    apex_position = base.index("scanApex")
+    base.insert(apex_position, "scanStart")
+    base.insert(apex_position + 2, "scanEnd")
+    return tuple(base) + hybrid_quant_output_columns(quant_details)
 
 
 def _hybrid_feature_schema(
@@ -258,12 +260,21 @@ def _hybrid_feature_schema(
     quant_details=False,
 ):
     base = _feature_schema(use64, include_mono, extra_details)
+    wide_int = pa.int64() if use64 else pa.int32()
+    base_fields = list(base)
+    apex_position = base.names.index("scanApex")
+    base_fields.insert(
+        apex_position, pa.field("scanStart", wide_int, nullable=True)
+    )
+    base_fields.insert(
+        apex_position + 2, pa.field("scanEnd", wide_int, nullable=True)
+    )
     quant = _hybrid_feature_quant_schema(use64)
     quant_fields = [
         quant.field(name)
         for name in hybrid_quant_output_columns(quant_details)
     ]
-    return pa.schema(list(base) + quant_fields)
+    return pa.schema(base_fields + quant_fields)
 
 
 def _linked_ms2_events_schema(use64=False):
@@ -367,8 +378,7 @@ def _hybrid_feature_quant_schema(use64=False):
         "extraction_q_value": pa.float32(), "supporting_psm_count": pa.int32(),
         "supporting_ms2_count": pa.int32(), "external_support_count": pa.int16(),
         "points_across_peak": pa.int32(),
-        "rt_start_sec": pa.float64(), "rt_apex_sec": pa.float64(),
-        "rt_end_sec": pa.float64(), "isotope_cosine": pa.float32(),
+        "isotope_cosine": pa.float32(),
         "mass_error_ppm_median": pa.float32(),
     }
     return pa.schema(pa.field(name, fields[name], nullable=name not in {"run_id", "feature_id"}) for name in HYBRID_FEATURE_QUANT_COLUMNS)

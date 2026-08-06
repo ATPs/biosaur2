@@ -551,8 +551,9 @@ Advanced output notes:
     parser.add_argument(
         '--write_ms1', '--write-ms1',
         dest='write_ms1',
-        help=_advanced_help(show_all, 'write MS1 scan_id, RT seconds and total intensity using --format'),
-        action='store_true',
+        help=_advanced_help(show_all, 'write MS1 scan_id, RT seconds and total intensity using --format; enabled by default in hybrid mode'),
+        action=argparse.BooleanOptionalAction,
+        default=None,
     )
     parser.add_argument(
         '--write-ms2',
@@ -736,6 +737,8 @@ def _run_with_parser(parser):
     args['format'] = args['format'] or (
         'parquet' if args['feature_mode'] == 'hybrid' else 'tsv'
     )
+    if args['write_ms1'] is None:
+        args['write_ms1'] = args['feature_mode'] == 'hybrid'
     if args['cmin'] < 1 or args['cmax'] < args['cmin']:
         parser.error('-cmin must be positive and -cmax/--max-charge must be at least -cmin.')
     if args['combine_every'] < 1:

@@ -52,7 +52,9 @@ def _feature(feature_idx=1):
         "rtEnd": 180.0,
         "faims_cv": None,
         "ion_mobility_1_over_k0": None,
+        "scanStart": 100,
         "scan_apex_number": 101,
+        "scanEnd": 102,
         "isoerror": 0.25,
         "isoerror2": -100,
         "feature_idx": feature_idx,
@@ -153,7 +155,7 @@ def test_duckdb_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     manager.finalize()
     metadata = pq.ParquetFile(tmp_path / "result.features.parquet").metadata.metadata
     provenance = json.loads(metadata[b"biosaur2_provenance_json"])
-    assert provenance["hybrid_schema_version"] == "8"
+    assert provenance["hybrid_schema_version"] == "9"
     assert json.loads(provenance["hybrid_summary_json"]) == args["_hybrid_summary"]
     assert (tmp_path / "result.identifications.parquet").is_file()
     assert (tmp_path / "result.ms2_events.parquet").is_file()
@@ -161,8 +163,13 @@ def test_duckdb_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
 
 
 def test_hybrid_duckdb_writes_no_parquet_or_tsv_sidecars(tmp_path):
-    args = _args(tmp_path, database=True, feature_mode="hybrid")
+    args = _args(
+        tmp_path, database=True, feature_mode="hybrid", write_ms1=True
+    )
     manager = DuckDBOutputManager(args)
+    manager.append_ms1(
+        [{"scan_number": 101, "rt_sec": 120.0, "total_intensity": 2.5}]
+    )
     manager.append_hybrid_results(
         [_feature()],
         [{"feature_id": 1, "quant_value": 42.0}],
@@ -188,6 +195,7 @@ def test_hybrid_duckdb_writes_no_parquet_or_tsv_sidecars(tmp_path):
         assert {row[0] for row in connection.execute("show tables").fetchall()} == {
             "features",
             "identifications",
+            "ms1",
             "ms2_events",
             "runs",
         }

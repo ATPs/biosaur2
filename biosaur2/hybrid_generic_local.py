@@ -55,7 +55,9 @@ def _generic_recovered_feature_row(candidate, feature_id):
         "mono_hills_intensity_list": [
             float(mono_values[value]) for value in positive
         ],
+        "scanStart": int(mono_trace.scan_number[start]),
         "scanApex": candidate.scan_apex,
+        "scanEnd": int(mono_trace.scan_number[end - 1]),
         "isoerror": candidate.selected_event_mz_error_ppm,
         "isoerror2": None,
         "feature_idx": feature_id,
