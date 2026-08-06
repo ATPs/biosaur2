@@ -218,6 +218,16 @@ README.md and examples/hybrid_project_manifest.tsv.
             parser.error("--workers must be positive")
         if args.max_charge < 1:
             parser.error("--max-charge must be positive")
+        if (
+            not math.isfinite(args.psm_q_value_max)
+            or not 0 <= args.psm_q_value_max <= 1
+        ):
+            parser.error("--psm-q-value-max must be finite and in [0, 1]")
+        if args.psm_pep_max is not None and (
+            not math.isfinite(args.psm_pep_max)
+            or not 0 <= args.psm_pep_max <= 1
+        ):
+            parser.error("--psm-pep-max must be finite and in [0, 1]")
         if not math.isfinite(args.generic_q_value_max) or not 0 <= args.generic_q_value_max <= 1:
             parser.error("--generic-q-value-max must be finite and in [0, 1]")
         if not math.isfinite(args.generic_ms2_ppm) or args.generic_ms2_ppm <= 0:

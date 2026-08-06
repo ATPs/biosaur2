@@ -26,7 +26,7 @@ from .confidence import TargetDecoyCompetition, deterministic_decoy_shift, targe
 from .external_alignment import AlignmentForest, MAX_REFERENCE_CANDIDATES, ReferenceStarAlignment, alignment_group_for_run, faims_key
 from .output import _temporary_neighbor, publish_staged_files
 from .raw_ms1 import source_fingerprint
-from .schema import compact_schemas
+from .schema import EXTERNAL_EVIDENCE_COLUMNS, compact_schemas
 
 
 SIDECAR_VERSION = "feature-mbr-v3"
@@ -43,14 +43,6 @@ LOCAL_WEAK_OPTION_DEFAULTS = {
     "external_weak_max_strong_overlap": 0.30,
 }
 logger = logging.getLogger(__name__)
-EVIDENCE_FIELDS = (
-    "target_run", "weak_candidate_id", "feature_id", "source_run",
-    "source_feature_id", "support_rank", "support_score", "mz_error_ppm",
-    "support_log_likelihood_ratio", "rt_error_sec", "predicted_rt_sec",
-    "target_support_count", "decoy_support_count", "target_score", "decoy_score",
-    "competition_winner", "acceptance_q_value", "status",
-    "alignment_method", "alignment_anchor_count", "alignment_residual_mad_sec",
-)
 
 
 def _read_table(path, table_name):
@@ -892,13 +884,15 @@ def _evidence_rows(outcomes, q_value_max):
 def _write_evidence(path, rows):
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pylist(rows) if rows else pa.table({name: pa.array([], type=pa.string()) for name in EVIDENCE_FIELDS})
+    table = pa.Table.from_pylist(
+        rows, schema=compact_schemas()["external_evidence"]
+    )
     if destination.suffix == ".parquet":
         _atomic_parquet(destination, table)
         return
     if destination.suffix == ".tsv":
         temporary = _temporary_neighbor(destination)
-        fields = tuple(table.schema.names)
+        fields = EXTERNAL_EVIDENCE_COLUMNS
         with temporary.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
             writer.writeheader()

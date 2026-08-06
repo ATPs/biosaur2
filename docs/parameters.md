@@ -30,10 +30,12 @@ scientific tolerance changes on representative data.
 | `--ms2-rt-tolerance-sec` | 120 | Initial same-run raw-MS1 search distance on each side of an MS2 event. It does not match runs. |
 | `--quant-method` | `all` | Report envelope area, mono area and envelope apex; `quant_value` uses envelope area. |
 
-The two q-value thresholds are independent. `--psm-q-value-max` asks whether a
-peptide assignment is reliable. `--generic-q-value-max` asks whether an
-unidentified MS2 precursor was associated with MS1 signal more convincingly
-than shifted decoys. See [Hybrid workflow](hybrid-workflow.md).
+These two same-run q-value thresholds are independent. `--psm-q-value-max`
+asks whether a peptide assignment is reliable. `--generic-q-value-max` asks
+whether an unidentified MS2 precursor was associated with MS1 signal more
+convincingly than shifted decoys. Project external rescue has a third,
+independent `--external-q-value-max` described below. See
+[Hybrid workflow](hybrid-workflow.md).
 
 ## External weak-feature rescue (`--help-all`)
 

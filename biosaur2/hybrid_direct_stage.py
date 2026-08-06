@@ -1,11 +1,20 @@
 """Direct identification matching and bounded local recovery stage."""
 
+from collections import Counter, defaultdict
+from dataclasses import replace
+import logging
+import time
+
+import numpy as np
+
 from .hybrid_runtime import *
+from .residual import ResidualMS1Ledger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_feature_id, args):
-    from collections import Counter, defaultdict
-
     hybrid_started = time.monotonic()
     logger.debug(
         'Hybrid postprocessing start: run_id=%s contexts=%d direct_assays=%d ms2_events=%d',
@@ -111,9 +120,7 @@ def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_con
     recovered = []
     recovered_feature_rows = []
     recovered_quant_rows = []
-    direct_status_counts = Counter()
     direct_retry_counts = Counter()
-    direct_local_started = time.monotonic()
     state = {
         "hybrid_started": hybrid_started,
         "strict_records": strict_records,
@@ -142,11 +149,9 @@ def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_con
 
 
 def _recover_direct_assays(run_id, ingestion, assay_result, args, state):
-    strict_index = state["strict_index"]
     strict_hill_claims = state["strict_hill_claims"]
     residual_ledger = state["residual_ledger"]
     residual_allocation_status_counts = state["residual_allocation_status_counts"]
-    local_candidate_cache_telemetry = state["local_candidate_cache_telemetry"]
     direct_processed_by_psm = state["direct_processed_by_psm"]
     base_ppm = state["base_ppm"]
     base_rt_tolerance = state["base_rt_tolerance"]

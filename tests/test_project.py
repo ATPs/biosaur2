@@ -271,6 +271,10 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         schema=schemas["merged_identifications"],
     )
     pq.write_table(identification_table, paths["identifications"])
+    pq.write_table(
+        pa.Table.from_pylist([], schema=schemas["external_evidence"]),
+        paths["external_evidence"],
+    )
     Path(paths["raw_ms1_cache"]).mkdir()
     Path(paths["raw_ms1_cache"], "manifest.json").write_text(
         "{}\n", encoding="utf-8"
@@ -334,6 +338,18 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert successful["run"]["input_fingerprint"] == _input_fingerprint(run)
     assert successful["run"]["peak_rss_kib"] == 123456
     assert validate_project(database) == {"run_count": 1, "problems": ()}
+
+    Path(paths["external_evidence"]).unlink()
+    try:
+        validate_project(database)
+    except ValueError as error:
+        assert "missing external evidence output" in str(error)
+    else:
+        raise AssertionError("missing external evidence was not detected")
+    pq.write_table(
+        pa.Table.from_pylist([], schema=schemas["external_evidence"]),
+        paths["external_evidence"],
+    )
 
     import duckdb
 

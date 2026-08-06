@@ -75,8 +75,10 @@ def validate_project(project_db):
                 "SELECT key, value_json FROM project_metadata"
             ).fetchall()
         )
-    mode = json.loads(metadata.get("resolved_options", "{}")).get(
-        "mode", "legacy"
+    resolved_options = json.loads(metadata.get("resolved_options", "{}"))
+    mode = resolved_options.get("mode", "legacy")
+    external_expected = (
+        mode == "hybrid" and resolved_options.get("external_id", True)
     )
     for (
         run_id,
@@ -118,7 +120,14 @@ def validate_project(project_db):
                         % (run_id, error)
                     )
         external_rows = []
-        if external and Path(external).is_file():
+        if external_expected and (
+            not external or not Path(external).is_file()
+        ):
+            problems.append(
+                "%s is missing external evidence output %s"
+                % (run_id, external or "")
+            )
+        elif external and Path(external).is_file():
             if output_format == "duckdb":
                 try:
                     with duckdb.connect(str(external), read_only=True) as connection:
@@ -126,8 +135,12 @@ def validate_project(project_db):
                             "SELECT status, feature_id, acceptance_q_value "
                             "FROM external_id_evidence"
                         ).fetch_arrow_table().to_pylist()
-                except Exception:
-                    external_rows = []
+                except Exception as error:
+                    if external_expected:
+                        problems.append(
+                            "%s has an unreadable external evidence table: %s"
+                            % (run_id, error)
+                        )
             elif Path(external).suffix.lower() == ".parquet":
                 external_rows = pq.read_table(
                     external,

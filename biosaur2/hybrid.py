@@ -1,11 +1,117 @@
-"""Compatibility facade for identification-aware hybrid feature processing."""
+"""Stable imports for identification-aware hybrid feature processing."""
 
-from .hybrid_constants import *
-from .hybrid_assays import *
-from .hybrid_local import *
-from .hybrid_strict import *
-from .hybrid_generic_association import *
-from .hybrid_generic_local import *
+from .hybrid_assays import (
+    AssayBuildResult,
+    DirectAssay,
+    DirectRunCalibration,
+    LocalFeatureCandidate,
+    _direct_relaxed_retry_enabled,
+    build_direct_assays,
+)
+from .hybrid_constants import (
+    FEATURE_ORIGIN_ALIGNED_EXTERNAL,
+    FEATURE_ORIGIN_ALIGNED_EXTERNAL_WEAK,
+    FEATURE_ORIGIN_DIRECT_IDENTIFIED,
+    FEATURE_ORIGIN_MS2_GUIDED_FULL,
+    FEATURE_ORIGIN_MS2_GUIDED_MONO_ONLY,
+    FEATURE_ORIGIN_MS2_GUIDED_PARTIAL,
+    FEATURE_ORIGIN_STRICT_UNTARGETED,
+    GENERIC_LOCAL_REFINEMENT_INPUT_STATUSES,
+    GENERIC_SCORE_CALIBRATION_MIN_PAIRED_ANCHORS,
+    GENERIC_SCORE_CALIBRATION_PRIOR_FRACTIONS,
+    QUALITY_FLAG_BOUNDARY_TRUNCATED,
+    QUALITY_FLAG_RAW_BASELINE_FALLBACK,
+    QUALITY_FLAG_RELAXED_MS2_FEATURE,
+    QUALITY_FLAG_TWO_POINT_QUANT,
+    QUALITY_FLAG_WEAK_EXTERNAL_FEATURE,
+    RELAXED_DIRECT_Q_VALUE_MAX,
+)
+from .hybrid_generic_association import (
+    _apply_generic_strict_associations,
+    _calibrate_generic_score_weights,
+    _compact_generic_association_summary,
+    _compete_generic_local_by_input_family,
+    _generic_decoy_rows,
+    _generic_local_refinement_events,
+    _rescore_generic_link_rows,
+    _update_generic_quant_support,
+)
+from .hybrid_generic_local import (
+    _feature_population_summary,
+    _ms2_audit_summary,
+)
+from .hybrid_local import (
+    _build_final_strict_raw_point_index,
+    _final_strict_protection_reason,
+    _local_candidate_raw_points,
+    _local_feature_equivalent,
+    _protected_local_conflict,
+    extract_local_feature,
+)
 from .hybrid_postprocess import run_hybrid_postprocessing
+from .hybrid_strict import (
+    _allocate_strict_feature_population,
+    _candidate_uses_assigned_strict_hill,
+    _feature_row_as_strict_record,
+    _processed_hill_retry_parameters,
+    _quant_row,
+    _strict_feature_records,
+    _strict_hill_claim_indexes,
+    _strict_record_existing_equivalents,
+    build_strict_feature_index,
+    calibrate_direct_run,
+    match_assay_to_strict_feature,
+)
 
-__all__ = [name for name in globals() if not name.startswith("__")]
+__all__ = [
+    "AssayBuildResult",
+    "DirectAssay",
+    "DirectRunCalibration",
+    "FEATURE_ORIGIN_ALIGNED_EXTERNAL",
+    "FEATURE_ORIGIN_ALIGNED_EXTERNAL_WEAK",
+    "FEATURE_ORIGIN_DIRECT_IDENTIFIED",
+    "FEATURE_ORIGIN_MS2_GUIDED_FULL",
+    "FEATURE_ORIGIN_MS2_GUIDED_MONO_ONLY",
+    "FEATURE_ORIGIN_MS2_GUIDED_PARTIAL",
+    "FEATURE_ORIGIN_STRICT_UNTARGETED",
+    "GENERIC_LOCAL_REFINEMENT_INPUT_STATUSES",
+    "GENERIC_SCORE_CALIBRATION_MIN_PAIRED_ANCHORS",
+    "GENERIC_SCORE_CALIBRATION_PRIOR_FRACTIONS",
+    "LocalFeatureCandidate",
+    "QUALITY_FLAG_BOUNDARY_TRUNCATED",
+    "QUALITY_FLAG_RAW_BASELINE_FALLBACK",
+    "QUALITY_FLAG_RELAXED_MS2_FEATURE",
+    "QUALITY_FLAG_TWO_POINT_QUANT",
+    "QUALITY_FLAG_WEAK_EXTERNAL_FEATURE",
+    "RELAXED_DIRECT_Q_VALUE_MAX",
+    "build_direct_assays",
+    "build_strict_feature_index",
+    "calibrate_direct_run",
+    "extract_local_feature",
+    "match_assay_to_strict_feature",
+    "run_hybrid_postprocessing",
+    "_allocate_strict_feature_population",
+    "_apply_generic_strict_associations",
+    "_build_final_strict_raw_point_index",
+    "_calibrate_generic_score_weights",
+    "_candidate_uses_assigned_strict_hill",
+    "_compact_generic_association_summary",
+    "_compete_generic_local_by_input_family",
+    "_direct_relaxed_retry_enabled",
+    "_feature_population_summary",
+    "_feature_row_as_strict_record",
+    "_final_strict_protection_reason",
+    "_generic_decoy_rows",
+    "_generic_local_refinement_events",
+    "_local_candidate_raw_points",
+    "_local_feature_equivalent",
+    "_ms2_audit_summary",
+    "_processed_hill_retry_parameters",
+    "_protected_local_conflict",
+    "_quant_row",
+    "_rescore_generic_link_rows",
+    "_strict_feature_records",
+    "_strict_hill_claim_indexes",
+    "_strict_record_existing_equivalents",
+    "_update_generic_quant_support",
+]

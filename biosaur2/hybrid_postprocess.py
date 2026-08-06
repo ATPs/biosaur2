@@ -1,5 +1,11 @@
 """Hybrid workflow orchestration and compatibility entry point implementation."""
 
+from collections import Counter
+import logging
+import math
+import time
+from typing import Mapping
+
 from .hybrid_runtime import *
 from .hybrid_direct_stage import run_direct_stage
 from .hybrid_generic_stage import run_generic_stage
@@ -9,6 +15,9 @@ from .external_mbr import (
     write_feature_sidecars,
 )
 from .external_weak import weak_feature_rows_from_contexts
+
+
+logger = logging.getLogger(__name__)
 
 
 def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts, manager, args, direct, generic, residual):

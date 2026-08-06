@@ -29,12 +29,12 @@ def process_file(args):
     isolation_target_func = lambda x: x['precursorList']['precursor'][0]['isolationWindow']['isolation window target m/z']
     isolation_window_func = lambda x: x['precursorList']['precursor'][0]['isolationWindow']['isolation window lower offset']
 
-    #Process faims
+    # Process FAIMS.
     faims_set = set([z.get('FAIMS compensation voltage', None) for z in data_for_analyse])
     if any(z is not None for z in faims_set):
         logger.info('Detected FAIMS values: %s', faims_set)
 
-    #Process windows
+    # Process isolation windows.
     windows_set = set([isolation_target_func(z) for z in data_for_analyse])
     logger.info('Detected windows values: %s', windows_set)
 
@@ -68,7 +68,7 @@ def process_file(args):
 
         mz_step = hill_mass_accuracy * 1e-6 * max_mz_value
 
-        #Process ion mobility
+        # Process ion mobility.
 
         if all('ignore_ion_mobility' not in z for z in data_for_analyse_tmp):
             logger.debug('%d %d', sum(('ignore_ion_mobility' in z for z in data_for_analyse_tmp)), len(data_for_analyse_tmp))
@@ -112,11 +112,6 @@ def process_file(args):
                 hill_scans_1_list = hills_dict['hills_scan_lists'][idx_1]
                 hill_scans_1_list_first, hill_scans_1_list_last = hill_scans_1_list[0], hill_scans_1_list[-1]
 
-            # df1_features_in_window = df1_features[df1_features['mz'].apply(lambda x: window_val - isolation_window <= x <= window_val + isolation_window)]
-
-
-            # for ms1_mz, ms1_I, ms1_RT, ms1_ch, hill_scans_1, hill_scans_1_list, ms1_intensities, hill_idict_1, hill_sqrt_of_i_1 in df1_features_in_window[['mz', 'intensityApex', 'rtApex','charge', 'mono_hills_scan_sets', 'mono_hills_scan_lists', 'mono_hills_intensity_list', 'hill_idict_1', 'hill_sqrt_of_i_1']].values:
-
                 hill_scans_1 = hills_dict['hills_scan_sets'][idx_1]
                 hills_dict, hill_idict_1, hill_sqrt_of_i_1 = get_and_calc_values_for_cos_corr(hills_dict, idx_1)
 
@@ -142,7 +137,6 @@ def process_file(args):
                             hills_dict, hill_idict_2, hill_sqrt_of_i_2 = get_and_calc_values_for_cos_corr(hills_dict, idx_2)
 
 
-                            # cos_cor_RT = 1.0
                             cos_cor_RT = cos_correlation(hill_scans_1, hill_idict_1, hill_sqrt_of_i_1, hill_scans_2, hill_idict_2, hill_sqrt_of_i_2)
 
 
@@ -150,17 +144,12 @@ def process_file(args):
 
                                 hill_mz_2 = hills_dict['hills_mz_median'][idx_2]
 
-                                # hill_idx_2 = hills_dict['hills_idx_array_unique'][idx_2]
-
                                 hills_dict, _, _ = get_and_calc_apex_intensity_and_scan(hills_dict, idx_2)
 
                                 local_isotopes_dict = {
                                     'm/z': hill_mz_2,
                                     'intensity': hill_intensity_2,
                                 }
-
-                                # if diadynrange and not intensity_threshold:
-                                #     intensity_threshold = hills_dict['hills_intensity_apex'][idx_2] / diadynrange
 
                                 tmp_candidates.append(local_isotopes_dict)
 
@@ -170,17 +159,15 @@ def process_file(args):
                     rtApex = RT_dict[hill_scan_apex_1]
 
 
-                    #FIX THIS!
+                    # Experimental DIA path currently assumes charge 2.
                     ms1_ch = 2
 
 
                     outmgf.write('BEGIN IONS\n')
                     outmgf.write('TITLE=%s.%d.%d.%d\n' % (basename_mzml, t_i, t_i, ms1_ch))
                     outmgf.write('RTINSECONDS=%f\n' % (rtApex * 60, ))
-                    # outmgf.write('PEPMASS=%f %f\n' % (ms1_mz, ms1_I))
                     outmgf.write('PEPMASS=%f %f\n' % (window_val, 1000))
                     outmgf.write('CHARGE=%d+\n' % (ms1_ch, ))
-                    # outmgf.write('MS1Intensity=%f\n' % (ms1_I, ))
                     outmgf.write('IsolationWindow=%f\n' % (isolation_window, ))
                     for local_fragment in tmp_candidates:
                         outmgf.write('%f %f\n' % (local_fragment['m/z'], local_fragment['intensity']))
@@ -189,6 +176,3 @@ def process_file(args):
 
 
         logger.info('Chunk ready')
-        
-
-        # break

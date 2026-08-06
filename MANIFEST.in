@@ -1,6 +1,11 @@
 include requirements.txt
 include VERSION
 include build_support.py
+include design.md
 include biosaur2/cutils.pyx
 include biosaur2/data/*.json
+include examples/README.md
+include examples/hybrid_project_manifest.tsv
+include examples/identification_config.json
 graft docs
+graft updates

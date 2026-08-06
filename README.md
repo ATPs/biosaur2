@@ -11,7 +11,10 @@ with a complete Hybrid workflow: PSM-guided and unidentified-MS2 evidence,
 target/decoy-controlled local recovery, three named abundance measures,
 multi-run RT alignment, strong-to-weak feature matching, unified reusable caches, and
 bounded multi-file execution. The strict upstream-style detector remains
-available as `legacy` mode. See [the update and validation record](updates/2026-07-30.md)
+available as `legacy` mode. See the
+[current release notes](https://github.com/ATPs/biosaur2/blob/main/updates/2026-07-31.md)
+and the earlier
+[Hybrid validation record](https://github.com/ATPs/biosaur2/blob/main/updates/2026-07-30.md)
 for scope and limitations.
 
 ## Install
@@ -19,6 +22,8 @@ for scope and limitations.
 ```bash
 pip install biosaur2
 ```
+
+Biosaur2 0.6.1 supports Python 3.12.
 
 DuckDB is recommended for Parquet and database output:
 
@@ -61,7 +66,8 @@ Hybrid writes two primary files for this input:
 - `results/sample.identifications.parquet`: parsed PSM and direct-assay fields.
 
 An MS2 event with neither a feature nor a PSM is counted in run summaries but
-is not stored as a row. See [Outputs and quantification](docs/outputs-and-quantification.md)
+is not stored as a row. See
+[Outputs and quantification](https://github.com/ATPs/biosaur2/blob/main/docs/outputs-and-quantification.md)
 for several example rows from every output type.
 
 Use one output format for all requested tables:
@@ -77,10 +83,10 @@ creates one `<stem>.biosaur2.duckdb` per input.
 
 ## Several runs
 
-Hybrid project mode lets comparable files assist one another. Shared
-high-confidence peptide/charge observations fit a retention-time mapping. A
-peptide seen in a donor run can guide a search in a recipient run, but the
-reported abundance is always measured from that recipient's own MS1 scans.
+Hybrid project mode lets comparable files assist one another. Final strong
+features establish retention-time alignment between runs. An aligned strong
+feature in another run may support a weak feature candidate already measured
+in the target run, but no peptide identity or source-run abundance is copied.
 
 ```bash
 biosaur2 project run \
@@ -95,8 +101,10 @@ biosaur2 project validate --project-db results/project.duckdb
 
 Each input still receives its own features and identifications outputs. The
 project database records run status, paths, alignment and weak-feature rescue
-summaries. Read [Project workflow](docs/project-workflow.md) for the manifest
-and the difference between same-run search and cross-run matching.
+summaries. Read
+[Project workflow](https://github.com/ATPs/biosaur2/blob/main/docs/project-workflow.md)
+for the manifest and the difference between same-run search and cross-run
+matching.
 
 ## Cache reuse
 
@@ -130,17 +138,17 @@ native pools from exceeding the explicit `--workers` process budget.
 
 ## Learn the terms
 
-- [Getting started](docs/getting-started.md): MS1/MS2, feature, PSM, required
+- [Getting started](https://github.com/ATPs/biosaur2/blob/main/docs/getting-started.md): MS1/MS2, feature, PSM, required
   PSM columns, peptide notation, and fixed modifications.
-- [Parameter guide](docs/parameters.md): everyday and `--help-all` options,
-  including both q-values and local width `auto`.
-- [Hybrid workflow](docs/hybrid-workflow.md): association, target/decoy and
+- [Parameter guide](https://github.com/ATPs/biosaur2/blob/main/docs/parameters.md): everyday and `--help-all` options,
+  including the distinct q-value families and local width `auto`.
+- [Hybrid workflow](https://github.com/ATPs/biosaur2/blob/main/docs/hybrid-workflow.md): association, target/decoy and
   local recovery.
-- [Project workflow](docs/project-workflow.md): cross-run assistance and cache
+- [Project workflow](https://github.com/ATPs/biosaur2/blob/main/docs/project-workflow.md): cross-run assistance and cache
   reuse.
-- [Outputs and quantification](docs/outputs-and-quantification.md): every file,
+- [Outputs and quantification](https://github.com/ATPs/biosaur2/blob/main/docs/outputs-and-quantification.md): every file,
   sample rows, units and queries.
-- [Algorithm design](design.md): authoritative implementation contract.
+- [Algorithm design](https://github.com/ATPs/biosaur2/blob/main/design.md): authoritative implementation contract.
 
 Run `biosaur2 --help` for everyday controls and `biosaur2 --help-all` for all
 advanced and diagnostic controls.

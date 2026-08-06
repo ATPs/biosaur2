@@ -2,7 +2,7 @@ pyteomics>=4.7
 pynumpress>=0.0.9
 psims
 scipy
-numpy>=1.17
+numpy>=1.26
 pandas
 pyarrow
 lxml

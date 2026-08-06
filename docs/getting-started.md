@@ -103,9 +103,10 @@ changing either threshold.
 
 ## Several comparable files
 
-Project mode can use shared identifications to align retention time and look
-for a missing peptide-ion signal in another run. It never transfers donor
-intensity: every accepted value is remeasured from the recipient mzML.
+Project mode aligns runs from their final strong features. A strong feature in
+another compatible run may support a weak isotope-envelope candidate already
+measured in the target run. It does not transfer peptide identity or source-run
+intensity, and the Project stage does not reopen mzML for targeted extraction.
 
 ```bash
 biosaur2 project run --manifest runs.tsv --output-dir results \

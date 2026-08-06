@@ -2,10 +2,10 @@
 
 ## Document status
 
-This document describes the algorithm and workflow implemented in the repository
-as of 2026-07-30. It covers the legacy detector and the opt-in hybrid residual
-workflow. It is an implementation design
-document, not a promise that every MS2 event can always be assigned a feature.
+This document describes the algorithm and workflow implemented in the
+repository. It covers the legacy detector and the opt-in hybrid residual
+workflow. It is an implementation design document, not a promise that every
+MS2 event can always be assigned a feature.
 
 The central scientific objective is to build an accurate, nearly complete,
 de-duplicated MS1 feature population with one reliable quantitative value per
@@ -402,13 +402,16 @@ For each compatible alignment group, Project then:
 2. matches each recipient weak candidate to source-run strong features using
    exact charge/FAIMS, 8 ppm and the unchanged 120 second aligned RT window;
 3. keeps one best support per source run, then at most four supports from
-   distinct source runs.  Supports are ranked by normalized joint m/z/RT
+   distinct source runs. Supports are ranked by normalized joint m/z/RT
    distance with deterministic error, quality and feature-ID tie breaks;
-4. repeats the match after a deterministic neutral-mass decoy shift, competes
-   the best target and decoy for every weak candidate, and estimates q-values
-   independently inside each alignment group using the conservative +1 decoy
-   correction;
-5. promotes target winners at q <= 0.10 into the normal feature output with
+4. repeats the match after a deterministic neutral-mass decoy shift and fits a
+   monotone empirical target/decoy log-likelihood ratio over support-score bins
+   with deterministic two-fold cross-fitting;
+5. sums the calibrated contributions separately for each weak candidate's
+   retained target and decoy supports, competes those aggregate scores, and
+   estimates q-values independently inside each alignment group using the
+   conservative +1 decoy correction;
+6. promotes target winners at q <= 0.10 into the normal feature output with
    `feature_origin=aligned_external_weak`, `external_support_count` and a
    complete evidence record.
 
@@ -427,7 +430,7 @@ results:
 1. **Raw MS1 cache**: compact memory-mappable original centroids and scan
    metadata.
 2. **Strict-stage cache**: ingestion products, strict contexts/features and
-   bounded direct processed-hill competitors. Current format is cache v2.
+   bounded direct processed-hill competitors. Current format is cache v3.
 3. **Candidate cache**: expensive generic target/decoy local candidates keyed
    by the residual ownership state.
 4. **External feature-MBR sidecars**: source-provenanced compact strong-feature
@@ -522,7 +525,10 @@ events with features and PSM-bearing events with identifications.
 | `hills.py`, `cutils.pyx` | Deterministic hill normalization and performance-critical detection routines. |
 | `preprocessing.py`, `raw_ms1.py` | mzML ingestion, MS1/MS2 metadata and compact raw store/cache. |
 | `identifications.py`, `chemistry.py` | Percolator parsing/mapping, modification normalization, exact formulas and isotope libraries. |
-| `hybrid.py` | Direct/generic association, residual recovery, strict protection, quantification assembly and audit finalization. |
+| `hybrid.py` | Stable compatibility imports for Hybrid data types, entry points and selected helpers. |
+| `hybrid_assays.py`, `hybrid_local.py`, `hybrid_strict.py` | Direct assay construction, bounded local extraction, strict-feature association and ownership protection. |
+| `hybrid_direct_stage.py`, `hybrid_generic_stage.py`, `hybrid_residual_stage.py`, `hybrid_postprocess.py` | Hybrid stage orchestration, final residual rechecks, quantification assembly and audit finalization. |
+| `hybrid_generic_association.py`, `hybrid_generic_local.py` | Hybrid-specific generic association, score calibration, local recovery and audit summaries. |
 | `generic_association.py`, `generic_local.py` | Generic precursor association, scoring, local extraction and target/decoy candidates. |
 | `local_refinement.py`, `optimization.py`, `cutils.pyx` | Bounded trace edits, local components and non-negative decomposition. Generic-local component gating (channel support, integration, cosine, apex and score inputs) runs in the Cython numeric kernel; Python retains the evidence policy and output objects. |
 | `residual.py` | Reversible intensity ownership and conservation ledger. |
@@ -534,33 +540,12 @@ events with features and PSM-bearing events with identifications.
 | `project.py`, `project_manifest.py` | Bounded multi-run execution, resume/validation and project metadata. |
 | `output.py`, `legacy_output.py`, `duckdb_output.py` | Atomic output lifecycle, schemas and compact formats. |
 
-## Validated behavior as of 2026-07-30
-
-- Standard residual mode on the frozen 12-run panel linked
-  363,117/514,529 MS2 events to positive-quant features: 70.5727%.
-- Guarded relaxed mode on four runs linked 115,693/165,776 events: 69.7888%,
-  adding 1,119 links over its same-input standard baseline with zero lost
-  standard links and zero lost baseline final-strict scientific rows.
-- The guarded four-run output contained 794,341 features and exactly 794,341
-  positive quant rows; all four residual ledgers conserved intensity.
-- Repeated-MS2 behavior reuses one feature abundance rather than duplicating it.
-- Real cache-v2 validation captured 465 losing-hill matches for 443 direct
-  assays. Seventeen retries were attempted and 14 locally selected, but no new
-  feature/link passed all final gates. This is retained as a safe bounded path,
-  not claimed as a measured coverage improvement.
-- The most recent full test baseline is 215 passed; build, compile, CLI and
-  output validation also passed.
-
 ## Known boundaries
 
 - Reliable coverage is not forced to 100%. Sparse chromatographic traces,
   missing event-scan isotope signal and non-identifiable overlaps remain null.
 - Universal decomposition of distinct overlapping envelopes is not always
   mathematically identifiable. Such cases remain explicit conflicts.
-- External aligned assays are implemented, but the current validation panel
-  produced zero accepted q<=0.01 gain. Confidence thresholds were not weakened.
-- The real processed-hill cache-v2 experiment demonstrated execution and safety
-  but zero final coverage gain on run 1555082.
 
 These boundaries must not be “fixed” by lowering non-MS2 thresholds, accepting
 single-survey-scan features, duplicating shared intensity, copying donor
@@ -574,3 +559,7 @@ confidence control, quantification semantics, output contracts, cache validity,
 mode defaults, or project execution. Small refactors that do not change design
 or observable behavior do not require a design rewrite, but their update notes
 should still state that the design is unchanged.
+
+Date-specific validation results and test counts belong in `updates/`, where
+their dataset and implementation context can be retained without becoming part
+of the current design contract.

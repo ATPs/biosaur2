@@ -9,7 +9,6 @@ from typing import Any, Dict, Iterable, Mapping
 import pyarrow as pa
 
 from .legacy_output import (
-    _CompactParquetSink,
     compact_feature,
     compact_hill,
     compact_ms1,

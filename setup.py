@@ -45,21 +45,33 @@ def make_extensions():
 setup(
     name                 = 'biosaur2',
     version              = version,
-    description          = '''A feature detection LC-MS1 spectra.''',
+    description          = 'Feature detection and quantification for LC-MS1 data.',
     long_description     = (''.join(open('README.md', encoding="utf8").readlines())),
     long_description_content_type = 'text/markdown',
     author               = 'Mark Ivanov',
     author_email         = 'markmipt@gmail.com',
-    install_requires     = [line.strip() for line in open('requirements.txt', encoding="utf8")],
+    url                  = 'https://github.com/ATPs/biosaur2',
+    project_urls         = {
+        'Documentation': 'https://github.com/ATPs/biosaur2/tree/main/docs',
+        'Source': 'https://github.com/ATPs/biosaur2',
+        'Issues': 'https://github.com/ATPs/biosaur2/issues',
+    },
+    python_requires      = '>=3.12',
+    install_requires     = [
+        line.strip()
+        for line in open('requirements.txt', encoding="utf8")
+        if line.strip() and not line.lstrip().startswith('#')
+    ],
     extras_require       = {'duckdb': ['duckdb>=1.0']},
     ext_modules          = make_extensions(),
     classifiers          = ['Intended Audience :: Science/Research',
+                            'Programming Language :: Python :: 3 :: Only',
                             'Programming Language :: Python :: 3.12',
                             'Topic :: Education',
                             'Topic :: Scientific/Engineering :: Bio-Informatics',
                             'Topic :: Scientific/Engineering :: Chemistry',
                             'Topic :: Scientific/Engineering :: Physics'],
-    license              = 'License :: OSI Approved :: Apache Software License',
+    license              = 'Apache-2.0',
     packages             = find_packages(),
     package_data         = {'biosaur2': ['data/*.json']},
     entry_points         = {'console_scripts': ['biosaur2 = biosaur2.search:run',]},

@@ -35,8 +35,6 @@ def process_file(args):
         )
     else:
         df1_features = pd.read_table(output_file)
-        # df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: ast.literal_eval(','.join(x.split(' '))))
-        # df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: x.replace('[', '').replace(']', '').split(' '))#ast.literal_eval(','.join(x.split(' '))))
         df1_features['mono_hills_scan_lists'] = df1_features['mono_hills_scan_lists'].apply(lambda x: ast.literal_eval(x))
         df1_features['mono_hills_intensity_list'] = df1_features['mono_hills_intensity_list'].apply(lambda x: ast.literal_eval(x))
 
@@ -75,12 +73,12 @@ def process_file(args):
     isolation_target_func = lambda x: x['precursorList']['precursor'][0]['isolationWindow']['isolation window target m/z']
     isolation_window_func = lambda x: x['precursorList']['precursor'][0]['isolationWindow']['isolation window lower offset']
 
-    #Process faims
+    # Process FAIMS.
     faims_set = set([z.get('FAIMS compensation voltage', None) for z in data_for_analyse])
     if any(z is not None for z in faims_set):
         logger.info('Detected FAIMS values: %s', faims_set)
 
-    #Process windows
+    # Process isolation windows.
     windows_set = set([isolation_target_func(z) for z in data_for_analyse])
     logger.info('Detected windows values: %s', windows_set)
 
@@ -112,7 +110,7 @@ def process_file(args):
 
         mz_step = hill_mass_accuracy * 1e-6 * max_mz_value
 
-        #Process ion mobility
+        # Process ion mobility.
 
         if all('ignore_ion_mobility' not in z for z in data_for_analyse_tmp):
             logger.debug('%d %d', sum(('ignore_ion_mobility' in z for z in data_for_analyse_tmp)), len(data_for_analyse_tmp))
@@ -135,9 +133,6 @@ def process_file(args):
 
 
         all_hills_idx = list(range(len(hills_dict['hills_idx_array_unique'])))
-        # for idx_2 in all_hills_idx:
-        #     hills_dict, _, _ = get_and_calc_apex_intensity_and_scan(hills_dict, idx_2)
-        # idx_sorted_by_intensity = np.argsort(hills_dict['hills_intensity_apex'])[::-1]
         idx_sorted_by_rt_start = np.argsort([hills_dict['hills_scan_lists'][idx_2][0] for idx_2 in all_hills_idx])
         last_scans_ms2 = np.array([hills_dict['hills_scan_lists'][idx_2][-1] for idx_2 in all_hills_idx])[idx_sorted_by_rt_start]
 
@@ -154,8 +149,6 @@ def process_file(args):
 
 
 
-                # if window_val - isolation_window <= ms1_mz <= window_val + isolation_window:
-
                 if ms1_to_ms2_in_cycle_koef != 1:
                     hill_scans_1 = set(z/ms1_to_ms2_in_cycle_koef for z in hill_scans_1 if z % ms1_to_ms2_in_cycle_koef == 0)
                     hill_scans_1_list = list(hill_scans_1)
@@ -168,32 +161,13 @@ def process_file(args):
                 hill_scans_1_list_first, hill_scans_1_list_last = hill_scans_1_list[0], hill_scans_1_list[-1]
 
                 tmp_candidates = []
-                # start_pos = 0
-                # for start_pos in last_scans_ms2:
-
-                # for idx_2, hill_idx_2 in enumerate(hills_dict['hills_idx_array_unique']):
-                # for idx_2 in idx_sorted_by_intensity:
                 for idx_2 in idx_sorted_by_rt_start[last_scans_ms2 >= hill_scans_1_list_first]:
 
                     hill_scans_2_list = hills_dict['hills_scan_lists'][idx_2]
                     hill_scans_2_list_first = hill_scans_2_list[0]
 
-                    # if hill_scans_2_list_last < hill_scans_1_list_first:
-                    #     pass
-
                     if hill_scans_1_list_last < hill_scans_2_list_first:
                         break
-                # for idx_2 in hills_dict['hills_mz_median_fast_dict'][m_to_check_fast]:
-
-                    # if paseftol is False or idx_2 in hills_dict['hills_im_median_fast_dict'][im_to_check_fast]:
-
-                        # series_2 = idx_2
-
-                    # if diadynrange and intensity_threshold:
-                    #     if hills_dict['hills_intensity_apex'][idx_2] < intensity_threshold:
-                    #         break
-
-                    # if not hill_scans_1_list_last < hill_scans_2_list_first and not hill_scans_2_list_last < hill_scans_1_list_first:
                     hill_scans_2 = hills_dict['hills_scan_sets'][idx_2]
                     if len(hill_scans_1.intersection(hill_scans_2)) >= diaminlh:
 
@@ -201,7 +175,6 @@ def process_file(args):
                         hills_dict, hill_idict_2, hill_sqrt_of_i_2 = get_and_calc_values_for_cos_corr(hills_dict, idx_2)
 
 
-                        # cos_cor_RT = 1.0
                         cos_cor_RT = cos_correlation(hill_scans_1, hill_idict_1, hill_sqrt_of_i_1, hill_scans_2, hill_idict_2, hill_sqrt_of_i_2)
 
 
@@ -209,17 +182,12 @@ def process_file(args):
 
                             hill_mz_2 = hills_dict['hills_mz_median'][idx_2]
 
-                            # hill_idx_2 = hills_dict['hills_idx_array_unique'][idx_2]
-
                             hills_dict, _, _ = get_and_calc_apex_intensity_and_scan(hills_dict, idx_2)
 
                             local_isotopes_dict = {
                                 'm/z': hill_mz_2,
                                 'intensity': hills_dict['hills_intensity_apex'][idx_2],
                             }
-
-                            # if diadynrange and not intensity_threshold:
-                            #     intensity_threshold = hills_dict['hills_intensity_apex'][idx_2] / diadynrange
 
                             tmp_candidates.append(local_isotopes_dict)
 

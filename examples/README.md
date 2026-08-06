@@ -1,8 +1,8 @@
 # Example input and outputs
 
-This directory contains a small, real mzML input and the retained biosaur2
-0.3.2 compatibility fixtures. New 0.4 expectations are exercised from this
-input by the automated integration tests rather than committed as large files.
+This directory contains a small, real mzML input and retained regression
+fixtures for TSV and Parquet output. Automated integration tests regenerate
+outputs from the input without committing additional large files.
 
 ## Input provenance
 
@@ -36,18 +36,16 @@ reproducibility:
 
 ```bash
 biosaur2 PXD010154_1554451_middle.mzML.gz \
-  --workers 1 -write_hills --hills_format tsv \
-  --write_ms1 --ms1_format tsv --feature_format tsv
+  --workers 1 --write-hills --write-ms1 --format tsv
 
 biosaur2 PXD010154_1554451_middle.mzML.gz \
-  --workers 1 -write_hills --hills_format parquet \
-  --write_ms1 --ms1_format parquet --feature_format parquet
+  --workers 1 --write-hills --write-ms1 --format parquet
 ```
 
-In 0.4, a compressed input produces `*.features`, `*.hills`, and `*.ms1` names
-without the redundant `.mzML` component. Feature/hill scalar RT remains in
-minutes; MS1 RT and hill point RT use seconds. Parquet feature output is one
-compact file and does not create normalized sidecars or a manifest.
+A compressed input produces `*.features`, `*.hills`, and `*.ms1` names without
+the redundant `.mzML` component. Feature/hill scalar RT remains in minutes;
+MS1 RT and hill point RT use seconds. Parquet feature output is one compact
+file and does not create normalized sidecars or a manifest.
 
 ## Output files
 
@@ -102,8 +100,9 @@ ms1 = pd.read_parquet("PXD010154_1554451_middle.ms1.parquet")
 print(features.head())
 ```
 
-Both hills formats can also be used as biosaur2 input. These pre-0.4 files use
-minutes, so 0.4 requires the explicit unit override:
+Both hills formats can also be used as biosaur2 input. The committed regression
+fixtures store hill point RT in minutes, so they require an explicit unit
+override:
 
 ```bash
 biosaur2 PXD010154_1554451_middle.hills.tsv --input-rt-unit minutes

@@ -922,7 +922,6 @@ def process_file(args):
 def _prepare_mzml_processing(
     args, input_file_path, strict_stage_cache_args, identification_result
 ):
-    write_header = True
     strict_stage_payload = None
     strict_stage_manifest = None
     strict_stage_cache = args.get('hybrid_stage_cache_dir')
@@ -994,7 +993,6 @@ def _prepare_mzml_processing(
         utils.write_ms1_output(ingestion.ms1_rows, args)
     if args.get('write_ms2', False):
         utils.write_ms2_output(ingestion.ms2_rows, args)
-    data_for_analyse = ingestion.spectra
     assay_result = AssayBuildResult((), (), {})
     if args.get('feature_mode') == 'hybrid' and identification_result is not None:
         direct_assay_started = _debug_stage_start(

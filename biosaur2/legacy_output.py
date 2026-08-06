@@ -357,10 +357,9 @@ class _CompactParquetSink:
 class CompactOutputManager:
     """Own compact feature, hills, and MS1 outputs for one input."""
 
-    def __init__(self, args, compatibility_suffix=False):
+    def __init__(self, args):
         self.args = args
         self.overwrite = bool(args.get("overwrite"))
-        self.compatibility_suffix = compatibility_suffix
         self.prefix = self._prefix()
         self.schemas = compact_schemas(
             use64=bool(args.get("use64")),

@@ -365,6 +365,9 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
         (("--external-min-support-runs", "0"), "positive integer"),
         (("--external-max-support-runs", "17"), "at most 16"),
         (("--external-min-support-runs", "5", "--external-max-support-runs", "4"), "cannot exceed"),
+        (("--psm-q-value-max", "nan"), "finite and in [0, 1]"),
+        (("--psm-q-value-max", "1.1"), "finite and in [0, 1]"),
+        (("--psm-pep-max", "-0.1"), "finite and in [0, 1]"),
     ],
 )
 def test_project_external_rescue_options_are_validated(tmp_path, options, message):

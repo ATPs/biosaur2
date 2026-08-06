@@ -14,6 +14,7 @@ from biosaur2.external_mbr import (
     _fit_empirical_support_llr,
     _json_default,
     _outcome_status,
+    _write_evidence,
     build_feature_alignment_models,
     read_feature_sidecars,
     run_feature_mbr_stage,
@@ -55,6 +56,44 @@ def _candidate_row(mz=700.0):
         "isotope_cosine": 0.75, "mass_error_ppm_median": 0.0,
         "ms2_events": [],
     }
+
+
+def test_external_evidence_schema_is_stable_for_empty_output(tmp_path):
+    empty_path = tmp_path / "empty.parquet"
+    populated_path = tmp_path / "populated.parquet"
+    _write_evidence(empty_path, [])
+    _write_evidence(populated_path, [{
+        "target_run": "target",
+        "weak_candidate_id": 1,
+        "feature_id": None,
+        "source_run": None,
+        "source_feature_id": None,
+        "support_rank": None,
+        "support_score": None,
+        "mz_error_ppm": None,
+        "support_log_likelihood_ratio": None,
+        "rt_error_sec": None,
+        "predicted_rt_sec": None,
+        "target_support_count": 0,
+        "decoy_support_count": 0,
+        "target_score": None,
+        "decoy_score": None,
+        "competition_winner": "none",
+        "acceptance_q_value": 1.0,
+        "status": "no_external_support",
+        "alignment_method": None,
+        "alignment_anchor_count": None,
+        "alignment_residual_mad_sec": None,
+    }])
+
+    empty_schema = pq.read_schema(empty_path)
+    populated_schema = pq.read_schema(populated_path)
+    assert empty_schema == populated_schema
+    assert empty_schema.field("weak_candidate_id").type == pa.int64()
+    assert empty_schema.field("support_score").type == pa.float64()
+    assert empty_schema.metadata[
+        b"biosaur2_external_evidence_schema_version"
+    ] == b"1"
 
 
 def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):

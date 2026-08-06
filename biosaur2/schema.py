@@ -119,6 +119,15 @@ MERGED_ASSAY_COLUMNS = (
 MERGED_IDENTIFICATION_COLUMNS = IDENTIFICATION_COLUMNS + MERGED_ASSAY_COLUMNS
 
 MS2_SCHEMA_VERSION = "1"
+EXTERNAL_EVIDENCE_SCHEMA_VERSION = "1"
+EXTERNAL_EVIDENCE_COLUMNS = (
+    "target_run", "weak_candidate_id", "feature_id", "source_run",
+    "source_feature_id", "support_rank", "support_score", "mz_error_ppm",
+    "support_log_likelihood_ratio", "rt_error_sec", "predicted_rt_sec",
+    "target_support_count", "decoy_support_count", "target_score",
+    "decoy_score", "competition_winner", "acceptance_q_value", "status",
+    "alignment_method", "alignment_anchor_count", "alignment_residual_mad_sec",
+)
 MS2_MISSING_PRECURSOR_MZ = 0x0001
 MS2_MISSING_CHARGE = 0x0002
 MS2_UNRESOLVED_SPECTRUM_REF = 0x0004
@@ -366,6 +375,38 @@ def _merged_identification_schema():
     )
 
 
+def _external_evidence_schema():
+    integer_fields = {
+        "weak_candidate_id", "feature_id", "source_feature_id", "support_rank",
+        "target_support_count", "decoy_support_count", "alignment_anchor_count",
+    }
+    float_fields = {
+        "support_score", "mz_error_ppm", "support_log_likelihood_ratio",
+        "rt_error_sec", "predicted_rt_sec", "target_score", "decoy_score",
+        "acceptance_q_value", "alignment_residual_mad_sec",
+    }
+    required = {
+        "target_run", "weak_candidate_id", "target_support_count",
+        "decoy_support_count", "competition_winner", "acceptance_q_value",
+        "status",
+    }
+    fields = []
+    for name in EXTERNAL_EVIDENCE_COLUMNS:
+        data_type = (
+            pa.int64()
+            if name in integer_fields
+            else pa.float64()
+            if name in float_fields
+            else pa.string()
+        )
+        fields.append(pa.field(name, data_type, nullable=name not in required))
+    return pa.schema(fields).with_metadata({
+        b"biosaur2_external_evidence_schema_version": (
+            EXTERNAL_EVIDENCE_SCHEMA_VERSION.encode()
+        )
+    })
+
+
 def compact_schemas(
     use64=False,
     include_mono=True,
@@ -380,6 +421,7 @@ def compact_schemas(
         "ms2": _ms2_schema(),
         "identifications": _identification_schema(),
         "merged_identifications": _merged_identification_schema(),
+        "external_evidence": _external_evidence_schema(),
     }
 
 

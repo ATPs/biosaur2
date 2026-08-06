@@ -1,6 +1,19 @@
 """Generic MS2 association and local recovery stage."""
 
+from collections import Counter
+from dataclasses import replace
+import logging
+import time
+
+from .generic_local import (
+    cluster_compatible_generic_candidates,
+    compete_generic_local_candidates,
+    generic_local_width_limit,
+)
 from .hybrid_runtime import *
+
+
+logger = logging.getLogger(__name__)
 
 
 def _run_generic_enabled_stage(**kwargs):
@@ -156,26 +169,17 @@ def _run_generic_enabled_stage(**kwargs):
 
 def _apply_standard_generic_results(state):
     run_id = state["run_id"]
-    ingestion = state["ingestion"]
-    strict_contexts = state["strict_contexts"]
     args = state["args"]
     audit_by_event = state["audit_by_event"]
     strict_index = state["strict_index"]
     strict_hill_claims = state["strict_hill_claims"]
     residual_ledger = state["residual_ledger"]
     residual_allocation_status_counts = state["residual_allocation_status_counts"]
-    strict_ownership = state["strict_ownership"]
-    strict_quant_rows = state["strict_quant_rows"]
     recovered = state["recovered"]
-    recovered_quant_rows = state["recovered_quant_rows"]
-    local_candidate_cache_telemetry = state["local_candidate_cache_telemetry"]
     next_feature_id = state["next_feature_id"]
-    final_strict_detector = state["final_strict_detector"]
-    generic_summary = state["generic_summary"]
     generic_recovered_feature_rows = state["generic_recovered_feature_rows"]
     generic_recovered_quant_rows = state["generic_recovered_quant_rows"]
     generic_recovered = state["generic_recovered"]
-    generic_score_weights = state["generic_score_weights"]
     local_competitions = state["local_competitions"]
     local_ppm = state["local_ppm"]
     local_status_counts = state["local_status_counts"]
@@ -346,26 +350,20 @@ def _apply_standard_generic_results(state):
 
 def _run_relaxed_generic_recovery(state):
     run_id = state["run_id"]
-    ingestion = state["ingestion"]
     strict_contexts = state["strict_contexts"]
     args = state["args"]
     audit_by_event = state["audit_by_event"]
-    strict_index = state["strict_index"]
     strict_hill_claims = state["strict_hill_claims"]
     residual_ledger = state["residual_ledger"]
     residual_allocation_status_counts = state["residual_allocation_status_counts"]
     strict_ownership = state["strict_ownership"]
-    strict_quant_rows = state["strict_quant_rows"]
     recovered = state["recovered"]
-    recovered_quant_rows = state["recovered_quant_rows"]
     local_candidate_cache_telemetry = state["local_candidate_cache_telemetry"]
     next_feature_id = state["next_feature_id"]
     final_strict_detector = state["final_strict_detector"]
-    generic_summary = state["generic_summary"]
     generic_recovered_feature_rows = state["generic_recovered_feature_rows"]
     generic_recovered_quant_rows = state["generic_recovered_quant_rows"]
     generic_recovered = state["generic_recovered"]
-    generic_score_weights = state["generic_score_weights"]
     local_events = state["local_events"]
     decoy_events = state["decoy_events"]
     local_workers = state["local_workers"]
@@ -745,22 +743,12 @@ def _apply_relaxed_generic_results(
 
 
 def _finalize_generic_stage(state):
-    run_id = state["run_id"]
-    ingestion = state["ingestion"]
-    strict_contexts = state["strict_contexts"]
     args = state["args"]
     audit_by_event = state["audit_by_event"]
-    strict_index = state["strict_index"]
-    strict_hill_claims = state["strict_hill_claims"]
-    residual_ledger = state["residual_ledger"]
-    residual_allocation_status_counts = state["residual_allocation_status_counts"]
-    strict_ownership = state["strict_ownership"]
     strict_quant_rows = state["strict_quant_rows"]
-    recovered = state["recovered"]
     recovered_quant_rows = state["recovered_quant_rows"]
     local_candidate_cache_telemetry = state["local_candidate_cache_telemetry"]
     next_feature_id = state["next_feature_id"]
-    final_strict_detector = state["final_strict_detector"]
     generic_summary = state["generic_summary"]
     generic_recovered_feature_rows = state["generic_recovered_feature_rows"]
     generic_recovered_quant_rows = state["generic_recovered_quant_rows"]
