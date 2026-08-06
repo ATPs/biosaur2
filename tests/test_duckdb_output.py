@@ -153,15 +153,31 @@ def test_duckdb_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     manager.finalize()
     metadata = pq.ParquetFile(tmp_path / "result.features.parquet").metadata.metadata
     provenance = json.loads(metadata[b"biosaur2_provenance_json"])
-    assert provenance["hybrid_schema_version"] == "7"
+    assert provenance["hybrid_schema_version"] == "8"
     assert json.loads(provenance["hybrid_summary_json"]) == args["_hybrid_summary"]
     assert (tmp_path / "result.identifications.parquet").is_file()
+    assert (tmp_path / "result.ms2_events.parquet").is_file()
     assert not (tmp_path / "result.identifications.tsv").exists()
 
 
 def test_hybrid_duckdb_writes_no_parquet_or_tsv_sidecars(tmp_path):
     args = _args(tmp_path, database=True, feature_mode="hybrid")
     manager = DuckDBOutputManager(args)
+    manager.append_hybrid_results(
+        [_feature()],
+        [{"feature_id": 1, "quant_value": 42.0}],
+        [{"ms2_event_id": 7, "feature_id": 1}],
+        [{
+            "ms2_event_id": 7,
+            "native_id": "scan=42",
+            "native_scan_number": 42,
+            "rt_sec": 120.5,
+            "precursor_mz": 500.25,
+            "charge": 2,
+        }],
+        [],
+        [],
+    )
     manager.finalize()
 
     database_path = tmp_path / "result.duckdb"
@@ -172,7 +188,15 @@ def test_hybrid_duckdb_writes_no_parquet_or_tsv_sidecars(tmp_path):
         assert {row[0] for row in connection.execute("show tables").fetchall()} == {
             "features",
             "identifications",
+            "ms2_events",
             "runs",
+        }
+        assert connection.execute(
+            "SELECT feature_idx, ms2_event_id, native_scan_number "
+            "FROM ms2_events"
+        ).fetchone() == (1, 7, 42)
+        assert "ms2_events" not in {
+            row[0] for row in connection.execute("DESCRIBE features").fetchall()
         }
 
 

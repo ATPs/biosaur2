@@ -185,6 +185,8 @@ def test_help_documents_everyday_output_contract():
         assert text in result.stdout
     for advanced in (
         "--write-ms2",
+        "--write-mono-hills",
+        "--write-quant-details",
         "--write-extra-details",
         "--generic-ms2-isotope-errors",
         "--generic-local-max-width-sec",

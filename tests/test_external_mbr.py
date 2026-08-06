@@ -168,7 +168,9 @@ def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
     assert stage["summaries"]["target"]["new_weak_external_feature_count"] == 20
     output = pq.read_table(paths_by_run["target"]["features"]).to_pylist()
     assert output[0]["feature_origin"] == "aligned_external_weak"
-    assert output[0]["envelope_apex"] == pytest.approx(100.0)
+    assert output[0]["quant_envelope_apex"] == pytest.approx(100.0)
+    assert output[0]["rtApex"] == pytest.approx(170.0 / 60.0)
+    assert output[0]["rt_apex_sec"] == pytest.approx(170.0)
     evidence = pq.read_table(paths_by_run["target"]["external_evidence"]).to_pylist()
     assert evidence[0]["status"] == "accepted_matched_weak_feature"
     assert evidence[0]["target_support_count"] == 4

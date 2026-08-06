@@ -442,10 +442,11 @@ Input notes:
   PSM table.
 
 Outputs:
-  Legacy mode defaults to <stem>.features.tsv. Hybrid mode defaults to two
-  Parquet files: <stem>.features.parquet contains feature coordinates,
-  quantification and linked MS2 events; <stem>.identifications.parquet contains
-  accepted PSM fields and direct-assay fields. --format duckdb stores the same
+  Legacy mode defaults to <stem>.features.tsv. Hybrid mode defaults to three
+  Parquet files: <stem>.features.parquet contains feature coordinates and
+  quantification; <stem>.ms2_events.parquet links spectra by feature_idx;
+  <stem>.identifications.parquet contains accepted PSM and direct-assay fields.
+  --format duckdb stores the same
   tables in one <stem>.biosaur2.duckdb database per input.
 
 Examples:
@@ -679,7 +680,17 @@ Advanced output notes:
     )
     parser.add_argument(
         '--no-mono-hills',
-        help=_advanced_help(show_all, 'omit monoisotopic hill point arrays from feature output'),
+        help=_advanced_help(show_all, 'legacy output: omit monoisotopic hill point arrays'),
+        action='store_true',
+    )
+    parser.add_argument(
+        '--write-mono-hills',
+        help=_advanced_help(show_all, 'hybrid output: include monoisotopic hill point arrays (omitted by default)'),
+        action='store_true',
+    )
+    parser.add_argument(
+        '--write-quant-details',
+        help=_advanced_help(show_all, 'hybrid output: include raw and baseline-corrected envelope/mono area columns'),
         action='store_true',
     )
     parser.add_argument(
@@ -752,8 +763,14 @@ def _run_with_parser(parser):
     if args['feature_mode'] == 'hybrid':
         if args['write_ms2']:
             parser.error('--write-ms2 is a legacy-only diagnostic option.')
+        if args['no_mono_hills']:
+            parser.error('--no-mono-hills is unnecessary in hybrid mode; mono hill arrays are omitted by default.')
         args['feature_baseline'] = args['feature_baseline'] or 'edge_linear'
     else:
+        if args['write_mono_hills']:
+            parser.error('--write-mono-hills is a hybrid-only option.')
+        if args['write_quant_details']:
+            parser.error('--write-quant-details is a hybrid-only option.')
         args['feature_baseline'] = args['feature_baseline'] or 'none'
     if args['generic_local_isotope_count'] > 10:
         parser.error('--generic-local-isotope-count must be at most 10.')

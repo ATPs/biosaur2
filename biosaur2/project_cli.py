@@ -155,6 +155,8 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument("--psm-pep-max", type=float, default=None, help=_advanced_help(show_all, "optional maximum PSM posterior error probability; none disables this filter"))
         parser.add_argument("--fixed-mod", action="append", default=[], help="explicit repeatable fixed modification SITE=MOD, for example C=UNIMOD:4")
         parser.add_argument("--quant-method", choices=("all", "envelope_area", "mono_area", "envelope_apex"), default="all", help="quantification output; all reports every metric and uses envelope area as quant_value")
+        parser.add_argument("--write-mono-hills", action="store_true", help=_advanced_help(show_all, "include monoisotopic hill point arrays in Hybrid feature output"))
+        parser.add_argument("--write-quant-details", action="store_true", help=_advanced_help(show_all, "include raw and baseline-corrected Hybrid area columns"))
         parser.add_argument("--feature-baseline", choices=("none", "edge_linear"), default="edge_linear", help=_advanced_help(show_all, "baseline preprocessing before hybrid feature quantification"))
         parser.add_argument("--direct-id", action=argparse.BooleanOptionalAction, default=True, help=_advanced_help(show_all, "enable/disable q-filtered same-run direct PSM assays in hybrid mode"))
         parser.add_argument("--external-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable weak-candidate generation and cross-run strong-feature support inside compatible alignment groups")
@@ -214,6 +216,12 @@ README.md and examples/hybrid_project_manifest.tsv.
         args.format = args.format or (
             "parquet" if args.mode == "hybrid" else "tsv"
         )
+        if args.mode != "hybrid" and (
+            args.write_mono_hills or args.write_quant_details
+        ):
+            parser.error(
+                "--write-mono-hills and --write-quant-details require --mode hybrid"
+            )
         if args.workers < 1:
             parser.error("--workers must be positive")
         if args.max_charge < 1:

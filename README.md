@@ -59,10 +59,12 @@ biosaur2 sample.mzML.gz \
   -o results/sample.features.parquet
 ```
 
-Hybrid writes two primary files for this input:
+Hybrid writes three primary files for this input:
 
 - `results/sample.features.parquet`: feature coordinates, quality,
-  quantification, and zero or more linked MS2 events in `ms2_events`.
+  and quantification.
+- `results/sample.ms2_events.parquet`: feature-linked MS2 references, joined
+  to features by `feature_idx`.
 - `results/sample.identifications.parquet`: parsed PSM and direct-assay fields.
 
 An MS2 event with neither a feature nor a PSM is counted in run summaries but
@@ -99,7 +101,7 @@ biosaur2 project run \
 biosaur2 project validate --project-db results/project.duckdb
 ```
 
-Each input still receives its own features and identifications outputs. The
+Each input still receives its own features, linked-MS2 and identifications outputs. The
 project database records run status, paths, alignment and weak-feature rescue
 summaries. Read
 [Project workflow](https://github.com/ATPs/biosaur2/blob/main/docs/project-workflow.md)

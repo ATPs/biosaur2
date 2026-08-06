@@ -193,10 +193,13 @@ def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
     )
     if output_format == "duckdb":
         run_output = directory / (run.run_id + ".biosaur2.duckdb")
-        features = identifications = str(run_output)
+        features = ms2_events = identifications = str(run_output)
     else:
         run_output = None
         features = str(directory / (run.run_id + ".features." + output_format))
+        ms2_events = str(
+            directory / (run.run_id + ".ms2_events." + output_format)
+        )
         identifications = str(
             directory / (run.run_id + ".identifications." + output_format)
         )
@@ -205,6 +208,7 @@ def _run_paths(run, output_dir, cache_workspace=None, output_format="parquet"):
         "format": output_format,
         "run_output": None if run_output is None else str(run_output),
         "features": features,
+        "ms2_events": ms2_events,
         "identifications": identifications,
         "external_evidence": (
             str(run_output)
@@ -248,6 +252,10 @@ def _command_for_run(run, paths, options):
         for value in fixed:
             command.extend(("--fixed-mod", value))
         command.extend(("--quant-method", options["quant_method"]))
+        if options.get("write_mono_hills"):
+            command.append("--write-mono-hills")
+        if options.get("write_quant_details"):
+            command.append("--write-quant-details")
         command.extend(("--feature-baseline", options["feature_baseline"]))
         command.append("--direct-id" if options["direct_id"] else "--no-direct-id")
         command.append("--external-id" if options["external_id"] else "--no-external-id")
@@ -379,11 +387,14 @@ def _summary_for_result(result):
         summary["quant_feature_count"] = sum(
             bool(row.get("quant_value")) for row in feature_rows
         )
-        summary["linked_ms2_count"] = sum(
-            len(json.loads(row["ms2_events"]))
-            for row in feature_rows
-            if row.get("ms2_events")
-        )
+        ms2_events_path = Path(paths["ms2_events"])
+        if ms2_events_path.is_file():
+            with ms2_events_path.open(
+                "r", encoding="utf-8", newline=""
+            ) as handle:
+                summary["linked_ms2_count"] = sum(
+                    1 for _ in csv.DictReader(handle, delimiter="\t")
+                )
         summary["ms2_count"] = summary["linked_ms2_count"]
         summary["audit_count"] = summary["linked_ms2_count"]
         identification_path = Path(paths["identifications"])
@@ -401,7 +412,12 @@ def _summary_for_result(result):
     feature_rows = features.to_pylist()
     summary["feature_count"] = len(feature_rows)
     summary["quant_feature_count"] = len(feature_rows)
-    linked = sum(len(row.get("ms2_events") or ()) for row in feature_rows)
+    linked = 0
+    ms2_events_path = Path(paths["ms2_events"])
+    if ms2_events_path.is_file():
+        linked = _read_output_table(
+            ms2_events_path, "ms2_events"
+        ).num_rows
     summary["ms2_count"] = linked
     summary["audit_count"] = linked
     summary["linked_ms2_count"] = linked
@@ -458,7 +474,8 @@ def _write_project_database(
             "cpu_user_sec DOUBLE, cpu_system_sec DOUBLE, peak_rss_kib BIGINT, "
             "allocated_workers INTEGER, "
             "output_format VARCHAR, run_output_path VARCHAR, "
-            "features_path VARCHAR, identification_path VARCHAR, "
+            "features_path VARCHAR, ms2_events_path VARCHAR, "
+            "identification_path VARCHAR, "
             "external_evidence_path VARCHAR, raw_ms1_cache_path VARCHAR, "
             "input_fingerprint_json VARCHAR, command_json VARCHAR)"
         )
@@ -507,7 +524,7 @@ def _write_project_database(
             paths = result["paths"]
             summary = _summary_for_result(result)
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     index,
                     run.run_id,
@@ -523,6 +540,7 @@ def _write_project_database(
                     paths.get("format", options.get("format", "parquet")),
                     paths.get("run_output"),
                     paths["features"],
+                    paths["ms2_events"],
                     paths["identifications"],
                     paths.get("external_evidence"),
                     paths["raw_ms1_cache"],
@@ -727,7 +745,7 @@ def _write_project_database(
                 [stage, json.dumps(summary, sort_keys=True)],
             )
         connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', '10')"
+            "INSERT INTO project_metadata VALUES ('project_schema_version', '11')"
         )
         connection.execute(
             "INSERT INTO project_metadata VALUES ('resolved_options', ?)",
@@ -818,6 +836,7 @@ def run_project(manifest, output_dir, project_db, **options):
         resume_record = successful.get(run.run_id)
         required_paths = [paths["run_output"] or paths["features"]]
         if options["mode"] == "hybrid":
+            required_paths.append(paths["run_output"] or paths["ms2_events"])
             required_paths.append(paths["run_output"] or paths["identifications"])
         resume_valid = (
             resume_record is not None

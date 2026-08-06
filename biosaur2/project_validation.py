@@ -9,7 +9,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .schema import compact_schemas
+from .schema import LINKED_MS2_EVENT_COLUMNS, compact_schemas
 
 
 def _parse_tsv_value(value, data_type):
@@ -40,11 +40,11 @@ def _read_output_table(path, table_name):
                 'SELECT * FROM "%s"' % table_name.replace('"', '""')
             ).fetch_arrow_table()
     if source.suffix.lower() == ".tsv":
-        schema_name = (
-            "hybrid_features"
-            if table_name == "features"
-            else "merged_identifications"
-        )
+        schema_name = {
+            "features": "hybrid_features",
+            "ms2_events": "linked_ms2_events",
+            "identifications": "merged_identifications",
+        }[table_name]
         schema = compact_schemas()[schema_name]
         fields = {field.name: field for field in schema}
         with source.open("r", encoding="utf-8", newline="") as handle:
@@ -67,7 +67,8 @@ def validate_project(project_db):
     with duckdb.connect(str(database), read_only=True) as connection:
         runs = connection.execute(
             "SELECT run_id, status, output_format, run_output_path, "
-            "features_path, identification_path, external_evidence_path "
+            "features_path, ms2_events_path, identification_path, "
+            "external_evidence_path "
             "FROM runs ORDER BY run_order"
         ).fetchall()
         metadata = dict(
@@ -86,6 +87,7 @@ def validate_project(project_db):
         output_format,
         run_output,
         features,
+        ms2_events,
         identifications,
         external,
     ) in runs:
@@ -106,6 +108,50 @@ def validate_project(project_db):
         ):
             problems.append("%s has invalid/duplicate feature IDs" % run_id)
         if mode == "hybrid":
+            if "ms2_events" in feature_table.column_names:
+                problems.append(
+                    "%s still embeds ms2_events in its feature table" % run_id
+                )
+            if not Path(ms2_events).is_file():
+                problems.append(
+                    "%s is missing linked MS2 output %s"
+                    % (run_id, ms2_events)
+                )
+            else:
+                try:
+                    event_table = _read_output_table(ms2_events, "ms2_events")
+                    if event_table.column_names != list(LINKED_MS2_EVENT_COLUMNS):
+                        problems.append(
+                            "%s has an unexpected linked MS2 schema" % run_id
+                        )
+                    else:
+                        linked_feature_ids = event_table.column(
+                            "feature_idx"
+                        ).to_pylist()
+                        event_ids = event_table.column(
+                            "ms2_event_id"
+                        ).to_pylist()
+                        feature_id_set = set(feature_ids)
+                        if any(
+                            value is None or value not in feature_id_set
+                            for value in linked_feature_ids
+                        ):
+                            problems.append(
+                                "%s has orphan linked MS2 feature IDs" % run_id
+                            )
+                        if (
+                            any(value is None or value < 0 for value in event_ids)
+                            or len(event_ids) != len(set(event_ids))
+                        ):
+                            problems.append(
+                                "%s has invalid/duplicate linked MS2 event IDs"
+                                % run_id
+                            )
+                except Exception as error:
+                    problems.append(
+                        "%s has an unreadable linked MS2 table: %s"
+                        % (run_id, error)
+                    )
             if not Path(identifications).is_file():
                 problems.append(
                     "%s is missing identifications output %s"

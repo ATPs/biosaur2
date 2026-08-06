@@ -355,9 +355,9 @@ The default `--quant-method all` writes these values as
 `quant_envelope_area`, `quant_mono_area`, and `quant_envelope_apex`, while
 keeping envelope area as the primary `quant_value`. Selecting one named method
 changes the primary scalar but does not remove the three explicit columns.
-`edge_linear` or `none` is optional baseline preprocessing. Raw and corrected areas are retained. If baseline
-correction would be unreliable, the raw value is retained with an explicit
-status/quality flag.
+`edge_linear` or `none` is optional baseline preprocessing. The compact output
+retains the selected values and an explicit status/quality flag. Raw and
+corrected areas are added only with `--write-quant-details`.
 
 Every accepted feature has exactly one positive quantification row containing
 its method, status, origin, confidence tier, quality flags, isotope cosine,
@@ -473,27 +473,29 @@ at one thread before numerical modules load.
 
 ## Output contract
 
-Hybrid mode publishes a single de-duplicated population in two primary tables:
+Hybrid mode publishes a single de-duplicated population in three primary tables:
 
 | Output | Contract |
 |---|---|
-| `<stem>.features.parquet` | One row per accepted MS1 feature, including its quantification fields and a typed list of zero or more linked MS2 event/audit structs. |
+| `<stem>.features.parquet` | One row per accepted MS1 feature, including compact quantification and evidence fields. |
+| `<stem>.ms2_events.parquet` | One row per feature-linked MS2 event, containing `feature_idx`, stable/raw spectrum references, RT, precursor m/z and charge. |
 | `<stem>.identifications.parquet` | One accepted parsed PSM row with nullable direct-assay fields merged into the same row. PSM-bearing events may remain even when no feature was obtained. |
 | `<stem>.external_id_evidence.parquet` | Project-only source-run support rows and rejected weak-candidate target/decoy outcomes. |
 | `<stem>.biosaur2.duckdb` | Per-input alternative containing the same run tables; project processing adds external evidence to that run's database. |
 | `project.duckdb` | Run status, paths, resolved options, stage/cache summaries, alignment and validation metadata. |
 
 Feature IDs are positive and unique. Every feature has exactly one merged
-quantitative record. Every persisted `ms2_events` member references its parent
-positive-quant feature. Internal audit finalization still classifies every MS2
+quantitative record. Every persisted `ms2_events.feature_idx` references its
+parent positive-quant feature and every `ms2_event_id` is unique within a run.
+Internal audit finalization still classifies every MS2
 event, but an event with neither a feature nor a PSM is retained only in
 summary counts, not as a public row. Project validation checks the published
 contracts before considering a run successful.
 
 One public `--format {tsv,parquet,duckdb}` controls all requested outputs.
 Legacy defaults to TSV and Hybrid defaults to Parquet. `--write-ms2` is a
-legacy-only normalized-precursor diagnostic because Hybrid stores linked
-events with features and PSM-bearing events with identifications.
+legacy-only normalized-precursor diagnostic because Hybrid stores compact
+linked-event references separately and PSM-bearing events in identifications.
 
 ## Important defaults
 
@@ -505,6 +507,8 @@ events with features and PSM-bearing events with identifications.
 | maximum charge | 7 | Charge hypotheses/features up to z=7. |
 | output format | legacy: `tsv`; hybrid: `parquet` | One format control for all run tables. |
 | quantification | `all` | Report envelope area, mono area and envelope apex; envelope area is `quant_value`. |
+| Hybrid mono traces | omitted | `--write-mono-hills` adds the two monoisotopic point arrays. |
+| Hybrid raw/corrected areas | omitted | `--write-quant-details` adds four baseline diagnostic columns. |
 | project baseline | `edge_linear` | Optional baseline preprocessing. |
 | generic extraction q-value maximum | 0.01 | Separate target/decoy family; configurable. |
 | generic selected-isotope errors | `0,1,2,3` | Test a selected peak interpreted as M through M+3. |

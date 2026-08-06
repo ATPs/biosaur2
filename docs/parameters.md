@@ -29,6 +29,8 @@ scientific tolerance changes on representative data.
 | `--generic-ms2-ppm` | 10 | Selected-ion precursor tolerance for generic hypotheses. |
 | `--ms2-rt-tolerance-sec` | 120 | Initial same-run raw-MS1 search distance on each side of an MS2 event. It does not match runs. |
 | `--quant-method` | `all` | Report envelope area, mono area and envelope apex; `quant_value` uses envelope area. |
+| `--write-mono-hills` | false | Add monoisotopic scan/intensity point arrays to Hybrid features. |
+| `--write-quant-details` | false | Add raw and baseline-corrected envelope/mono area columns. |
 
 These two same-run q-value thresholds are independent. `--psm-q-value-max`
 asks whether a peptide assignment is reliable. `--generic-q-value-max` asks
@@ -190,12 +192,14 @@ support.
 
 `--help-all` also exposes the established hill/detection tolerances,
 experimental DIA/profile paths, optional `--write-hills`, `--write-ms1`, and
-legacy-only `--write-ms2` diagnostics, TSV precision, and Parquet
+legacy-only `--write-ms2` diagnostics, Hybrid `--write-mono-hills` and
+`--write-quant-details`, TSV precision, and Parquet
 engine/compression/row-group/sort controls. These options are hidden from the
 ordinary help screen to keep the common workflow readable.
 
 `--write-ms2` exports normalized precursor-event metadata only in legacy mode.
-Hybrid already embeds linked events in `features.ms2_events` and keeps PSM-only
-events in `identifications`, so using `--write-ms2` with Hybrid is an error.
+Hybrid writes compact linked events in its `ms2_events` table and keeps
+PSM-only events in `identifications`, so using `--write-ms2` with Hybrid is an
+error.
 
 For lower-level algorithm effects, read [the design](../design.md).

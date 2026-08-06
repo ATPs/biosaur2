@@ -24,9 +24,14 @@ import numpy as np
 from .alignment import AlignmentAnchor, RTAlignmentModel, choose_reference_run, fit_rt_alignment
 from .confidence import TargetDecoyCompetition, deterministic_decoy_shift, target_decoy_q_values
 from .external_alignment import AlignmentForest, MAX_REFERENCE_CANDIDATES, ReferenceStarAlignment, alignment_group_for_run, faims_key
+from .legacy_output import compact_feature
 from .output import _temporary_neighbor, publish_staged_files
 from .raw_ms1 import source_fingerprint
-from .schema import EXTERNAL_EVIDENCE_COLUMNS, compact_schemas
+from .schema import (
+    EXTERNAL_EVIDENCE_COLUMNS,
+    compact_schemas,
+    hybrid_quant_output_columns,
+)
 
 
 SIDECAR_VERSION = "feature-mbr-v3"
@@ -909,19 +914,28 @@ def _write_evidence(path, rows):
     publish_staged_files([(temporary, destination)])
 
 
-def _publish_features(path, accepted):
+def _publish_features(path, accepted, options):
     table = _read_table(path, "features")
     original = table.to_pylist()
     rows = list(original)
     rows = [row for row in rows if row.get("feature_origin") != "aligned_external_weak"]
     next_id = 1 + max((int(row["feature_idx"]) for row in rows if row.get("feature_idx") is not None), default=0)
     for item in sorted(accepted, key=lambda value: value["candidate"].candidate_id):
-        row = json.loads(item["candidate"].row_json)
+        raw = json.loads(item["candidate"].row_json)
+        output_args = dict(options)
+        output_args["feature_mode"] = "hybrid"
+        row = compact_feature(raw, output_args)
+        row.update({
+            name: raw.get(name)
+            for name in hybrid_quant_output_columns(
+                bool(options.get("write_quant_details"))
+            )
+        })
         row.update({
             "feature_idx": next_id, "feature_id": next_id, "feature_origin": "aligned_external_weak",
             "confidence_tier": "external_id_weak", "extraction_q_value": item["competition"].q_value,
             "supporting_psm_count": 0, "supporting_ms2_count": 0,
-            "external_support_count": len(item["targets"]), "ms2_events": [],
+            "external_support_count": len(item["targets"]),
         })
         item["feature_id"] = next_id
         next_id += 1
@@ -1000,7 +1014,11 @@ def run_feature_mbr_stage(runs, results, options):
             if _outcome_status(item, q_value_max)
             == "accepted_matched_weak_feature"
         ]
-        count = _publish_features(result_by_id[run.run_id]["paths"]["features"], accepted)
+        count = _publish_features(
+            result_by_id[run.run_id]["paths"]["features"],
+            accepted,
+            options,
+        )
         for row in evidence.get(run.run_id, ()):
             if row["status"] == "accepted_matched_weak_feature":
                 match = next(item for item in accepted if item["candidate"].candidate_id == row["weak_candidate_id"])

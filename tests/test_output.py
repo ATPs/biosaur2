@@ -6,7 +6,11 @@ import biosaur2.output as output_module
 import biosaur2.search as search_module
 from biosaur2.legacy_output import CompactOutputManager, compact_ms1
 from biosaur2.output import planned_output_paths, round_intensity
-from biosaur2.schema import feature_columns
+from biosaur2.schema import (
+    LINKED_MS2_EVENT_COLUMNS,
+    feature_columns,
+    hybrid_feature_columns,
+)
 
 
 def _args(tmp_path, **updates):
@@ -67,6 +71,7 @@ def test_planned_hybrid_and_duckdb_paths_are_per_input(tmp_path):
     }
     assert planned_output_paths(hybrid) == [
         output / "sample.features.parquet",
+        output / "sample.ms2_events.parquet",
         output / "sample.identifications.parquet",
     ]
 
@@ -203,11 +208,97 @@ def test_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     metadata = pq.ParquetFile(
         tmp_path / "hybrid.features.parquet"
     ).metadata.metadata
-    assert metadata[b"biosaur2_hybrid_schema_version"] == b"7"
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"8"
     assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
         "_hybrid_summary"
     ]
     assert (tmp_path / "hybrid.identifications.parquet").is_file()
+    assert (tmp_path / "hybrid.ms2_events.parquet").is_file()
+
+
+def test_hybrid_splits_compact_linked_ms2_rows_from_features(tmp_path):
+    args = _args(
+        tmp_path,
+        o=str(tmp_path / "hybrid.features.parquet"),
+        format="parquet",
+        feature_mode="hybrid",
+    )
+    manager = CompactOutputManager(args)
+    manager.append_hybrid_results(
+        [_feature()],
+        [{
+            "feature_id": 1,
+            "quant_value": 42.0,
+            "area_envelope_raw": 43.0,
+            "area_envelope_corrected": 42.0,
+            "area_mono_raw": 22.0,
+            "area_mono_corrected": 21.0,
+            "envelope_apex": 9.0,
+            "quant_envelope_apex": 9.0,
+            "feature_quality_score": 0.9,
+            "isotope_cosine": 0.9,
+        }],
+        [{"ms2_event_id": 7, "feature_id": 1}],
+        [{
+            "ms2_event_id": 7,
+            "native_id": "controllerType=0 scan=42",
+            "native_scan_number": 42,
+            "rt_sec": 120.5,
+            "precursor_mz": 500.25,
+            "charge": 2,
+        }],
+        [],
+        [],
+    )
+    manager.finalize()
+
+    feature_schema = pq.read_schema(tmp_path / "hybrid.features.parquet")
+    assert feature_schema.names == list(hybrid_feature_columns())
+    for removed in (
+        "ms2_events",
+        "mono_hills_scan_lists",
+        "area_envelope_raw",
+        "area_envelope_corrected",
+        "area_mono_raw",
+        "area_mono_corrected",
+        "envelope_apex",
+        "feature_quality_score",
+    ):
+        assert removed not in feature_schema.names
+
+    event_table = pq.read_table(tmp_path / "hybrid.ms2_events.parquet")
+    assert event_table.column_names == list(LINKED_MS2_EVENT_COLUMNS)
+    assert event_table.to_pylist() == [{
+        "feature_idx": 1,
+        "ms2_event_id": 7,
+        "native_id": "controllerType=0 scan=42",
+        "native_scan_number": 42,
+        "rt_sec": 120.5,
+        "precursor_mz": 500.25,
+        "charge": 2,
+    }]
+
+
+def test_hybrid_diagnostic_switches_restore_large_optional_columns(tmp_path):
+    args = _args(
+        tmp_path,
+        o=str(tmp_path / "diagnostic.features.parquet"),
+        format="parquet",
+        feature_mode="hybrid",
+        write_mono_hills=True,
+        write_quant_details=True,
+    )
+    manager = CompactOutputManager(args)
+    manager.finalize()
+    names = pq.read_schema(tmp_path / "diagnostic.features.parquet").names
+    assert "mono_hills_scan_lists" in names
+    assert "mono_hills_intensity_list" in names
+    assert "area_envelope_raw" in names
+    assert "area_envelope_corrected" in names
+    assert "area_mono_raw" in names
+    assert "area_mono_corrected" in names
+    assert "envelope_apex" not in names
+    assert "feature_quality_score" not in names
 
 
 def test_hybrid_tsv_writes_only_tsv_feature_and_identification_tables(tmp_path):
@@ -220,8 +311,10 @@ def test_hybrid_tsv_writes_only_tsv_feature_and_identification_tables(tmp_path):
     manager.finalize()
 
     feature_path = tmp_path / "hybrid.features.tsv"
+    ms2_events_path = tmp_path / "hybrid.ms2_events.tsv"
     identification_path = tmp_path / "hybrid.identifications.tsv"
     assert feature_path.is_file()
+    assert ms2_events_path.is_file()
     assert identification_path.is_file()
     assert "canonical_peptidoform" in identification_path.read_text().splitlines()[0]
     assert not list(tmp_path.glob("*.parquet"))

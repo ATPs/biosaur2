@@ -78,9 +78,10 @@ control.
 
 ## What is retained
 
-The Hybrid features table embeds zero, one or multiple linked MS2 records in
-each feature's `ms2_events` list. The identifications table retains accepted
-PSM rows, including PSM-bearing events that did not obtain a feature. An MS2
+The Hybrid `ms2_events` table stores one compact row for every feature-linked
+MS2 record and joins to `features` through `feature_idx`. The identifications
+table retains accepted PSM rows, including PSM-bearing events that did not
+obtain a feature. An MS2
 event with neither a feature nor a PSM is intentionally omitted row-by-row;
 summary metadata and logs still report aggregate outcomes.
 

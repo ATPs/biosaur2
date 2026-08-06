@@ -101,9 +101,9 @@ and admits work only while the configured physical-memory budget permits.
 `--max-memory` is an integer GiB admission cap; swap is excluded.
 
 For Parquet or TSV, every run directory contains its own `features`,
-`identifications` and Project external evidence files. With
+`ms2_events`, `identifications` and Project external evidence files. With
 `--format duckdb`, each run receives one `<run_id>.biosaur2.duckdb` with
-`features`, `identifications`, `runs` and, after Project rescue,
+`features`, `ms2_events`, `identifications`, `runs` and, after Project rescue,
 `external_id_evidence`. The separate `project.duckdb` indexes run status,
 resolved options, RT models, funnel summaries and output paths.
 

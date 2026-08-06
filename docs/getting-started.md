@@ -38,15 +38,16 @@ Legacy defaults to one TSV:
 biosaur2 sample.mzML.gz
 ```
 
-Hybrid defaults to two Parquet files:
+Hybrid defaults to three Parquet files:
 
 ```bash
 biosaur2 sample.mzML.gz --feature-mode hybrid --workers 4
 ```
 
-The files are `sample.features.parquet` and
+The files are `sample.features.parquet`, `sample.ms2_events.parquet`, and
 `sample.identifications.parquet`. The features table is the main quantitative
-result. See [Outputs and quantification](outputs-and-quantification.md).
+result; `ms2_events.feature_idx` links spectra to it. See
+[Outputs and quantification](outputs-and-quantification.md).
 
 ## PSM input
 

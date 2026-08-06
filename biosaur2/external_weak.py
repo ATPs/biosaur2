@@ -221,7 +221,6 @@ def _weak_row(base, candidate, quant, mono_points, secondary_points, cosine, ove
         "rt_end_sec": float(base["rtEnd"]),
         "isotope_cosine": cosine,
         "mass_error_ppm_median": base.get("isoerror"),
-        "ms2_events": [],
         "external_secondary_points": secondary_points,
         "external_reject_source": candidate["_external_reject_source"],
         "external_strong_overlap_fraction": overlap,

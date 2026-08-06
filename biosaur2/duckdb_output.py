@@ -14,6 +14,7 @@ from .legacy_output import (
     compact_ms1,
     compact_ms2,
     compact_sort_key,
+    include_mono_hills,
     merge_hybrid_output_rows,
     row_batches,
 )
@@ -34,6 +35,7 @@ from .schema import (
     feature_columns,
     hybrid_feature_columns,
     hill_columns,
+    LINKED_MS2_EVENT_COLUMNS,
     MERGED_IDENTIFICATION_COLUMNS,
 )
 
@@ -55,7 +57,9 @@ class DuckDBOutputManager:
         self.schemas = compact_schemas(
             use64=bool(args.get("use64")),
             include_mono=not args.get("no_mono_hills"),
+            hybrid_include_mono=include_mono_hills(args),
             extra_details=bool(args.get("write_extra_details")),
+            quant_details=bool(args.get("write_quant_details")),
             include_hill_lists=not args.get("no_hill_list"),
         )
         self.prefix = self._prefix()
@@ -91,7 +95,7 @@ class DuckDBOutputManager:
         if self.database_mode:
             names = [] if self.args.get("stop_after_hills") else ["features"]
             if self.args.get("feature_mode") == "hybrid" and not self.args.get("stop_after_hills"):
-                names.append("identifications")
+                names.extend(("ms2_events", "identifications"))
             if self.args.get("write_hills"):
                 names.append("hills")
             if self.args.get("write_ms1"):
@@ -112,7 +116,7 @@ class DuckDBOutputManager:
         if self.args.get("write_ms2") and self.args.get("format") == "parquet":
             names.append("ms2")
         if self.args.get("feature_mode") == "hybrid":
-            names.append("identifications")
+            names.extend(("ms2_events", "identifications"))
         return names
 
     def _ms2_sink(self):
@@ -128,8 +132,9 @@ class DuckDBOutputManager:
         ):
             columns = (
                 hybrid_feature_columns(
-                    not self.args.get("no_mono_hills"),
+                    include_mono_hills(self.args),
                     bool(self.args.get("write_extra_details")),
+                    bool(self.args.get("write_quant_details")),
                 )
                 if self.args.get("feature_mode") == "hybrid"
                 else feature_columns(
@@ -147,6 +152,12 @@ class DuckDBOutputManager:
             self.args.get("feature_mode") == "hybrid"
             and self.args.get("format") == "tsv"
         ):
+            sinks["ms2_events"] = _TsvSink(
+                self._target("ms2_events", "tsv"),
+                LINKED_MS2_EVENT_COLUMNS,
+                self.overwrite,
+                decimals=self.args.get("tsv_float_decimals", "roundtrip"),
+            )
             sinks["identifications"] = _TsvSink(
                 self._target("identifications", "tsv"),
                 MERGED_IDENTIFICATION_COLUMNS,
@@ -179,6 +190,8 @@ class DuckDBOutputManager:
     def _target(self, kind, output_format):
         if kind == "ms2":
             return ms2_output_path(self.args)
+        if kind == "ms2_events":
+            return Path("%s.ms2_events.%s" % (self.prefix, output_format))
         explicit = self.args.get("o")
         if kind == "features" and explicit and str(explicit).lower().endswith(
             "." + output_format
@@ -193,6 +206,8 @@ class DuckDBOutputManager:
             return "hybrid_features"
         if table_name == "identifications":
             return "merged_identifications"
+        if table_name == "ms2_events":
+            return "linked_ms2_events"
         return table_name
 
     def _final_paths(self):
@@ -289,7 +304,7 @@ class DuckDBOutputManager:
         identification_rows,
         assay_rows,
     ):
-        features, identifications = merge_hybrid_output_rows(
+        features, linked_ms2_events, identifications = merge_hybrid_output_rows(
             feature_rows,
             quant_rows,
             audit_rows,
@@ -300,6 +315,8 @@ class DuckDBOutputManager:
         )
         if "features" in self.table_names:
             self._append("features", features)
+        if "ms2_events" in self.table_names:
+            self._append("ms2_events", linked_ms2_events)
         if "identifications" in self.table_names:
             self._append("identifications", identifications)
         if "features" in self.tsv_sinks:
@@ -309,6 +326,8 @@ class DuckDBOutputManager:
                 )
             )
             self.tsv_sinks["features"].append(features)
+        if "ms2_events" in self.tsv_sinks:
+            self.tsv_sinks["ms2_events"].append(linked_ms2_events)
         if "identifications" in self.tsv_sinks:
             identifications.sort(
                 key=lambda row: (
@@ -358,6 +377,8 @@ class DuckDBOutputManager:
             return "mz, rtApex, hill_idx"
         if table_name == "ms2":
             return "ms2_event_id"
+        if table_name == "ms2_events":
+            return "feature_idx, ms2_event_id"
         if table_name == "identifications":
             return "ms2_event_id NULLS LAST, psm_id"
         return "scan_id"

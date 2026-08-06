@@ -123,6 +123,8 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
         "psm_pep_max": None,
         "fixed_mod": [],
         "quant_method": "envelope_area",
+        "write_mono_hills": True,
+        "write_quant_details": True,
         "feature_baseline": "edge_linear",
         "direct_id": True,
         "external_id": False,
@@ -138,6 +140,8 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
     position = command.index("--max-charge")
     assert command[position + 1] == "8"
     assert "--relaxed-ms2-feature" in command
+    assert "--write-mono-hills" in command
+    assert "--write-quant-details" in command
     assert "--write-ms2" not in command
     assert command[command.index("--format") + 1] == "parquet"
     assert command[command.index("--generic-ms2-isotope-errors") + 1] == "0,1,2,3"
@@ -230,6 +234,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         "format": "parquet",
         "run_output": None,
         "features": str(run_dir / "features.parquet"),
+        "ms2_events": str(run_dir / "ms2_events.parquet"),
         "identifications": str(run_dir / "identifications.parquet"),
         "external_evidence": str(run_dir / "external.parquet"),
         "raw_ms1_cache": str(run_dir / "raw_ms1_cache"),
@@ -246,7 +251,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     }
     schemas = compact_schemas()
     feature_table = pa.Table.from_pylist(
-        [{"feature_idx": 1, "quant_value": 10.0, "ms2_events": []}],
+        [{"feature_idx": 1, "quant_value": 10.0}],
         schema=schemas["hybrid_features"],
     ).replace_schema_metadata(
         {
@@ -258,6 +263,13 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
         }
     )
     pq.write_table(feature_table, paths["features"])
+    pq.write_table(
+        pa.Table.from_pylist(
+            [{"feature_idx": 1, "ms2_event_id": 7}],
+            schema=schemas["linked_ms2_events"],
+        ),
+        paths["ms2_events"],
+    )
     identification_table = pa.Table.from_pylist(
         [
             {
@@ -339,6 +351,27 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert successful["run"]["peak_rss_kib"] == 123456
     assert validate_project(database) == {"run_count": 1, "problems": ()}
 
+    pq.write_table(
+        pa.Table.from_pylist(
+            [{"feature_idx": 999, "ms2_event_id": 7}],
+            schema=schemas["linked_ms2_events"],
+        ),
+        paths["ms2_events"],
+    )
+    try:
+        validate_project(database)
+    except ValueError as error:
+        assert "orphan linked MS2 feature IDs" in str(error)
+    else:
+        raise AssertionError("orphan linked MS2 feature was not detected")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [{"feature_idx": 1, "ms2_event_id": 7}],
+            schema=schemas["linked_ms2_events"],
+        ),
+        paths["ms2_events"],
+    )
+
     Path(paths["external_evidence"]).unlink()
     try:
         validate_project(database)
@@ -386,7 +419,7 @@ def test_project_database_records_cache_command_and_resume_fingerprints(tmp_path
     assert alignment == (
         "explicit:g", "run", "run", "other", "accepted", 7, 0.5, 1.0, 2.5
     )
-    assert schema_version == "10"
+    assert schema_version == "11"
     assert strict_cache_stage == "missing"
 
     mzml.write_bytes(b"changed-mzML-source")

@@ -14,7 +14,7 @@ legacy mode and Parquet in Hybrid mode.
 | --- | --- | --- |
 | Legacy | `sample.features.tsv` | One accepted strict MS1 feature. |
 | Legacy `--format parquet` | `sample.features.parquet` | The same feature table in typed Parquet. |
-| Hybrid | `sample.features.parquet`, `sample.identifications.parquet` | One feature; one accepted parsed PSM. |
+| Hybrid | `sample.features.parquet`, `sample.ms2_events.parquet`, `sample.identifications.parquet` | One feature; one linked MS2 event; one accepted parsed PSM. |
 | `--format duckdb` | `sample.biosaur2.duckdb` | One database per input with the same tables. |
 | `--write-hills` | `sample.hills.<format>` | One chromatographic hill. |
 | `--write-ms1` | `sample.ms1.<format>` | One MS1 scan summary. |
@@ -24,7 +24,8 @@ legacy mode and Parquet in Hybrid mode.
 | Experimental `-dia`/`-dia2` | requested `.mgf` | One text block per exported spectrum. |
 
 For one input, `-o results/sample.features.parquet` fixes the feature path and
-places `results/sample.identifications.parquet` beside it. With several
+places `results/sample.ms2_events.parquet` and
+`results/sample.identifications.parquet` beside it. With several
 inputs, `-o results` is a directory and each input gets its own stem. DuckDB
 also creates one database per input, never one shared run database.
 
@@ -34,8 +35,7 @@ also creates one database per input, never one shared run database.
 
 - strict/recovered feature coordinates;
 - feature origin, confidence and quality;
-- all requested abundance values;
-- a typed `ms2_events` list containing zero, one or multiple linked events.
+- all requested abundance values.
 
 Selected scalar columns look like this:
 
@@ -50,19 +50,21 @@ feature_idx  mz        charge  rtStart  rtApex  rtEnd  feature_origin     quant_
 features. Hybrid also includes `rt_start_sec`, `rt_apex_sec` and `rt_end_sec`
 in seconds. `feature_idx` is the stable positive feature key.
 
-The same three rows have conceptually these nested events:
+## Linked Hybrid MS2 table
+
+`sample.ms2_events.parquet` contains one compact spectrum reference for every
+MS2 event linked to an accepted feature:
 
 ```text
-feature_idx  ms2_events
-42           [{ms2_event_id:317, association_tier:"direct_id", status:"matched_strict_feature", assay_id:1, rt_sec:741.7},
-              {ms2_event_id:325, association_tier:"direct_id", status:"matched_strict_feature", assay_id:3, rt_sec:746.2}]
-43           []
-44           [{ms2_event_id:411, association_tier:"generic_ms2", status:"generic_recovered_local_feature", generic_isotope_error:1, extraction_q_value:0.006}]
+feature_idx  ms2_event_id  native_id                                      native_scan_number  rt_sec  precursor_mz  charge
+42           317           controllerType=0 controllerNumber=1 scan=1542  1542                741.7   499.7001      2
+42           325           controllerType=0 controllerNumber=1 scan=1550  1550                746.2   499.7000      2
+44           411           controllerType=0 controllerNumber=1 scan=1902  1902                1268.3  612.3210      2
 ```
 
-Several MS2 events may point to one feature. Do not explode the list and sum
-the repeated feature abundance. MS2 events with no feature are not placed in
-this list.
+Join this table to `features` by `feature_idx`, or to `identifications` by
+`ms2_event_id`. Several events may point to one feature; do not sum feature
+abundance after this one-to-many join. Events with no feature are absent here.
 
 ## Main Hybrid identifications table
 
@@ -150,9 +152,9 @@ intensity, alter spectra, or manufacture measurements. Biosaur2 prefers
 
 `metadata_flags` is additive: 1 missing precursor m/z, 2 missing charge, 4
 unresolved spectrum reference, and 8 missing preceding MS1. Thus 13 means
-1 + 4 + 8. Hybrid does not write this standalone table: linked fields are
-inside `features.ms2_events`, while PSM-bearing events remain in
-`identifications`.
+1 + 4 + 8. Hybrid does not write this full standalone diagnostic table. It
+writes compact feature-linked references to `ms2_events`, while PSM-bearing
+events remain in `identifications`.
 
 ## Cross-run external evidence
 
@@ -208,6 +210,7 @@ database normally contains:
 ```text
 table_name             example rows
 features               42, 43, 44 ...
+ms2_events              feature_idx/MS2 references ...
 identifications         scan1542_1, scan1543_1 ...
 runs                    one provenance row
 external_id_evidence    project Hybrid only
@@ -221,8 +224,8 @@ FROM features
 ORDER BY quant_envelope_area DESC
 LIMIT 3;
 
-SELECT feature_idx, event.ms2_event_id, event.status
-FROM features, UNNEST(ms2_events) AS t(event)
+SELECT f.feature_idx, e.ms2_event_id, e.native_scan_number
+FROM features f JOIN ms2_events e USING (feature_idx)
 LIMIT 3;
 ```
 
@@ -232,9 +235,9 @@ LIMIT 3;
 feature rows. Its `runs` table resembles:
 
 ```text
-run_order  run_id  status   output_format  features_path                         identification_path
-0          run_a   success  parquet        results/run_a/run_a.features.parquet  results/run_a/run_a.identifications.parquet
-1          run_b   success  parquet        results/run_b/run_b.features.parquet  results/run_b/run_b.identifications.parquet
+run_order  run_id  status   output_format  features_path                         ms2_events_path
+0          run_a   success  parquet        results/run_a/run_a.features.parquet  results/run_a/run_a.ms2_events.parquet
+1          run_b   success  parquet        results/run_b/run_b.features.parquet  results/run_b/run_b.ms2_events.parquet
 ```
 
 Selected `qc_metrics` and `hybrid_summary` rows look like:
@@ -289,8 +292,10 @@ Hybrid defaults to `--quant-method all` and reports:
 | `quant_value` | Envelope area when `--quant-method all` is used. | Stable primary value for generic consumers. |
 
 These are alternative summaries of the same feature, not separate features.
-The table also reports raw/corrected areas, baseline status, points across the
-peak, evidence counts, isotope cosine, mass error, origin and quality flags.
+The compact table also reports baseline status, points across the peak,
+evidence counts, isotope cosine, mass error, origin and quality flags.
+`--write-quant-details` adds raw/corrected envelope and mono areas;
+`--write-mono-hills` adds the monoisotopic scan/intensity point arrays.
 
 Biosaur2 stops at feature-level measurements. Sample normalization,
 missing-value policy, peptide roll-up and protein inference depend on the

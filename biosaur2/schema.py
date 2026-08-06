@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyarrow as pa
 
 
-SCHEMA_VERSION = "4.0"
+SCHEMA_VERSION = "5.0"
 
 FEATURE_BASE_COLUMNS = (
     "massCalib",
@@ -83,7 +83,7 @@ MS2_COLUMNS = (
     "metadata_flags",
 )
 
-HYBRID_SCHEMA_VERSION = "7"
+HYBRID_SCHEMA_VERSION = "8"
 
 HYBRID_FEATURE_QUANT_COLUMNS = (
     "run_id", "feature_id", "feature_origin", "confidence_tier",
@@ -108,15 +108,47 @@ IDENTIFICATION_COLUMNS = (
     "score", "rank", "peptide_raw", "canonical_peptidoform", "formula_status",
     "assay_status", "selected_isotope_index", "selected_mz_error_ppm",
 )
-HYBRID_QUANT_OUTPUT_COLUMNS = tuple(
-    name for name in HYBRID_FEATURE_QUANT_COLUMNS
-    if name not in {"run_id", "feature_id"}
+HYBRID_QUANT_DETAIL_COLUMNS = (
+    "area_envelope_raw",
+    "area_envelope_corrected",
+    "area_mono_raw",
+    "area_mono_corrected",
 )
+HYBRID_QUANT_REDUNDANT_COLUMNS = (
+    "envelope_apex",
+    "feature_quality_score",
+)
+
+
+def hybrid_quant_output_columns(quant_details=False):
+    excluded = {
+        "run_id",
+        "feature_id",
+        *HYBRID_QUANT_REDUNDANT_COLUMNS,
+    }
+    if not quant_details:
+        excluded.update(HYBRID_QUANT_DETAIL_COLUMNS)
+    return tuple(
+        name for name in HYBRID_FEATURE_QUANT_COLUMNS if name not in excluded
+    )
+
+
+HYBRID_QUANT_OUTPUT_COLUMNS = hybrid_quant_output_columns()
 MERGED_ASSAY_COLUMNS = (
     "assay_id", "assay_charge", "assay_rt_sec", "assay_faims_cv",
     "monoisotopic_mz", "assay_conflict_status",
 )
 MERGED_IDENTIFICATION_COLUMNS = IDENTIFICATION_COLUMNS + MERGED_ASSAY_COLUMNS
+
+LINKED_MS2_EVENT_COLUMNS = (
+    "feature_idx",
+    "ms2_event_id",
+    "native_id",
+    "native_scan_number",
+    "rt_sec",
+    "precursor_mz",
+    "charge",
+)
 
 MS2_SCHEMA_VERSION = "1"
 EXTERNAL_EVIDENCE_SCHEMA_VERSION = "1"
@@ -208,33 +240,47 @@ def _feature_schema(use64=False, include_mono=True, extra_details=False):
     )
 
 
-def hybrid_feature_columns(include_mono=True, extra_details=False):
+def hybrid_feature_columns(
+    include_mono=False,
+    extra_details=False,
+    quant_details=False,
+):
     return (
         feature_columns(include_mono, extra_details)
-        + HYBRID_QUANT_OUTPUT_COLUMNS
-        + ("ms2_events",)
+        + hybrid_quant_output_columns(quant_details)
     )
 
 
-def _hybrid_feature_schema(use64=False, include_mono=True, extra_details=False):
+def _hybrid_feature_schema(
+    use64=False,
+    include_mono=False,
+    extra_details=False,
+    quant_details=False,
+):
     base = _feature_schema(use64, include_mono, extra_details)
     quant = _hybrid_feature_quant_schema(use64)
-    quant_fields = [quant.field(name) for name in HYBRID_QUANT_OUTPUT_COLUMNS]
-    ms2 = _ms2_schema()
-    audit = _hybrid_ms2_audit_schema(use64)
-    ms2_fields = [
-        pa.field(name, ms2.field(name).type, nullable=True)
-        for name in MS2_COLUMNS
-        if name != "run_id"
-    ] + [
-        pa.field(name, audit.field(name).type, nullable=True)
-        for name in HYBRID_MS2_AUDIT_COLUMNS
-        if name not in {"run_id", "ms2_event_id", "feature_id"}
+    quant_fields = [
+        quant.field(name)
+        for name in hybrid_quant_output_columns(quant_details)
     ]
+    return pa.schema(list(base) + quant_fields)
+
+
+def _linked_ms2_events_schema(use64=False):
+    feature_id = pa.int64() if use64 else pa.int32()
+    fields = {
+        "feature_idx": feature_id,
+        "ms2_event_id": pa.int32(),
+        "native_id": pa.string(),
+        "native_scan_number": pa.int32(),
+        "rt_sec": pa.float32(),
+        "precursor_mz": pa.float64(),
+        "charge": pa.int16(),
+    }
+    required = {"feature_idx", "ms2_event_id"}
     return pa.schema(
-        list(base)
-        + quant_fields
-        + [pa.field("ms2_events", pa.list_(pa.struct(ms2_fields)), nullable=False)]
+        pa.field(name, fields[name], nullable=name not in required)
+        for name in LINKED_MS2_EVENT_COLUMNS
     )
 
 
@@ -410,12 +456,20 @@ def _external_evidence_schema():
 def compact_schemas(
     use64=False,
     include_mono=True,
+    hybrid_include_mono=False,
     extra_details=False,
+    quant_details=False,
     include_hill_lists=True,
 ):
     return {
         "features": _feature_schema(use64, include_mono, extra_details),
-        "hybrid_features": _hybrid_feature_schema(use64, include_mono, extra_details),
+        "hybrid_features": _hybrid_feature_schema(
+            use64,
+            hybrid_include_mono,
+            extra_details,
+            quant_details,
+        ),
+        "linked_ms2_events": _linked_ms2_events_schema(use64),
         "hills": _hill_schema(use64, include_hill_lists),
         "ms1": _ms1_schema(use64),
         "ms2": _ms2_schema(),

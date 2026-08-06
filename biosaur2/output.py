@@ -36,7 +36,7 @@ def input_stem(path_value: str) -> str:
 
 
 def output_prefix(path_value: str) -> Path:
-    """Return the shared prefix for features and identifications outputs."""
+    """Return the shared prefix for one run's public outputs."""
 
     path = Path(path_value)
     if path.suffix.lower() in {".tsv", ".parquet"}:
@@ -102,6 +102,9 @@ def planned_output_paths(args: Mapping[str, Any]):
                 Path("%s.ms1.%s" % (prefix, args.get("format", "tsv")))
             )
         if args.get("feature_mode") == "hybrid" and not args.get("stop_after_hills"):
+            paths.append(
+                Path("%s.ms2_events.%s" % (prefix, args.get("format", "parquet")))
+            )
             paths.append(
                 Path("%s.identifications.%s" % (prefix, args.get("format", "parquet")))
             )

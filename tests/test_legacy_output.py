@@ -71,8 +71,8 @@ def test_empty_legacy_parquet_has_typed_schema(tmp_path):
     assert b"biosaur2_schema_version" in schema.metadata
 
 
-def test_hybrid_merge_embeds_only_feature_linked_ms2_and_merges_assay():
-    features, identifications = merge_hybrid_output_rows(
+def test_hybrid_merge_splits_feature_linked_ms2_and_merges_assay():
+    features, ms2_events, identifications = merge_hybrid_output_rows(
         [
             {"feature_idx": 1, "rtApex": 60.0},
             {"feature_idx": 2, "rtApex": 120.0},
@@ -87,8 +87,16 @@ def test_hybrid_merge_embeds_only_feature_linked_ms2_and_merges_assay():
             {"ms2_event_id": 12, "feature_id": None, "status": "unresolved"},
         ],
         [
-            {"run_id": "run", "ms2_event_id": 10, "metadata_flags": 0},
-            {"run_id": "run", "ms2_event_id": 11, "metadata_flags": 0},
+            {
+                "run_id": "run", "ms2_event_id": 10,
+                "native_id": "scan=101", "native_scan_number": 101,
+                "rt_sec": 60.0, "precursor_mz": 500.0, "charge": 2,
+            },
+            {
+                "run_id": "run", "ms2_event_id": 11,
+                "native_id": "scan=102", "native_scan_number": 102,
+                "rt_sec": 61.0, "precursor_mz": 600.0, "charge": 3,
+            },
             {"run_id": "run", "ms2_event_id": 12, "metadata_flags": 0},
         ],
         [
@@ -112,11 +120,19 @@ def test_hybrid_merge_embeds_only_feature_linked_ms2_and_merges_assay():
         {"no_mono_hills": True, "write_extra_details": False},
     )
 
-    assert [len(row["ms2_events"]) for row in features] == [2, 0]
-    assert {event["ms2_event_id"] for event in features[0]["ms2_events"]} == {
-        10,
-        11,
-    }
+    assert all("ms2_events" not in row for row in features)
+    assert ms2_events == [
+        {
+            "feature_idx": 1, "ms2_event_id": 10,
+            "native_id": "scan=101", "native_scan_number": 101,
+            "rt_sec": 60.0, "precursor_mz": 500.0, "charge": 2,
+        },
+        {
+            "feature_idx": 1, "ms2_event_id": 11,
+            "native_id": "scan=102", "native_scan_number": 102,
+            "rt_sec": 61.0, "precursor_mz": 600.0, "charge": 3,
+        },
+    ]
     assert identifications[0]["ms2_event_id"] == 12
     assert identifications[0]["assay_id"] == 7
     assert identifications[0]["assay_charge"] == 2
