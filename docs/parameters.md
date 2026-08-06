@@ -125,19 +125,26 @@ remain independently reusable.
 | Option | Default | Valid values | Detailed effect |
 | --- | ---: | --- | --- |
 | `--external-min-support-runs` | 1 | integer 1-16 | Minimum number of distinct source runs needed for a target score or a decoy score to be valid. The rule is symmetric. At the default, one run makes a candidate eligible for competition but does not guarantee rescue. |
-| `--external-max-support-runs` | 4 | integer 1-16, >= min | Maximum distinct-run supports retained, summed and reported on each target or decoy side. |
+| `--external-max-support-runs` | 4 | integer 1-16, >= min | Maximum distinct-run supports retained, combined as empirical log-likelihood evidence and reported on each target or decoy side. |
 | `--external-q-value-max` | 0.10 | finite [0,1] | Maximum project-level feature-transfer q-value for publishing a weak candidate. This q-value is independent of Percolator PSM q-values and generic-MS2 extraction q-values. |
 
 Within an accepted alignment component, each source run contributes only its
 single best matching strong feature. Supports are ranked by match score, and
-the best supports from at most `--external-max-support-runs` distinct runs are
-summed. The score decreases with normalized m/z and aligned-RT error. There is
-no average or per-run voting mode: scoring is a fixed sum. Consequently, four
-similarly good run supports score much higher than one, while one remains
-eligible under the default minimum.
+the raw score decreases with normalized m/z and aligned-RT error. This raw
+geometric score is not treated as a probability. Biosaur2 bins the component's
+target and shifted-decoy support scores in 32 equal-width bins over `[0,1]`,
+adds a pseudocount of `1.0` to each side of every bin, applies a monotonic
+pooled adjacent violators (PAVA) fit, and estimates an empirical per-support
+log-likelihood ratio.
+Evidence from at most `--external-max-support-runs` distinct runs is then added
+in log space. Deterministic two-fold cross-fitting ensures that a weak
+candidate is scored by a calibration that did not use that candidate's target
+or decoy supports. A very strong single support can therefore outrank several
+weak supports, while repeated high-quality supports still accumulate strong
+evidence.
 
-The exact same minimum, maximum, m/z/RT rules and sum scoring are applied to a
-deterministically m/z-shifted decoy candidate. Target/decoy competition is
+The exact same minimum, maximum, m/z/RT rules and empirical LLR transform are
+applied to a deterministically m/z-shifted decoy candidate. Target/decoy competition is
 calibrated within each alignment component. A weak candidate is published only
 when the target wins, its target support count reaches the minimum, and its
 external q-value is at most the configured threshold. Typical funnel outcomes

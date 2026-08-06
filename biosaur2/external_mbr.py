@@ -33,6 +33,9 @@ SIDECAR_VERSION = "feature-mbr-v3"
 DEFAULT_MIN_SUPPORT_RUNS = 1
 DEFAULT_MAX_SUPPORT_RUNS = 4
 MAX_CONFIGURED_SUPPORT_RUNS = 16
+SUPPORT_LLR_BIN_COUNT = 32
+SUPPORT_LLR_PSEUDOCOUNT = 1.0
+SUPPORT_LLR_CROSSFIT_FOLDS = 2
 LOCAL_WEAK_OPTION_DEFAULTS = {
     "external_weak_min_mono_points": 2,
     "external_weak_min_secondary_points": 2,
@@ -43,7 +46,8 @@ logger = logging.getLogger(__name__)
 EVIDENCE_FIELDS = (
     "target_run", "weak_candidate_id", "feature_id", "source_run",
     "source_feature_id", "support_rank", "support_score", "mz_error_ppm",
-    "rt_error_sec", "predicted_rt_sec", "target_score", "decoy_score",
+    "support_log_likelihood_ratio", "rt_error_sec", "predicted_rt_sec",
+    "target_support_count", "decoy_support_count", "target_score", "decoy_score",
     "competition_winner", "acceptance_q_value", "status",
     "alignment_method", "alignment_anchor_count", "alignment_residual_mad_sec",
 )
@@ -634,12 +638,102 @@ def _supports_by_run(
     ]
 
 
-def _aggregate_support_score(supports, min_support_runs=1):
-    """Sum configured distinct-run supports for symmetric competition."""
+@dataclass(frozen=True)
+class EmpiricalSupportLLR:
+    """Monotone empirical evidence calibration for one alignment component."""
+
+    target_counts: tuple[int, ...]
+    decoy_counts: tuple[int, ...]
+    log_likelihood_ratios: tuple[float, ...]
+    training_candidate_count: int
+
+    @property
+    def bin_count(self):
+        return len(self.log_likelihood_ratios)
+
+    def score(self, raw_score):
+        value = min(max(float(raw_score), 0.0), 1.0)
+        index = min(int(value * self.bin_count), self.bin_count - 1)
+        return self.log_likelihood_ratios[index]
+
+    def audit(self):
+        return {
+            "bin_count": self.bin_count,
+            "pseudocount": SUPPORT_LLR_PSEUDOCOUNT,
+            "training_candidate_count": self.training_candidate_count,
+            "target_support_count": sum(self.target_counts),
+            "decoy_support_count": sum(self.decoy_counts),
+            "target_bin_counts": list(self.target_counts),
+            "decoy_bin_counts": list(self.decoy_counts),
+            "bin_upper_bounds": [
+                (index + 1) / self.bin_count for index in range(self.bin_count)
+            ],
+            "log_likelihood_ratios": list(self.log_likelihood_ratios),
+        }
+
+
+def _fit_empirical_support_llr(outcomes):
+    """Estimate a smoothed monotone target/decoy density ratio by score bin."""
+
+    target_counts = [0] * SUPPORT_LLR_BIN_COUNT
+    decoy_counts = [0] * SUPPORT_LLR_BIN_COUNT
+    for item in outcomes:
+        for field, counts in (("targets", target_counts), ("decoys", decoy_counts)):
+            for support, _source_run, _alignment in item[field]:
+                raw_score = min(max(float(support[0]), 0.0), 1.0)
+                index = min(
+                    int(raw_score * SUPPORT_LLR_BIN_COUNT),
+                    SUPPORT_LLR_BIN_COUNT - 1,
+                )
+                counts[index] += 1
+
+    # PAVA on P(target | support score bin) keeps stronger geometric matches
+    # at least as evidential while pooling sparse neighboring bins.
+    blocks = []
+    for index, (target_count, decoy_count) in enumerate(
+        zip(target_counts, decoy_counts)
+    ):
+        blocks.append({
+            "start": index,
+            "end": index,
+            "target": target_count + SUPPORT_LLR_PSEUDOCOUNT,
+            "total": (
+                target_count + decoy_count
+                + 2.0 * SUPPORT_LLR_PSEUDOCOUNT
+            ),
+        })
+        while len(blocks) >= 2:
+            left, right = blocks[-2:]
+            if (
+                left["target"] / left["total"]
+                <= right["target"] / right["total"]
+            ):
+                break
+            blocks[-2:] = [{
+                "start": left["start"],
+                "end": right["end"],
+                "target": left["target"] + right["target"],
+                "total": left["total"] + right["total"],
+            }]
+
+    values = [0.0] * SUPPORT_LLR_BIN_COUNT
+    for block in blocks:
+        target = block["target"]
+        decoy = block["total"] - target
+        log_ratio = math.log(target / decoy)
+        for index in range(block["start"], block["end"] + 1):
+            values[index] = log_ratio
+    return EmpiricalSupportLLR(
+        tuple(target_counts), tuple(decoy_counts), tuple(values), len(outcomes)
+    )
+
+
+def _aggregate_support_score(supports, calibrator, min_support_runs=1):
+    """Accumulate calibrated log evidence from configured distinct runs."""
 
     if len(supports) < min_support_runs:
         return None
-    return float(sum(item[0][0] for item in supports))
+    return float(sum(calibrator.score(item[0][0]) for item in supports))
 
 
 def _candidate_outcomes(runs, strong_by_run, weak_by_run, models, options):
@@ -696,24 +790,50 @@ def _candidate_outcomes(runs, strong_by_run, weak_by_run, models, options):
                     "max_support_runs": max_support_runs,
                     "accepted_alignment_count": len(alignments),
                 })
+    calibrations = {}
     for component, outcomes in grouped.items():
+        for index, item in enumerate(outcomes):
+            item["calibration_fold"] = index % SUPPORT_LLR_CROSSFIT_FOLDS
+        full_calibration = _fit_empirical_support_llr(outcomes)
+        fold_calibrators = {}
+        for held_out_fold in range(SUPPORT_LLR_CROSSFIT_FOLDS):
+            training = [
+                item for item in outcomes
+                if item["calibration_fold"] != held_out_fold
+            ]
+            fold_calibrators[held_out_fold] = (
+                _fit_empirical_support_llr(training)
+                if training else full_calibration
+            )
+        calibrations[component] = {
+            "full": full_calibration.audit(),
+            "crossfit": {
+                str(fold): calibration.audit()
+                for fold, calibration in sorted(fold_calibrators.items())
+            },
+        }
         competitions = []
         for item in outcomes:
             seed = "%s:%d" % (item["target_run"], item["candidate"].candidate_id)
             item["seed"] = seed
+            item["support_calibrator"] = fold_calibrators[
+                item["calibration_fold"]
+            ]
             competitions.append(TargetDecoyCompetition(
                 seed,
                 _aggregate_support_score(
-                    item["targets"], item["min_support_runs"]
+                    item["targets"], item["support_calibrator"],
+                    item["min_support_runs"],
                 ),
                 _aggregate_support_score(
-                    item["decoys"], item["min_support_runs"]
+                    item["decoys"], item["support_calibrator"],
+                    item["min_support_runs"],
                 ),
             ))
         results = {item.seed_id: item for item in target_decoy_q_values(competitions)}
         for item in outcomes:
             item["competition"] = results[item["seed"]]
-    return grouped
+    return grouped, calibrations
 
 
 def _outcome_status(item, q_value_max):
@@ -751,8 +871,14 @@ def _evidence_rows(outcomes, q_value_max):
                     "target_run": item["target_run"], "weak_candidate_id": item["candidate"].candidate_id,
                     "feature_id": None, "source_run": source_id, "source_feature_id": None if source is None else source.feature_id,
                     "support_rank": rank if accepted else None, "support_score": None if support is None else support[0],
+                    "support_log_likelihood_ratio": (
+                        None if support is None else
+                        item["support_calibrator"].score(support[0])
+                    ),
                     "mz_error_ppm": None if support is None else support[1], "rt_error_sec": None if support is None else support[2],
                     "predicted_rt_sec": None if support is None else support[6],
+                    "target_support_count": len(item["targets"]),
+                    "decoy_support_count": len(item["decoys"]),
                     "target_score": result.target_score, "decoy_score": result.decoy_score,
                     "competition_winner": result.winner, "acceptance_q_value": result.q_value,
                     "status": status,
@@ -854,7 +980,7 @@ def run_feature_mbr_stage(runs, results, options):
             options.get("external_rt_tolerance_sec", 120.0)
         ),
     )
-    outcomes = _candidate_outcomes(successful, strong, weak, models, {
+    outcomes, support_calibrations = _candidate_outcomes(successful, strong, weak, models, {
         "ppm": float(options.get("external_ppm", 8.0)),
         "rt_tolerance_sec": float(options.get("external_rt_tolerance_sec", 120.0)),
         "min_support_runs": int(options.get(
@@ -951,7 +1077,14 @@ def run_feature_mbr_stage(runs, results, options):
             "candidate_status_counts": dict(sorted(project_statuses.items())),
             "external_min_support_runs": min_support_runs,
             "external_max_support_runs": max_support_runs,
-            "support_scoring": "sum",
+            "support_scoring": "empirical_log_likelihood_ratio_sum",
+            "support_llr_crossfit_folds": SUPPORT_LLR_CROSSFIT_FOLDS,
+            "support_llr_calibrations": {
+                component: calibration
+                for component, calibration in sorted(
+                    support_calibrations.items()
+                )
+            },
             "target_support_run_count_distribution": dict(
                 sorted(project_target_support_counts.items())
             ),

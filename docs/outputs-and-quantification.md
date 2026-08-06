@@ -169,18 +169,22 @@ rows, one for each distinct source-run support retained up to
 audit row, or a row with nullable source fields when it had no support.
 
 ```text
-target_run  weak_candidate_id  source_run  source_feature_id  support_rank  support_score  target_score  decoy_score  acceptance_q_value  status
-run_b       1842               run_a       9173               1             0.96           3.71          0.81         0.024               accepted_matched_weak_feature
-run_b       1842               run_c       8821               2             0.94           3.71          0.81         0.024               accepted_matched_weak_feature
-run_b       1901               null        null               null          null           null          0.72         1.000               no_external_support
-run_b       1917               run_d       1044               null          0.66           0.66          0.83         1.000               decoy_winner
+target_run  weak_candidate_id  source_run  support_rank  support_score  support_log_likelihood_ratio  target_support_count  decoy_support_count  target_score  decoy_score  acceptance_q_value  status
+run_b       1842               run_a       1             0.96           2.18                            3                     1                    5.73          0.42         0.024               accepted_matched_weak_feature
+run_b       1842               run_c       2             0.94           1.91                            3                     1                    5.73          0.42         0.024               accepted_matched_weak_feature
+run_b       1901               null        null          null           null                            0                     1                    null          0.72         1.000               no_external_support
+run_b       1917               run_d       null          0.66           0.31                            1                     2                    0.31          0.83         1.000               decoy_winner
 ```
 
-`support_score` is one source run's best strong-feature match.
-`target_score` and `decoy_score` are sums from up to the configured maximum
+`support_score` is one source run's raw geometric strong-feature match score;
+it is not a probability. `support_log_likelihood_ratio` is its component-level,
+cross-fitted empirical target-versus-decoy evidence. `target_score` and
+`decoy_score` sum calibrated LLR evidence from up to the configured maximum
 number of distinct runs. `acceptance_q_value` is the Project feature-transfer
-q-value. Alignment method, anchor count, held-out MAD, predicted RT, ppm error
-and RT error make each reported support auditable.
+q-value. `target_support_count` and `decoy_support_count` are retained even for
+compact rejected-candidate rows, so support-count effects can be audited
+without replaying matching. Alignment method, anchor count, held-out MAD,
+predicted RT, ppm error and RT error make each reported support auditable.
 
 Accepted weak rows are appended to the target run's ordinary feature table with
 origin `aligned_external_weak`, confidence tier `external_id_weak`, and

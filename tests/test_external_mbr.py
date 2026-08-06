@@ -11,6 +11,7 @@ from biosaur2.external_alignment import ReferenceStarAlignment
 from biosaur2.external_mbr import (
     FeatureRecord,
     _aggregate_support_score,
+    _fit_empirical_support_llr,
     _json_default,
     _outcome_status,
     build_feature_alignment_models,
@@ -131,6 +132,9 @@ def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
     assert output[0]["envelope_apex"] == pytest.approx(100.0)
     evidence = pq.read_table(paths_by_run["target"]["external_evidence"]).to_pylist()
     assert evidence[0]["status"] == "accepted_matched_weak_feature"
+    assert evidence[0]["target_support_count"] == 4
+    assert evidence[0]["decoy_support_count"] == 0
+    assert evidence[0]["support_log_likelihood_ratio"] > 0
     assert evidence[0]["source_run"] in set(run_ids) - {"target"}
     for candidate_id in range(1, 21):
         sources = {
@@ -189,7 +193,15 @@ def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
     ).to_pylist()
     max_one_score = limited_evidence[0]["target_score"]
     assert max_four_score > max_two_score > max_one_score
-    assert max_four_score > 3 * max_one_score
+    assert stage["scheduler_summary"]["support_scoring"] == (
+        "empirical_log_likelihood_ratio_sum"
+    )
+    assert stage["scheduler_summary"]["support_llr_crossfit_folds"] == 2
+    calibration_audit = next(iter(
+        stage["scheduler_summary"]["support_llr_calibrations"].values()
+    ))
+    assert set(calibration_audit) == {"full", "crossfit"}
+    assert set(calibration_audit["crossfit"]) == {"0", "1"}
 
     gated = run_feature_mbr_stage(runs, results, {
         "external_ppm": 8.0, "external_rt_tolerance_sec": 120.0,
@@ -212,10 +224,29 @@ def test_external_competition_aggregates_distinct_run_supports():
         ((0.9, 0.1, 1.0, -0.9, 1, None, 100.0), "run-a", None),
         ((0.8, 0.2, 2.0, -0.8, 2, None, 101.0), "run-b", None),
     ]
-    assert _aggregate_support_score(supports) == pytest.approx(1.7)
-    assert _aggregate_support_score(supports, min_support_runs=2) == pytest.approx(1.7)
-    assert _aggregate_support_score(supports[:1], min_support_runs=2) is None
-    assert _aggregate_support_score([]) is None
+    poor = ((0.2, 0.1, 1.0, -0.9, 3, None, 100.0), "run-c", None)
+    excellent = (
+        (0.99, 0.1, 1.0, -0.9, 4, None, 100.0), "run-d", None
+    )
+    calibration_rows = []
+    for _ in range(100):
+        calibration_rows.append({"targets": [poor], "decoys": [poor]})
+    for _ in range(40):
+        calibration_rows.append({"targets": [excellent], "decoys": []})
+    calibrator = _fit_empirical_support_llr(calibration_rows)
+    assert _aggregate_support_score(
+        [excellent], calibrator
+    ) > _aggregate_support_score([poor] * 4, calibrator)
+    assert _aggregate_support_score(
+        supports, calibrator, min_support_runs=2
+    ) == pytest.approx(sum(calibrator.score(item[0][0]) for item in supports))
+    assert _aggregate_support_score(
+        supports[:1], calibrator, min_support_runs=2
+    ) is None
+    assert _aggregate_support_score([], calibrator) is None
+    assert list(calibrator.log_likelihood_ratios) == sorted(
+        calibrator.log_likelihood_ratios
+    )
     assert _json_default(np.float32(1.25)) == pytest.approx(1.25)
 
 

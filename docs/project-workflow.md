@@ -52,7 +52,7 @@ sequenceDiagram
     A->>T: Accepted source-to-target RT paths
     T->>S: Match each weak candidate to strong features
     S-->>T: Best support from each distinct run
-    T->>T: Sum target/shifted-decoy supports and estimate q-value
+    T->>T: Calibrate support LLR, combine target/shifted-decoy evidence, estimate q-value
     T->>T: Publish accepted weak feature with target-run quantification
 ```
 
@@ -68,9 +68,10 @@ After 8 ppm matching, a longest increasing RT chain removes crossing matches.
 Held-out anchors validate bias, MAD and q90 before an alignment edge is used.
 Accepted bidirectional edges form reference-rooted forest components. Each
 source run contributes at most one best strong match to a weak candidate;
-scores from up to four distinct source runs are summed by default. One source
-run is sufficient for eligibility, but multi-run evidence receives a much
-larger summed score. Target and shifted-decoy sides use identical rules.
+empirical log-likelihood evidence from up to four distinct source runs is
+combined by default. One source run is sufficient for eligibility, but
+multi-run evidence receives a much larger calibrated score. Target and
+shifted-decoy sides use identical rules.
 
 See [Parameter guide](parameters.md#external-weak-feature-rescue-help-all)
 for the exact gate definitions, defaults and tuning consequences.
