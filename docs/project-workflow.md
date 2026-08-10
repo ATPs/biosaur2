@@ -15,7 +15,9 @@ run_a	mzML/run_a.mzML.gz
 run_b	mzML/run_b.mzML.gz
 ```
 
-PSM paths are optional. Add an alignment group when a manifest contains
+PSM paths are optional and may point to Percolator TSV or Parquet inputs. A
+single aggregate PSM table may be referenced by several runs when it contains
+an `idn`/run field matching the mzML stems. Add an alignment group when a manifest contains
 scientifically distinct fractions, batches or conditions:
 
 ```tsv
@@ -138,3 +140,7 @@ partially published layers are rejected rather than silently reused.
 Advanced external controls appear under
 `biosaur2 project run --help-all`. Change them only after inspecting alignment
 and rescue funnel statistics on representative data.
+
+The same command exposes advanced `--psm-*-column` overrides. They apply to
+every run in the Project command and are forwarded unchanged to each local
+Hybrid invocation.

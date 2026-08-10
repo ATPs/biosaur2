@@ -35,6 +35,7 @@ class DirectAssay:
     pep: Optional[float]
     score: Optional[float]
     rank: Optional[int]
+    charge_source: str = "psm"
     precursor_ms1_index: Optional[int] = None
     conflict_status: str = "unique"
 
@@ -166,8 +167,12 @@ def build_direct_assays(
             status_counts["non_exact_formula"] += 1
             audit.append(base_audit)
             continue
-        charge = record.parsed_charge
         event = mapped.event
+        charge = record.parsed_charge
+        charge_source = "psm"
+        if charge is None:
+            charge = event.get("charge")
+            charge_source = "mzml"
         if charge is None or event.get("rt_sec") is None:
             base_audit["assay_status"] = "missing_charge_or_rt"
             status_counts["missing_charge_or_rt"] += 1
@@ -208,6 +213,7 @@ def build_direct_assays(
             pep=record.pep,
             score=record.score,
             rank=record.parsed_rank,
+            charge_source=charge_source,
             precursor_ms1_index=event.get("precursor_ms1_index"),
         )
         candidates.append((assay, base_audit))

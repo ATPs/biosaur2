@@ -18,6 +18,7 @@ from .search import (
     _configure_logging,
     _positive_integer,
 )
+from .identifications import PSM_COLUMN_OPTIONS
 
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,15 @@ README.md and examples/hybrid_project_manifest.tsv.
         parser.add_argument("--overwrite", action="store_true", help="atomically replace existing per-run/project outputs instead of refusing collisions")
         parser.add_argument("--psm-q-value-max", type=float, default=0.01, help="default maximum Percolator q-value; manifest q_value_max may override it per run")
         parser.add_argument("--psm-pep-max", type=float, default=None, help=_advanced_help(show_all, "optional maximum PSM posterior error probability; none disables this filter"))
+        for _semantic, option, description in PSM_COLUMN_OPTIONS:
+            parser.add_argument(
+                option,
+                default=None,
+                help=_advanced_help(
+                    show_all,
+                    "override automatic PSM-column detection for %s" % description,
+                ),
+            )
         parser.add_argument("--fixed-mod", action="append", default=[], help="explicit repeatable fixed modification SITE=MOD, for example C=UNIMOD:4")
         parser.add_argument("--quant-method", choices=("all", "envelope_area", "mono_area", "envelope_apex"), default="all", help="quantification output; all reports every metric and uses envelope area as quant_value")
         parser.add_argument("--write-mono-hills", action="store_true", help=_advanced_help(show_all, "include monoisotopic hill point arrays in Hybrid feature output"))

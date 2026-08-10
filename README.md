@@ -23,7 +23,7 @@ for scope and limitations.
 pip install biosaur2
 ```
 
-Biosaur2 0.6.1 supports Python 3.12.
+Biosaur2 0.6.2 supports Python 3.12.
 
 DuckDB is recommended for Parquet and database output:
 

@@ -52,9 +52,12 @@ table is the main quantitative result; its scan boundaries join to `ms1`, and
 
 ## PSM input
 
-`--psm-path` accepts a Percolator target PSM TSV from the same mzML run. It may
-also be compressed. Common accepted headers include a spectrum identifier,
-peptide, q-value, PEP, score and charge. A minimal illustrative file is:
+`--psm-path` accepts a Percolator target PSM TSV (including compressed text) or
+Parquet. It may contain one run or many runs: when a run/idn field is available,
+Biosaur2 selects rows matching the current mzML filename stem. Common accepted
+headers include a composite `PSMId`, or split `idn`, `scan_id`, `charge` and
+`rank`, plus peptide, q-value, PEP and score. Extra columns are allowed and
+ignored. A minimal illustrative file is:
 
 ```tsv
 PSMId	peptide	q-value	posterior_error_prob	score	charge
@@ -63,8 +66,10 @@ sample_1601_3_1	R.ACDEFGHIK.K	0.0068	0.0041	7.92	3
 ```
 
 The spectrum identifier must map to an MS2 spectrum in the same mzML. Header
-spelling varies among Percolator pipelines; Biosaur2 recognizes its supported
-aliases and reports a clear error for missing required fields.
+spelling varies among Percolator pipelines; Biosaur2 recognizes supported
+aliases and reports a clear error for missing required fields. For nonstandard
+names, use the advanced `--psm-*-column` overrides shown by
+`biosaur2 --help-all`.
 
 The peptide column contains the peptide assigned to the spectrum. Flanking
 residues such as `K.PEPTIDEK.R` are allowed. Modifications should be explicit,

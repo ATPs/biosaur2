@@ -20,17 +20,34 @@ logger = logging.getLogger(__name__)
 
 COLUMN_ALIASES = {
     "psm_id": ("PSMId", "psm_id", "specid", "spectrum_id", "spectrum"),
+    "run_id": ("idn", "run_id", "run"),
     "score": ("score", "svm_score", "percolator_score"),
     "q_value": ("q-value", "q_value", "qvalue"),
     "pep": ("posterior_error_prob", "posterior_error_probability", "pep"),
     "peptide": ("peptide", "peptidoform", "modified_peptide", "sequence"),
     "proteins": ("proteinIds", "protein_ids", "proteins"),
-    "scan": ("scan", "scan_number", "scannr"),
+    "scan": ("scan", "scan_id", "scan_number", "scannr"),
     "charge": ("charge", "precursor_charge"),
     "rank": ("rank", "hit_rank"),
     "native_id": ("native_id", "spectrum_native_id"),
     "decoy": ("decoy", "is_decoy", "target_decoy", "label"),
 }
+
+
+PSM_COLUMN_OPTIONS = (
+    ("psm_id", "--psm-id-column", "full composite PSMId"),
+    ("run_id", "--psm-run-column", "run identifier / idn"),
+    ("scan", "--psm-scan-column", "MS2 scan identifier"),
+    ("native_id", "--psm-native-id-column", "native spectrum identifier"),
+    ("charge", "--psm-charge-column", "precursor charge"),
+    ("rank", "--psm-rank-column", "PSM rank"),
+    ("peptide", "--psm-peptide-column", "peptide or peptidoform"),
+    ("q_value", "--psm-q-value-column", "PSM q-value"),
+    ("pep", "--psm-pep-column", "posterior error probability"),
+    ("score", "--psm-score-column", "PSM score"),
+    ("proteins", "--psm-proteins-column", "protein identifiers"),
+    ("decoy", "--psm-decoy-column", "target/decoy indicator"),
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +71,7 @@ class IdentificationRecord:
 @dataclass
 class IdentificationParserQC:
     path: str
+    input_format: str
     compression: str
     encoding: str
     delimiter: str
@@ -66,6 +84,8 @@ class IdentificationParserQC:
     rejected_decoy: int = 0
     failed_rows: int = 0
     unmapped_identity_rows: int = 0
+    run_matched_count: int = 0
+    run_filtered_count: int = 0
     encoding_fallback: bool = False
     warnings: list[str] = field(default_factory=list)
 
@@ -188,11 +208,15 @@ def _resolve_columns(headers, explicit: Optional[Mapping[str, str]]):
             )
         if matches:
             result[semantic] = next(iter(matches))
-    missing = {"psm_id", "q_value", "peptide"} - set(result)
+    missing = {"q_value", "peptide"} - set(result)
     if missing:
         raise ValueError(
             "identification table is missing semantic column(s): %s"
             % ", ".join(sorted(missing))
+        )
+    if not {"psm_id", "scan", "native_id"} & set(result):
+        raise ValueError(
+            "identification table requires PSMId, scan_id/scan, or native_id"
         )
     return result, tuple(header_lookup)
 
@@ -218,6 +242,50 @@ def _integer(value):
     if not math.isfinite(numeric) or not numeric.is_integer():
         raise ValueError("expected an integer")
     return int(numeric)
+
+
+def _text(value):
+    """Normalize text-like values from CSV and Arrow without losing integers."""
+
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _synthetic_psm_id(run_id, scan, native_id, charge, rank, source_row):
+    """Create a deterministic audit ID when a table has split identity columns."""
+
+    return "split:%s:scan=%s:native=%s:charge=%s:rank=%s:row=%d" % (
+        run_id or "unknown",
+        "" if scan is None else scan,
+        native_id or "",
+        "" if charge is None else charge,
+        "" if rank is None else rank,
+        source_row,
+    )
+
+
+def _parquet_input(source: Path):
+    if source.suffix.casefold() == ".parquet":
+        return True
+    if not source.is_file() or source.stat().st_size < 8:
+        return False
+    with source.open("rb") as handle:
+        start = handle.read(4)
+        handle.seek(-4, io.SEEK_END)
+        end = handle.read(4)
+    return start == end == b"PAR1"
+
+
+def psm_column_map_from_args(args: Mapping[str, object]):
+    """Return explicit semantic PSM columns supplied through either CLI."""
+
+    result = {}
+    for semantic, option, _description in PSM_COLUMN_OPTIONS:
+        value = args.get(option[2:].replace("-", "_"))
+        if value is not None and str(value).strip():
+            result[semantic] = str(value).strip()
+    return result
 
 
 def _is_decoy(value):
@@ -246,7 +314,7 @@ def parse_psm_identity(psm_id: str):
     return parts[0], scan, charge, rank
 
 
-def read_percolator_tsv(
+def read_identification_table(
     path: Path | str,
     *,
     q_value_max: float = 0.01,
@@ -254,8 +322,9 @@ def read_percolator_tsv(
     delimiter: Optional[str] = None,
     encoding: Optional[str] = None,
     column_map: Optional[Mapping[str, str]] = None,
+    run_id: Optional[str] = None,
 ) -> IdentificationReadResult:
-    """Read accepted Percolator PSMs using semantic columns and strict text QC."""
+    """Read accepted Percolator PSMs from text or Parquet input."""
 
     if not math.isfinite(q_value_max) or not 0.0 <= q_value_max <= 1.0:
         raise ValueError("q_value_max must be finite and in [0, 1]")
@@ -265,16 +334,48 @@ def read_percolator_tsv(
         raise ValueError("pep_max must be finite and in [0, 1]")
 
     source = Path(path)
-    decoded, compression = _decompress(source.read_bytes())
-    text, chosen_encoding, fallback, warnings = _decode(decoded, encoding)
-    chosen_delimiter = _detect_delimiter(text, delimiter, source)
-    reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=chosen_delimiter)
-    headers = tuple((header or "").strip().lstrip("\ufeff") for header in (reader.fieldnames or ()))
-    if not headers:
-        raise ValueError("identification table has no header")
-    resolved, normalized_headers = _resolve_columns(headers, column_map)
+    is_parquet = _parquet_input(source)
+    if is_parquet:
+        import pyarrow.parquet as pq
+
+        parquet = pq.ParquetFile(source)
+        headers = tuple(parquet.schema_arrow.names)
+        if not headers:
+            raise ValueError("identification Parquet has no columns")
+        resolved, normalized_headers = _resolve_columns(headers, column_map)
+        projected_columns = tuple(dict.fromkeys(resolved.values()))
+
+        def rows():
+            source_row = 1
+            for batch in parquet.iter_batches(columns=projected_columns):
+                for row in batch.to_pylist():
+                    yield source_row, row
+                    source_row += 1
+
+        input_format = "parquet"
+        compression = "parquet"
+        chosen_encoding = "n/a"
+        chosen_delimiter = "n/a"
+        fallback = False
+        warnings = []
+    else:
+        decoded, compression = _decompress(source.read_bytes())
+        text, chosen_encoding, fallback, warnings = _decode(decoded, encoding)
+        chosen_delimiter = _detect_delimiter(text, delimiter, source)
+        reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=chosen_delimiter)
+        headers = tuple((header or "").strip().lstrip("\ufeff") for header in (reader.fieldnames or ()))
+        if not headers:
+            raise ValueError("identification table has no header")
+        resolved, normalized_headers = _resolve_columns(headers, column_map)
+
+        def rows():
+            for source_row, row in enumerate(reader, start=2):
+                yield source_row, row
+
+        input_format = "text"
     qc = IdentificationParserQC(
         path=str(source.resolve()),
+        input_format=input_format,
         compression=compression,
         encoding=chosen_encoding,
         delimiter=chosen_delimiter,
@@ -285,11 +386,45 @@ def read_percolator_tsv(
     )
 
     records = []
-    for source_row, row in enumerate(reader, start=2):
+    requested_run = None if run_id is None else str(run_id).strip()
+    saw_run_identity = False
+    for source_row, row in rows():
         qc.row_count += 1
         try:
             if None in row:
                 raise ValueError("row has more fields than the header")
+            psm_id = _text(row.get(resolved.get("psm_id")))
+            parsed = parse_psm_identity(psm_id) if psm_id else None
+            parsed_run = parsed_scan = parsed_charge = parsed_rank = None
+            if parsed is not None:
+                parsed_run, parsed_scan, parsed_charge, parsed_rank = parsed
+            explicit_run = _text(row.get(resolved.get("run_id"))) or None
+            explicit_scan = _integer(row.get(resolved.get("scan"))) if "scan" in resolved else None
+            explicit_charge = _integer(row.get(resolved.get("charge"))) if "charge" in resolved else None
+            explicit_rank = _integer(row.get(resolved.get("rank"))) if "rank" in resolved else None
+            native_id = (
+                _text(row.get(resolved.get("native_id"))) or None
+                if "native_id" in resolved else None
+            )
+            if explicit_run is not None and parsed_run is not None and explicit_run != parsed_run:
+                raise ValueError("split run ID disagrees with PSMId")
+            for name, explicit_value, parsed_value in (
+                ("scan", explicit_scan, parsed_scan),
+                ("charge", explicit_charge, parsed_charge),
+                ("rank", explicit_rank, parsed_rank),
+            ):
+                if explicit_value is not None and parsed_value is not None and explicit_value != parsed_value:
+                    raise ValueError("split %s disagrees with PSMId" % name)
+            parsed_run = explicit_run if explicit_run is not None else parsed_run
+            parsed_scan = explicit_scan if explicit_scan is not None else parsed_scan
+            parsed_charge = explicit_charge if explicit_charge is not None else parsed_charge
+            parsed_rank = explicit_rank if explicit_rank is not None else parsed_rank
+            if parsed_run is not None:
+                saw_run_identity = True
+                if requested_run and parsed_run.casefold() != requested_run.casefold():
+                    qc.run_filtered_count += 1
+                    continue
+                qc.run_matched_count += 1
             q_value = _finite(
                 row.get(resolved["q_value"]), "q-value", probability=True, required=True
             )
@@ -306,34 +441,28 @@ def read_percolator_tsv(
                 qc.rejected_pep += 1
                 continue
 
-            psm_id = (row.get(resolved["psm_id"]) or "").strip()
-            peptide = (row.get(resolved["peptide"]) or "").strip()
-            if not psm_id or not peptide:
-                raise ValueError("empty PSM ID or peptide")
+            peptide = _text(row.get(resolved["peptide"]))
+            if not peptide:
+                raise ValueError("empty peptide")
+            if not psm_id:
+                if native_id is None and parsed_scan is None:
+                    raise ValueError("empty PSM ID and no usable split identity")
+                psm_id = _synthetic_psm_id(
+                    parsed_run, parsed_scan, native_id, parsed_charge, parsed_rank,
+                    source_row,
+                )
             score = _finite(row.get(resolved.get("score")), "score") if "score" in resolved else None
-            native_id = (
-                (row.get(resolved["native_id"]) or "").strip() or None
-                if "native_id" in resolved else None
-            )
-            explicit_scan = _integer(row.get(resolved.get("scan"))) if "scan" in resolved else None
-            explicit_charge = _integer(row.get(resolved.get("charge"))) if "charge" in resolved else None
-            explicit_rank = _integer(row.get(resolved.get("rank"))) if "rank" in resolved else None
-
-            parsed = parse_psm_identity(psm_id)
-            parsed_run = parsed_scan = parsed_charge = parsed_rank = None
-            if parsed is not None:
-                parsed_run, parsed_scan, parsed_charge, parsed_rank = parsed
             if native_id is not None:
                 method = "native_id"
                 status = "parsed"
             elif explicit_scan is not None:
                 method = "scan_column"
                 status = "parsed"
-                parsed_scan = explicit_scan
-                parsed_charge = explicit_charge if explicit_charge is not None else parsed_charge
-                parsed_rank = explicit_rank if explicit_rank is not None else parsed_rank
             elif parsed is not None:
                 method = "psm_id_right_split"
+                status = "parsed"
+            elif parsed_scan is not None:
+                method = "scan_column"
                 status = "parsed"
             else:
                 method = None
@@ -347,12 +476,12 @@ def read_percolator_tsv(
                     q_value=q_value,
                     pep=pep,
                     peptide_raw=peptide,
-                    proteins=(row.get(resolved["proteins"]) or "").strip() or None
+                    proteins=_text(row.get(resolved.get("proteins"))) or None
                     if "proteins" in resolved else None,
                     parsed_run=parsed_run,
                     parsed_scan=parsed_scan,
-                    parsed_charge=explicit_charge if explicit_charge is not None else parsed_charge,
-                    parsed_rank=explicit_rank if explicit_rank is not None else parsed_rank,
+                    parsed_charge=parsed_charge,
+                    parsed_rank=parsed_rank,
                     native_id=native_id,
                     mapping_method=method,
                     mapping_status=status,
@@ -361,7 +490,17 @@ def read_percolator_tsv(
             qc.accepted_count += 1
         except (TypeError, ValueError):
             qc.failed_rows += 1
+    if requested_run and saw_run_identity and not qc.run_matched_count:
+        raise ValueError(
+            "identification table has no rows for mzML stem %r" % requested_run
+        )
     return IdentificationReadResult(tuple(records), qc)
+
+
+def read_percolator_tsv(path: Path | str, **kwargs) -> IdentificationReadResult:
+    """Compatibility wrapper; the reader now also accepts Parquet inputs."""
+
+    return read_identification_table(path, **kwargs)
 
 
 def map_identifications_to_ms2(

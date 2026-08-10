@@ -17,6 +17,7 @@ def test_known_suffix_normalization_removes_only_the_expected_tail():
     assert normalized_mzml_stem("sample.part.mzML.gz") == "sample.part"
     assert normalized_mzml_stem("sample.mzML") == "sample"
     assert normalized_psm_stem("sample.part.percolator.target.psms.tsv") == "sample.part"
+    assert normalized_psm_stem("sample.part.percolator.target.peptides.parquet") == "sample.part"
     assert normalized_mzml_stem("sample.mzML.txt") is None
 
 
@@ -51,6 +52,26 @@ def test_auto_pairing_rejects_duplicate_normalized_stems(tmp_path):
     (mzml / "RUN.mzML.gz").write_bytes(b"")
     with pytest.raises(ValueError, match="duplicate normalized mzML"):
         auto_pair_runs(mzml, psm)
+
+
+def test_auto_pairing_and_manifest_infer_parquet_psm_format(tmp_path):
+    mzml = tmp_path / "mzml"
+    psm = tmp_path / "psm"
+    mzml.mkdir()
+    psm.mkdir()
+    (mzml / "run.mzML").write_bytes(b"")
+    source = psm / "run.percolator.target.peptides.parquet"
+    source.write_bytes(b"PAR1placeholderPAR1")
+
+    report = auto_pair_runs(mzml, psm)
+    assert report.rows[0]["psm_format"] == "percolator_parquet"
+
+    manifest = tmp_path / "runs.tsv"
+    write_manifest(
+        manifest,
+        [{"run_id": "run", "mzml_path": mzml / "run.mzML", "psm_path": source}],
+    )
+    assert read_manifest(manifest)[0].psm_format == "percolator_parquet"
 
 
 def test_manifest_read_resolves_relative_paths_and_rejects_duplicates(tmp_path):

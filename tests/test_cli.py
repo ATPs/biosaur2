@@ -106,6 +106,30 @@ def test_log_level_validation_and_debug_format(tmp_path):
     assert "Stage complete: probe_stage runtime_sec=" in result.stderr
 
 
+def test_advanced_psm_column_overrides_are_parsed(monkeypatch, tmp_path):
+    captured = {}
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    monkeypatch.setattr(
+        search_module,
+        "_execute_inputs",
+        lambda args, parser, logger: captured.update(args),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "biosaur2", str(source), "--feature-mode", "hybrid",
+            "--psm-run-column", "idn", "--psm-scan-column", "scan_id",
+            "--psm-q-value-column", "qvalue",
+        ],
+    )
+    search_module.run()
+    assert captured["psm_run_column"] == "idn"
+    assert captured["psm_scan_column"] == "scan_id"
+    assert captured["psm_q_value_column"] == "qvalue"
+
+
 def test_invalid_output_controls_fail_during_argument_validation(tmp_path):
     source = tmp_path / "sample.mzML"
     source.write_bytes(b"")
@@ -199,6 +223,8 @@ def test_help_documents_everyday_output_contract():
         "--generic-ms2-isotope-errors",
         "--generic-local-max-width-sec",
         "--parquet-compression",
+        "--psm-id-column",
+        "--psm-run-column",
     ):
         assert advanced not in result.stdout
 
@@ -221,6 +247,9 @@ def test_help_all_explains_defaults_and_advanced_evidence_controls():
         "99th percentile",
         "clamped to 15-60 s",
         "separate from --ms2-rt-tolerance-sec",
+        "--psm-id-column",
+        "--psm-run-column",
+        "--psm-q-value-column",
     ):
         assert text in help_text
 
@@ -332,6 +361,7 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     assert "--keep-cache" in help_result.stdout
     assert "--max-charge" in help_result.stdout
     assert "--relaxed-ms2-feature" not in help_result.stdout
+    assert "--psm-id-column" not in help_result.stdout
     assert "(default: 120.0)" in help_result.stdout
     assert "(default: 0.01)" in help_result.stdout
     assert "(default: all)" in help_result.stdout
@@ -347,6 +377,8 @@ def test_project_rt_tolerance_is_exposed_and_validated(tmp_path):
     assert "--external-weak-max-strong-overlap" in all_help.stdout
     assert "--external-min-support-runs" in all_help.stdout
     assert "--external-max-support-runs" in all_help.stdout
+    assert "--psm-id-column" in all_help.stdout
+    assert "--psm-run-column" in all_help.stdout
     assert "(default: 0.1)" in all_help.stdout
     assert "(default: 0.3)" in all_help.stdout
     assert "explicit positive value disables adaptation" in all_help.stdout

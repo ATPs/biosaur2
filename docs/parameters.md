@@ -21,7 +21,7 @@ scientific tolerance changes on representative data.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--psm-path` | empty | Same-run Percolator target PSM TSV. See [the input example](getting-started.md#psm-input). |
+| `--psm-path` | empty | Percolator target PSM TSV (compressed text supported) or Parquet. A multi-run table is filtered to the current mzML stem when it has a run/idn field. See [the input example](getting-started.md#psm-input). |
 | `--psm-q-value-max` | 0.01 | Maximum Percolator PSM q-value used to build direct peptide assays. |
 | `--fixed-mod` | none | Repeatable `SITE=MOD`, for example `C=UNIMOD:4` or `peptide_n_term=UNIMOD:1`. |
 | `--generic-ms2-refine` | true | For MS2 without a usable direct assay, test precursor hypotheses with target/decoy control and local recovery. |
@@ -38,6 +38,11 @@ whether an unidentified MS2 precursor was associated with MS1 signal more
 convincingly than shifted decoys. Project external rescue has a third,
 independent `--external-q-value-max` described below. See
 [Hybrid workflow](hybrid-workflow.md).
+
+The advanced `--psm-*-column` options, visible only in `biosaur2 --help-all`,
+override automatic semantic-column detection for composite PSM IDs, split
+run/scan/charge/rank identity, peptide, q-value and optional annotations.
+Extra source columns are accepted but are not copied to Biosaur2 outputs.
 
 ## External weak-feature rescue (`--help-all`)
 

@@ -209,7 +209,7 @@ def _recover_direct_assays(run_id, ingestion, assay_result, args, state):
                     "association_tier": "direct_id",
                     "status": status,
                     "charge_used": assay.charge,
-                    "charge_source": "psm",
+                    "charge_source": assay.charge_source,
                     "rt_error_sec": _rt_distance(assay.rt_sec, matched["rt_start"], matched["rt_end"]),
                 }
             )

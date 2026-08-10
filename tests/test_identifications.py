@@ -1,13 +1,18 @@
 import bz2
 import gzip
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+from biosaur2.chemistry import isotope_library, parse_peptidoform
+from biosaur2.hybrid_assays import build_direct_assays
 from biosaur2.identifications import (
     IdentificationRecord,
     map_identifications_to_ms2,
     parse_psm_identity,
     read_percolator_tsv,
+    read_identification_table,
 )
 
 
@@ -81,6 +86,93 @@ def test_reader_rejects_ambiguous_aliases_and_invalid_probabilities(tmp_path):
     result = read_percolator_tsv(invalid)
     assert result.qc.failed_rows == 1
     assert not result.records
+
+
+def test_reader_accepts_parquet_with_extra_columns_and_numeric_proteins(tmp_path):
+    source = tmp_path / "psms.percolator.target.peptides.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "PSMId": ["run_42_2_1"],
+                "score": [1.0],
+                "q-value": [0.001],
+                "peptide": ["PEPTIDE"],
+                "proteinIds": pa.array([42], type=pa.int32()),
+                "pipeline_extra": ["ignored"],
+            }
+        ),
+        source,
+    )
+
+    result = read_identification_table(source, run_id="run")
+
+    assert result.qc.input_format == "parquet"
+    assert result.qc.run_matched_count == 1
+    assert result.records[0].proteins == "42"
+    assert result.records[0].mapping_method == "psm_id_right_split"
+
+
+def test_reader_supports_split_identity_custom_columns_and_multi_run_filter(tmp_path):
+    source = tmp_path / "aggregated.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "my_idn": ["run_a", "run_b"],
+                "my_scan": [42, 43],
+                "my_charge": [2, 3],
+                "my_rank": [1, 1],
+                "my_peptide": ["PEPTIDE", "OTHER"],
+                "my_q": [0.001, 0.002],
+                "extra": [1, 2],
+            }
+        ),
+        source,
+    )
+    columns = {
+        "run_id": "my_idn",
+        "scan": "my_scan",
+        "charge": "my_charge",
+        "rank": "my_rank",
+        "peptide": "my_peptide",
+        "q_value": "my_q",
+    }
+
+    result = read_identification_table(source, run_id="run_a", column_map=columns)
+
+    assert result.qc.row_count == 2
+    assert result.qc.run_matched_count == 1
+    assert result.qc.run_filtered_count == 1
+    assert len(result.records) == 1
+    assert result.records[0].psm_id_raw.startswith("split:run_a:scan=42")
+    assert result.records[0].parsed_charge == 2
+    assert result.records[0].mapping_method == "scan_column"
+
+    with pytest.raises(ValueError, match="no rows for mzML stem"):
+        read_identification_table(source, run_id="absent", column_map=columns)
+
+
+def test_split_identity_can_use_mapped_mzml_charge_when_input_charge_is_absent(tmp_path):
+    source = tmp_path / "split.tsv"
+    source.write_text("idn\tscan_id\tq-value\tpeptide\nrun\t42\t0.001\tPEPTIDE\n")
+    record = read_identification_table(source, run_id="run").records[0]
+    peptidoform = parse_peptidoform("PEPTIDE")
+    mz = isotope_library(peptidoform.formula, 2)[0].mz
+    mapping = map_identifications_to_ms2(
+        [record],
+        [{
+            "ms2_event_id": 1,
+            "native_scan_number": 42,
+            "charge": 2,
+            "rt_sec": 10.0,
+            "selected_ion_mz": mz,
+        }],
+        run_id="run",
+    )
+
+    result = build_direct_assays(mapping, run_id="run")
+
+    assert result.assays[0].charge == 2
+    assert result.assays[0].charge_source == "mzml"
 
 
 def _record(psm_id="run_42_2_1", scan=42, charge=2, native_id=None):

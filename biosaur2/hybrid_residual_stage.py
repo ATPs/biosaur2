@@ -246,7 +246,7 @@ def _run_final_residual_direct_recheck(
                     "association_tier": "direct_id",
                     "status": "matched_final_residual_strict_feature",
                     "charge_used": assay.charge,
-                    "charge_source": "psm",
+                    "charge_source": assay.charge_source,
                     "rt_error_sec": _rt_distance(
                         assay.rt_sec,
                         matched["rt_start"],

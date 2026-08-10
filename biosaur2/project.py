@@ -28,6 +28,7 @@ from .raw_ms1 import source_fingerprint
 from .external_mbr import run_feature_mbr_stage
 from .project_validation import _read_output_table, validate_project as validate_project
 from .schema import PROJECT_SCHEMA_VERSION
+from .identifications import PSM_COLUMN_OPTIONS
 
 
 logger = logging.getLogger(__name__)
@@ -264,6 +265,10 @@ def _command_for_run(run, paths, options):
         command.extend(("--psm-q-value-max", str(q_value)))
         if options["psm_pep_max"] is not None:
             command.extend(("--psm-pep-max", str(options["psm_pep_max"])))
+        for _semantic, option, _description in PSM_COLUMN_OPTIONS:
+            value = options.get(option[2:].replace("-", "_"))
+            if value is not None and str(value).strip():
+                command.extend((option, str(value).strip()))
         fixed = list(options["fixed_mod"])
         if run.fixed_mods:
             fixed.extend(value.strip() for value in run.fixed_mods.split(";") if value.strip())
@@ -824,7 +829,7 @@ def run_project(manifest, output_dir, project_db, **options):
             raise FileNotFoundError("mzML input does not exist: %s" % run.mzml_path)
         if run.psm_path is not None and not run.psm_path.is_file():
             raise FileNotFoundError("PSM input does not exist: %s" % run.psm_path)
-        if run.psm_format not in {None, "percolator_tsv"}:
+        if run.psm_format not in {None, "percolator_tsv", "percolator_parquet"}:
             raise ValueError("unsupported psm_format for %s: %s" % (run.run_id, run.psm_format))
 
     successful = _read_successful_runs(database) if options["resume"] else {}

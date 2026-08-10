@@ -17,6 +17,7 @@ import time
 import traceback
 from .output import input_stem
 from .output import planned_output_paths
+from .identifications import PSM_COLUMN_OPTIONS
 from .cache_runtime import CacheWorkspace, default_cache_dir
 from .duckdb_output import DuckDBOutputManager, uses_duckdb
 from .legacy_output import CompactOutputManager
@@ -566,9 +567,18 @@ Advanced output notes:
         default='legacy',
         help='legacy=strict untargeted; hybrid=direct/generic MS2 residual workflow',
     )
-    parser.add_argument('--psm-path', default='', help='same-run Percolator target PSM TSV (optionally compressed); empty runs hybrid without direct PSM assays')
+    parser.add_argument('--psm-path', default='', help='same-run or multi-run Percolator target PSM TSV/Parquet; matching rows are selected by mzML stem, and empty runs hybrid without direct PSM assays')
     parser.add_argument('--psm-q-value-max', type=float, default=0.01, help='maximum Percolator PSM q-value accepted before direct-assay construction')
     parser.add_argument('--psm-pep-max', type=float, default=None, help=_advanced_help(show_all, 'optional maximum PSM posterior error probability; none disables the additional PEP filter'))
+    for _semantic, option, description in PSM_COLUMN_OPTIONS:
+        parser.add_argument(
+            option,
+            default=None,
+            help=_advanced_help(
+                show_all,
+                'override automatic PSM-column detection for %s' % description,
+            ),
+        )
     parser.add_argument('--fixed-mod', action='append', default=[], help='repeatable fixed modification SITE=MOD, for example C=UNIMOD:4 or peptide_n_term=UNIMOD:1')
     parser.add_argument(
         '--quant-method',

@@ -12,10 +12,15 @@ from typing import Iterable, Mapping, Optional
 
 MZML_SUFFIXES = (".mzml.gz", ".mzml")
 PSM_SUFFIXES = (
+    ".percolator.target.peptides.parquet",
+    ".percolator.target.psms.parquet",
     ".percolator.target.psms.tsv.gz",
     ".percolator.target.psms.tsv",
+    ".target.peptides.parquet",
+    ".target.psms.parquet",
     ".target.psms.tsv.gz",
     ".target.psms.tsv",
+    ".psms.parquet",
     ".psms.tsv.gz",
     ".psms.tsv",
 )
@@ -75,6 +80,16 @@ def normalized_psm_stem(
     return _strip_known_suffix(Path(path).name, suffixes)
 
 
+def psm_format_for_path(path: Path | str) -> str:
+    """Return the legacy-compatible manifest label for a PSM source path."""
+
+    return (
+        "percolator_parquet"
+        if Path(path).suffix.casefold() == ".parquet"
+        else "percolator_tsv"
+    )
+
+
 def _index_known_files(directory: Path, kind: str, suffixes: Iterable[str]):
     if not directory.is_dir():
         raise ValueError("%s directory does not exist: %s" % (kind, directory))
@@ -125,7 +140,7 @@ def auto_pair_runs(
                 "run_id": run_id,
                 "mzml_path": str(mzml_path),
                 "psm_path": "" if psm_path is None else str(psm_path),
-                "psm_format": "" if psm_path is None else "percolator_tsv",
+                "psm_format": "" if psm_path is None else psm_format_for_path(psm_path),
             }
         )
     if missing and not allow_missing_psm:
@@ -234,7 +249,7 @@ def read_manifest(path: Path | str) -> tuple[RunSpec, ...]:
             if not 0.0 <= q_value_max <= 1.0:
                 raise ValueError("q_value_max must be in [0, 1] on line %d" % line_number)
         psm_format = (row.get("psm_format") or "").strip() or (
-            "percolator_tsv" if psm_path is not None else None
+            psm_format_for_path(psm_path) if psm_path is not None else None
         )
         metadata = {
             column: (row.get(column) or "").strip()

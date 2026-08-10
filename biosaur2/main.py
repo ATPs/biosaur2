@@ -26,7 +26,11 @@ from .raw_ms1 import load_raw_ms1_cache
 from .stage_cache import build_strict_stage_payload, invalidate_stale_strict_stage_cache, load_strict_stage_cache, save_strict_stage_cache
 from .hybrid import AssayBuildResult, build_direct_assays, run_hybrid_postprocessing
 from .direct_competitors import capture_direct_processed_hill_competitors
-from .identifications import map_identifications_to_ms2, read_percolator_tsv
+from .identifications import (
+    map_identifications_to_ms2,
+    psm_column_map_from_args,
+    read_identification_table,
+)
 from .output import input_stem
 from .external_weak import append_rejected_candidate, publish_detector_outcomes, remember_reject_snapshot
 
@@ -878,16 +882,18 @@ def process_file(args):
         and args.get('psm_path')
     ):
         identification_started = _debug_stage_start(
-            'read_percolator_tsv', path=args['psm_path']
+            'read_identification_table', path=args['psm_path']
         )
-        identification_result = read_percolator_tsv(
+        identification_result = read_identification_table(
             args['psm_path'],
             q_value_max=float(args.get('psm_q_value_max', 0.01)),
             pep_max=args.get('psm_pep_max'),
+            column_map=psm_column_map_from_args(args),
+            run_id=input_stem(input_file_path),
         )
         args['_identification_parser_qc'] = identification_result.qc.to_dict()
         _debug_stage_complete(
-            'read_percolator_tsv',
+            'read_identification_table',
             identification_started,
             qc=args['_identification_parser_qc'],
         )

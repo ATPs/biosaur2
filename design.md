@@ -156,9 +156,13 @@ scientific-parameter fingerprints.
 
 ### Stage 1: Percolator parsing and exact chemistry
 
-The identification adapter handles common compression, BOM/encoding,
-delimiter/header variations and maps PSMs to MS2 using native identity when
-possible, otherwise safe run/scan parsing with charge validation.
+The identification adapter accepts compressed text or Parquet, handles common
+BOM/encoding, delimiter/header variations and semantic column aliases, and
+maps PSMs to MS2 using native identity when possible, otherwise safe
+PSMId or split run/scan parsing with charge validation. Extra source columns
+are ignored. Aggregate PSM inputs with a run/idn field are filtered to the
+current mzML filename stem before mapping; advanced column-name overrides are
+available only through `--help-all`.
 
 Default PSM filtering is q-value <= 0.01 and is configurable. Rank alone is not
 used to discard a PSM. Fixed modifications must be explicit, for example
