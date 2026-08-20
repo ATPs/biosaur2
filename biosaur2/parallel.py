@@ -6,9 +6,11 @@ import multiprocessing
 import math
 import os
 import queue
+import signal
 import traceback
 import logging
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -54,6 +56,7 @@ class ResourceSample:
     mem_available_bytes: int
     physical_memory_bytes: int
     cpu_count: int
+    root_pss_bytes: Dict[int, int] = field(default_factory=dict)
 
 
 def _read_proc_stat(pid):
@@ -176,13 +179,31 @@ class LinuxResourceSampler:
         self._previous_time = now
         self._previous_process_ticks = process_ticks
         self._previous_host = (host_total, host_idle)
+        root_set = {int(pid) for pid in root_pids}
+        owner_by_pid = {}
+
+        def root_owner(pid):
+            seen = set()
+            while pid in stats and pid not in seen:
+                if pid in root_set:
+                    return pid
+                seen.add(pid)
+                pid = stats[pid][0]
+            return None
+
+        root_pss = {pid: 0 for pid in root_set}
+        for pid in descendants:
+            owner = owner_by_pid.setdefault(pid, root_owner(pid))
+            if owner is not None:
+                root_pss[owner] += _read_proc_memory_bytes(pid)
         return ResourceSample(
             process_cpu_cores=process_cpu,
             host_busy_cores=host_busy,
-            process_pss_bytes=sum(_read_proc_memory_bytes(pid) for pid in descendants),
+            process_pss_bytes=sum(root_pss.values()),
             mem_available_bytes=available,
             physical_memory_bytes=physical,
             cpu_count=cpu_count,
+            root_pss_bytes=root_pss,
         )
 
 
@@ -191,22 +212,97 @@ class _MemoryEstimator:
 
     def __init__(self, default_bytes=16 * GIB):
         self.default_bytes = default_bytes
-        self.completed = []
+        self.completed = {}
 
-    @property
-    def estimate_bytes(self):
-        if len(self.completed) < 4:
-            return self.default_bytes
-        ordered = sorted(self.completed)
-        index = min(len(ordered) - 1, int(math.ceil(len(ordered) * 0.9)) - 1)
-        return max(4 * GIB, int(ordered[index] * 1.2))
+    def estimate_bytes(self, allocation=4):
+        allocation = max(1, int(allocation))
+        values = self.completed.get(allocation, ())
+        if len(values) >= 4:
+            ordered = sorted(values)
+            index = min(len(ordered) - 1, int(math.ceil(len(ordered) * 0.9)) - 1)
+            return max(4 * GIB, int(ordered[index] * 1.2))
+        lower = [value for value in self.completed if value < allocation and self.completed[value]]
+        if lower:
+            source = max(lower)
+            return int(self.estimate_bytes(source) * allocation / float(source))
+        return self.default_bytes
 
-    def observe(self, result):
-        if not isinstance(result, dict):
+    def speculative_estimate_bytes(self, allocation=4):
+        allocation = max(1, int(allocation))
+        values = self.completed.get(allocation, ())
+        if len(values) < 4:
+            lower = [value for value in self.completed if value < allocation and self.completed[value]]
+            if not lower:
+                return self.estimate_bytes(allocation)
+            source = max(lower)
+            source_values = sorted(self.completed[source])
+            median = source_values[len(source_values) // 2]
+            # Larger per-run pools often share input/output and have a
+            # sublinear PSS increase. A hard-limit breach remains preemptible.
+            return max(4 * GIB, int(median * 1.35))
+        ordered = sorted(values)
+        median = ordered[len(ordered) // 2]
+        return max(4 * GIB, int(median * 1.1))
+
+    def observe(self, allocation, peak_pss_bytes, result):
+        observed = int(peak_pss_bytes or 0)
+        if not observed and isinstance(result, dict):
+            observed = max(1, int(result.get("peak_rss_kib") or 0)) * 1024
+        if observed:
+            self.completed.setdefault(max(1, int(allocation)), []).append(observed)
+
+
+def _process_tree_pids(root_pid):
+    descendants, _stats = LinuxResourceSampler._descendants([root_pid])
+    return descendants | {int(root_pid)}
+
+
+def terminate_process_tree(root_pid, grace_seconds=10.0):
+    """Terminate a manager worker and every currently reachable descendant."""
+
+    pids = _process_tree_pids(root_pid)
+    for pid in sorted(pids - {root_pid}, reverse=True):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        os.kill(root_pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        alive = set()
+        for pid in pids:
+            try:
+                state = Path("/proc") / str(pid) / "stat"
+                fields = state.read_text(encoding="utf-8").split(")", 1)[1].split()
+                if fields and fields[0] != "Z":
+                    alive.add(pid)
+            except ProcessLookupError:
+                pass
+            except (FileNotFoundError, IndexError, OSError):
+                pass
+        if not alive:
             return
-        peak_kib = result.get("peak_rss_kib")
-        if peak_kib is not None:
-            self.completed.append(max(1, int(peak_kib)) * 1024)
+        time.sleep(0.1)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _adaptive_worker_entry(result_queue, worker_id, generation, function, args):
+    try:
+        result = function(*args)
+    except BaseException as exc:
+        result_queue.put((
+            "error", worker_id, generation,
+            WorkerFailure(worker_id, type(exc).__name__, str(exc), traceback.format_exc()),
+        ))
+        return
+    result_queue.put(("ok", worker_id, generation, result))
 
 
 def balanced_ranges(
@@ -359,6 +455,358 @@ def run_process_tasks(
     finally:
         for process in processes:
             process.join()
+        result_queue.close()
+        result_queue.join_thread()
+
+
+def run_adaptive_process_tasks(
+    function: Callable[..., Any],
+    task_args: Iterable[Sequence[Any]],
+    target_workers: int,
+    max_memory_bytes: int,
+    stop_on_result: Optional[Callable[[Any], bool]] = None,
+    on_result: Optional[Callable[[int, Any], None]] = None,
+    on_start: Optional[Callable[[int, Sequence[Any], int], None]] = None,
+    poll_seconds: float = 0.5,
+    heartbeat_seconds: float = 30.0,
+    resource_sampler=None,
+) -> Tuple[Dict[int, Any], List[int], Dict[str, Any]]:
+    """Schedule Project tasks with resource heartbeats and memory recovery."""
+
+    if target_workers < 1:
+        raise ValueError("target_workers must be a positive integer")
+    if max_memory_bytes < 1:
+        raise ValueError("max_memory_bytes must be positive")
+    if heartbeat_seconds <= 0:
+        raise ValueError("heartbeat_seconds must be positive")
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    task_iterator = enumerate(task_args)
+    active = {}
+    retry_queue = deque()
+    generations = {}
+    results = {}
+    started = []
+    exhausted = False
+    stop_submitting = False
+    cooldown_until = 0.0
+    allocation_ceiling = min(
+        max(1, os.cpu_count() or 1), int(math.ceil(target_workers * 1.5))
+    )
+    estimator = _MemoryEstimator()
+    sampler = resource_sampler or LinuxResourceSampler()
+    cpu_history = []
+    summary = {
+        "target_workers": target_workers,
+        "max_memory_bytes": max_memory_bytes,
+        "heartbeat_seconds": heartbeat_seconds,
+        "allocation_ceiling": allocation_ceiling,
+        "peak_active_tasks": 0,
+        "peak_allocated_workers": 0,
+        "peak_normal_allocated_workers": 0,
+        "peak_speculative_tasks": 0,
+        "peak_overcommit_tasks": 0,
+        "peak_scaled_tasks": 0,
+        "peak_process_cpu_cores": 0.0,
+        "peak_process_pss_bytes": 0,
+        "cpu_pause_count": 0,
+        "memory_pause_count": 0,
+        "memory_preemption_count": 0,
+        "memory_requeue_count": 0,
+        "heartbeat_count": 0,
+        "memory_wait_seconds": 0.0,
+        "last_wait_reason": None,
+    }
+
+    def allocation_total():
+        return sum(record["allocation"] for record in active.values())
+
+    def normal_allocation_total():
+        return sum(
+            record["allocation"]
+            for record in active.values()
+            if record["tier"] != "cpu_overcommit"
+        )
+
+    def reserve(value):
+        return max(8 * GIB, int(value.physical_memory_bytes * 0.05))
+
+    def median_cpu():
+        if len(cpu_history) < 3:
+            return None
+        return sorted(cpu_history)[len(cpu_history) // 2]
+
+    def sample():
+        value = sampler.sample([record["process"].pid for record in active.values()])
+        if active:
+            cpu_history.append(value.process_cpu_cores)
+            del cpu_history[:-3]
+        for record in active.values():
+            record["peak_pss_bytes"] = max(
+                record["peak_pss_bytes"],
+                value.root_pss_bytes.get(record["process"].pid, 0),
+            )
+        summary["peak_process_cpu_cores"] = max(
+            summary["peak_process_cpu_cores"], value.process_cpu_cores
+        )
+        summary["peak_process_pss_bytes"] = max(
+            summary["peak_process_pss_bytes"], value.process_pss_bytes
+        )
+        return value
+
+    def pull_task():
+        nonlocal exhausted
+        if retry_queue:
+            return retry_queue.popleft()
+        if exhausted:
+            return None
+        try:
+            worker_id, args = next(task_iterator)
+        except StopIteration:
+            exhausted = True
+            return None
+        return worker_id, args, 0
+
+    def memory_allowed(allocation, value, speculative=False):
+        estimate = (
+            estimator.speculative_estimate_bytes(allocation)
+            if speculative else estimator.estimate_bytes(allocation)
+        )
+        predicted = max(value.process_pss_bytes, len(active) * estimate) + estimate
+        limit = int(max_memory_bytes * 0.90) if speculative else max_memory_bytes
+        return predicted <= limit and value.mem_available_bytes >= reserve(value) + estimate
+
+    def cpu_allowed(value, speculative=False):
+        median = median_cpu()
+        if median is None:
+            return not speculative
+        if median >= target_workers * 0.90:
+            summary["cpu_pause_count"] += 1
+            return False
+        if value.host_busy_cores >= value.cpu_count * 0.95:
+            summary["cpu_pause_count"] += 1
+            return False
+        return not speculative or median < target_workers * 0.70
+
+    def choose(value):
+        remaining = target_workers - normal_allocation_total()
+        if remaining > 0:
+            allocation = min(4, remaining)
+            if (
+                allocation_total() + allocation <= allocation_ceiling
+                and memory_allowed(allocation, value)
+                and cpu_allowed(value)
+            ):
+                return allocation, "normal", "ok"
+            summary["memory_pause_count"] += 1
+            if (
+                time.monotonic() >= cooldown_until
+                and allocation_total() + allocation <= allocation_ceiling
+                and memory_allowed(allocation, value, speculative=True)
+                and cpu_allowed(value, speculative=True)
+            ):
+                return allocation, "memory_speculative", "memory_speculative"
+            return None, None, "memory"
+        if allocation_total() + 1 > allocation_ceiling:
+            return None, None, "allocation"
+        if (
+            time.monotonic() >= cooldown_until
+            and allocation_total() + 8 <= allocation_ceiling
+            and memory_allowed(8, value, speculative=True)
+            and cpu_allowed(value, speculative=True)
+        ):
+            return 8, "cpu_overcommit", "scaled"
+        if not memory_allowed(1, value, speculative=True):
+            summary["memory_pause_count"] += 1
+            return None, None, "memory"
+        if (
+            time.monotonic() >= cooldown_until
+            and cpu_allowed(value, speculative=True)
+        ):
+            return 1, "cpu_overcommit", "cpu_overcommit"
+        return None, None, "cpu"
+
+    def start_next(allocation, tier):
+        task = pull_task()
+        if task is None:
+            return False
+        worker_id, args, preemptions = task
+        generation = generations.get(worker_id, 0) + 1
+        generations[worker_id] = generation
+        if on_start is not None:
+            on_start(worker_id, args, allocation)
+        process = context.Process(
+            target=_adaptive_worker_entry,
+            args=(result_queue, worker_id, generation, function, tuple(args) + (allocation,)),
+        )
+        process.start()
+        active[worker_id] = {
+            "args": args,
+            "allocation": allocation,
+            "generation": generation,
+            "peak_pss_bytes": 0,
+            "preemptions": preemptions,
+            "process": process,
+            "started_at": time.monotonic(),
+            "tier": tier,
+        }
+        started.append(worker_id)
+        summary["peak_active_tasks"] = max(summary["peak_active_tasks"], len(active))
+        summary["peak_allocated_workers"] = max(summary["peak_allocated_workers"], allocation_total())
+        summary["peak_normal_allocated_workers"] = max(
+            summary["peak_normal_allocated_workers"], normal_allocation_total()
+        )
+        summary["peak_speculative_tasks"] = max(
+            summary["peak_speculative_tasks"],
+            sum(item["tier"] == "memory_speculative" for item in active.values()),
+        )
+        summary["peak_overcommit_tasks"] = max(
+            summary["peak_overcommit_tasks"],
+            sum(item["tier"] == "cpu_overcommit" for item in active.values()),
+        )
+        summary["peak_scaled_tasks"] = max(
+            summary["peak_scaled_tasks"],
+            sum(item["tier"] == "cpu_overcommit" and item["allocation"] > 1 for item in active.values()),
+        )
+        return True
+
+    def fill(value):
+        speculative_starts = 0
+        scaled_starts = 0
+        while not stop_submitting:
+            allocation, tier, reason = choose(value)
+            if allocation is None:
+                summary["last_wait_reason"] = reason
+                return
+            if tier == "memory_speculative" and speculative_starts >= 2:
+                return
+            if reason == "scaled" and scaled_starts >= 1:
+                return
+            if not start_next(allocation, tier):
+                return
+            if tier == "memory_speculative":
+                speculative_starts += 1
+            if reason == "scaled":
+                scaled_starts += 1
+
+    def preempt_for_memory(value):
+        nonlocal cooldown_until, stop_submitting
+        if value.process_pss_bytes <= max_memory_bytes and value.mem_available_bytes >= reserve(value):
+            return
+        projected = value.process_pss_bytes
+        recovery = int(max_memory_bytes * 0.95)
+        victims = sorted(
+            active.items(),
+            key=lambda item: (
+                0 if item[1]["tier"] != "normal" else 1,
+                -item[1]["started_at"],
+            ),
+        )
+        for worker_id, record in victims:
+            if projected <= recovery:
+                break
+            active.pop(worker_id, None)
+            terminate_process_tree(record["process"].pid)
+            record["process"].join(timeout=1.0)
+            projected -= max(
+                record["peak_pss_bytes"], estimator.estimate_bytes(record["allocation"])
+            )
+            preemptions = record["preemptions"] + 1
+            if preemptions >= 3 and not active:
+                failure = WorkerFailure(
+                    worker_id, "MemoryLimitExceeded",
+                    "task exceeds --max-memory after repeated resource preemption", "",
+                )
+                results[worker_id] = failure
+                if on_result is not None:
+                    on_result(worker_id, failure)
+                stop_submitting = True
+            else:
+                retry_queue.appendleft((worker_id, record["args"], preemptions))
+                summary["memory_requeue_count"] += 1
+            summary["memory_preemption_count"] += 1
+        cooldown_until = time.monotonic() + 60.0
+        logger.warning(
+            "Project scheduler memory recovery: pss=%.1f GiB available=%.1f GiB preempted=%d",
+            value.process_pss_bytes / float(GIB),
+            value.mem_available_bytes / float(GIB), summary["memory_preemption_count"],
+        )
+
+    try:
+        value = sample()
+        if estimator.estimate_bytes(4) > max_memory_bytes:
+            raise ValueError(
+                "--max-memory is below the initial per-run admission estimate "
+                "of %.1f GiB" % (estimator.estimate_bytes(4) / float(GIB))
+            )
+        next_heartbeat = time.monotonic()
+        while active or retry_queue or not exhausted:
+            if time.monotonic() >= next_heartbeat:
+                value = sample()
+                next_heartbeat = time.monotonic() + heartbeat_seconds
+                summary["heartbeat_count"] += 1
+                logger.info(
+                    "Project scheduler heartbeat: active=%d allocated=%d cpu=%.1f pss=%.1f GiB available=%.1f GiB",
+                    len(active), allocation_total(), value.process_cpu_cores,
+                    value.process_pss_bytes / float(GIB), value.mem_available_bytes / float(GIB),
+                )
+                preempt_for_memory(value)
+                if not stop_submitting:
+                    fill(value)
+            if not active:
+                if not stop_submitting:
+                    fill(value)
+                if not active and not stop_submitting and (retry_queue or not exhausted):
+                    summary["memory_wait_seconds"] += poll_seconds
+                    time.sleep(poll_seconds)
+                    continue
+                break
+            try:
+                status, worker_id, generation, payload = result_queue.get(timeout=poll_seconds)
+            except queue.Empty:
+                failed = next(
+                    (
+                        (worker_id, record)
+                        for worker_id, record in active.items()
+                        if record["process"].exitcode is not None
+                    ),
+                    None,
+                )
+                if failed is not None:
+                    worker_id, record = failed
+                    active.pop(worker_id)
+                    record["process"].join()
+                    payload = WorkerFailure(
+                        worker_id=worker_id,
+                        exception_type="ProcessExit",
+                        message="child exited with code %s before reporting" % record["process"].exitcode,
+                        traceback_text="",
+                    )
+                    results[worker_id] = payload
+                    if on_result is not None:
+                        on_result(worker_id, payload)
+                    stop_submitting = True
+                continue
+            record = active.get(worker_id)
+            if record is None or record["generation"] != generation:
+                continue
+            active.pop(worker_id)
+            record["process"].join()
+            estimator.observe(record["allocation"], record["peak_pss_bytes"], payload)
+            results[worker_id] = payload
+            if on_result is not None:
+                on_result(worker_id, payload)
+            if status == "error" or (stop_on_result is not None and stop_on_result(payload)):
+                stop_submitting = True
+            if not stop_submitting:
+                value = sample()
+                preempt_for_memory(value)
+                fill(value)
+        return results, started, summary
+    finally:
+        for record in active.values():
+            terminate_process_tree(record["process"].pid)
+            record["process"].join()
         result_queue.close()
         result_queue.join_thread()
 
@@ -539,7 +987,7 @@ def run_budgeted_process_tasks(
         result_queue.join_thread()
 
 
-def run_adaptive_process_tasks(
+def _run_adaptive_process_tasks_legacy(
     function: Callable[..., Any],
     task_args: Iterable[Sequence[Any]],
     target_workers: int,

@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from biosaur2.parallel import (
     GIB,
     ResourceSample,
+    WorkerFailure,
     WorkerProcessError,
     balanced_ranges,
     effective_worker_budget,
@@ -35,6 +37,10 @@ def _failed_status(value):
 def _slow_resource_task(value, _allocated_workers):
     time.sleep(0.35)
     return {"value": value, "peak_rss_kib": 1024}
+
+
+def _exit_without_result(_value, _allocated_workers):
+    os._exit(0)
 
 
 class _IdleSampler:
@@ -75,6 +81,27 @@ class _BootstrapMemorySampler(_IdleSampler):
             mem_available_bytes=available,
             physical_memory_bytes=512 * GIB,
             cpu_count=80,
+        )
+
+
+class _PreemptOnceSampler(_IdleSampler):
+    def __init__(self):
+        self.preempted = False
+
+    def sample(self, pids):
+        if pids and not self.preempted:
+            self.preempted = True
+            pss = 65 * GIB
+        else:
+            pss = 0
+        return ResourceSample(
+            process_cpu_cores=0.0,
+            host_busy_cores=0.0,
+            process_pss_bytes=pss,
+            mem_available_bytes=512 * GIB,
+            physical_memory_bytes=512 * GIB,
+            cpu_count=80,
+            root_pss_bytes={pid: pss for pid in pids},
         )
 
 
@@ -144,7 +171,7 @@ def test_bounded_file_scheduler_does_not_eagerly_consume_large_batches():
     assert set(results) == {0, 1, 2, 3}
 
 
-def test_adaptive_scheduler_adds_one_worker_runs_only_after_cpu_warmup():
+def test_adaptive_scheduler_reuses_four_worker_allocation_after_completion():
     results, started, summary = run_adaptive_process_tasks(
         _slow_resource_task,
         ((value,) for value in range(3)),
@@ -156,7 +183,8 @@ def test_adaptive_scheduler_adds_one_worker_runs_only_after_cpu_warmup():
     assert set(results) == {0, 1, 2}
     assert started == [0, 1, 2]
     assert summary["allocation_ceiling"] == 6
-    assert summary["peak_allocated_workers"] == 6
+    assert summary["peak_allocated_workers"] == 4
+    assert summary["peak_normal_allocated_workers"] == 4
 
 
 def test_adaptive_scheduler_records_memory_admission_pauses():
@@ -167,6 +195,7 @@ def test_adaptive_scheduler_records_memory_admission_pauses():
         max_memory_bytes=32 * GIB,
         resource_sampler=_MemoryBoundSampler(),
         poll_seconds=0.02,
+        heartbeat_seconds=0.02,
     )
     assert set(results) == {0, 1}
     assert started == [0, 1]
@@ -181,6 +210,7 @@ def test_adaptive_scheduler_waits_for_memory_before_bootstrap():
         max_memory_bytes=64 * GIB,
         resource_sampler=_BootstrapMemorySampler(),
         poll_seconds=0.01,
+        heartbeat_seconds=0.01,
     )
     assert set(results) == {0}
     assert started == [0]
@@ -196,3 +226,63 @@ def test_adaptive_scheduler_rejects_impossible_memory_limit():
             max_memory_bytes=2 * GIB,
             resource_sampler=_IdleSampler(),
         )
+
+
+def test_adaptive_scheduler_preempts_and_requeues_memory_pressure():
+    results, started, summary = run_adaptive_process_tasks(
+        _slow_resource_task,
+        ((0,),),
+        target_workers=4,
+        max_memory_bytes=64 * GIB,
+        resource_sampler=_PreemptOnceSampler(),
+        poll_seconds=0.02,
+        heartbeat_seconds=0.02,
+    )
+    assert set(results) == {0}
+    assert results[0]["value"] == 0
+    assert started == [0, 0]
+    assert summary["memory_preemption_count"] == 1
+    assert summary["memory_requeue_count"] == 1
+
+
+def test_adaptive_scheduler_adds_a_bounded_eight_worker_run_when_cpu_is_idle():
+    allocations = []
+    results, _started, summary = run_adaptive_process_tasks(
+        _slow_resource_task,
+        ((value,) for value in range(5)),
+        target_workers=16,
+        max_memory_bytes=256 * GIB,
+        resource_sampler=_IdleSampler(),
+        on_start=lambda _worker_id, _args, allocation: allocations.append(allocation),
+        poll_seconds=0.02,
+        heartbeat_seconds=0.02,
+    )
+    assert set(results) == {0, 1, 2, 3, 4}
+    assert allocations[:4] == [4, 4, 4, 4]
+    assert 8 in allocations
+    assert summary["peak_scaled_tasks"] == 1
+
+
+def test_adaptive_scheduler_reports_a_clean_child_exit_without_result():
+    results, started, _summary = run_adaptive_process_tasks(
+        _exit_without_result,
+        ((0,),),
+        target_workers=1,
+        max_memory_bytes=64 * GIB,
+        resource_sampler=_IdleSampler(),
+        poll_seconds=0.02,
+    )
+    assert started == [0]
+    assert isinstance(results[0], WorkerFailure)
+    assert results[0].exception_type == "ProcessExit"
+
+
+def test_adaptive_scheduler_defaults_to_thirty_second_heartbeats():
+    _results, _started, summary = run_adaptive_process_tasks(
+        _slow_resource_task,
+        ((0,),),
+        target_workers=1,
+        max_memory_bytes=64 * GIB,
+        resource_sampler=_IdleSampler(),
+    )
+    assert summary["heartbeat_seconds"] == 30.0

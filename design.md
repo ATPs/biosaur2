@@ -459,12 +459,14 @@ published, and the remaining workspace is deleted after Project success. With
 `--keep-cache`, stable source-keyed run directories allow later compatible
 commands to reuse every layer.
 
-For Project mode, `--workers` is a busy-core target. The manager starts a
-four-worker cohort and samples the owned process tree's CPU/PSS plus system
-available memory from Linux `/proc`. After three low-CPU samples it adds
-one-worker runs; declared allocations are capped at 1.5 times the target and
-new submission stops when CPU or `--max-memory` (integer GiB, no swap) would be
-exceeded. Local work uses this manager while feature-MBR matching is a bounded
+For Project mode, `--workers` is a busy-core target. The manager normally uses
+four workers per run and samples each owned run's complete process-tree PSS
+plus system available memory from Linux `/proc` every 30 seconds. When CPU is
+idle it can admit bounded speculative work, including a preemptible
+eight-worker run when the PSS estimate permits it. Declared allocations are capped at 1.5 times the
+target. CPU pressure pauses submission; a hard `--max-memory` breach (integer
+GiB, no swap) preempts newest speculative work, terminates its process tree,
+and requeues it after recovery. Local work uses this manager while feature-MBR matching is a bounded
 in-memory Project stage. Atomic per-run checkpoint records make default resume
 skip compatible local work. Project alignment and competition are then rerun
 deterministically from source-fingerprinted strong/weak sidecars; there is no
@@ -530,7 +532,8 @@ MS1 output defaults on in Hybrid and off in Legacy; `--write-ms1` and
 | generic local maximum width | `auto` | Strict-feature width q99 clamped to 15-60 s; fallback 30 s. |
 | relaxed local minima/cosine | mono 2; channel 2; channels 2; cosine 0.95 | Guarded retry defaults. |
 | relaxed MS2 feature | false | Conservative MS2-only retry is disabled by default. |
-| project workers | 4 | Busy-core target for the adaptive Project manager; declared allocation is bounded at 1.5x. |
+| project workers | 4 | Busy-core target for the adaptive Project manager; normal runs use four workers and declared allocation is bounded at 1.5x. |
+| scheduler heartbeat | 30 sec | Resource sampling interval for adaptive Project admission and memory recovery. |
 | project max memory | physical RAM | Integer-GiB Project admission limit, excluding swap. |
 
 ## Module responsibilities

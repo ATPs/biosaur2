@@ -97,10 +97,14 @@ External-ID is enabled by default for Hybrid projects. Use
 cross-run stage. A single-file Hybrid command may create private sidecars for
 later Project use, but cannot rescue candidates by itself.
 
-`--workers` is the Project manager's busy-core target. It starts with
-multi-worker runs, adds lower-allocation runs while sampled CPU is below target,
-and admits work only while the configured physical-memory budget permits.
-`--max-memory` is an integer GiB admission cap; swap is excluded.
+`--workers` is the Project manager's busy-core target. It normally allocates
+four workers per run, adds controlled speculative work while sampled CPU is
+idle, and may add a preemptible eight-worker run while sustained CPU headroom
+and the PSS estimate permit it. A resource heartbeat runs every 30 seconds by default; use
+`--scheduler-heartbeat-seconds` to change that interval. CPU pressure pauses
+new submission. A hard memory breach terminates the newest preemptible run and
+requeues it after memory recovers. `--max-memory` is an integer GiB admission
+cap; swap is excluded.
 
 For Parquet or TSV, every run directory contains its own `features`,
 `ms2_events`, `identifications` and Project external evidence files. With

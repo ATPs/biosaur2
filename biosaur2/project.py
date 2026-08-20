@@ -60,6 +60,7 @@ def _resume_option_signature(options):
         "continue_on_error",
         "workers",
         "max_memory",
+        "scheduler_heartbeat_seconds",
         "cache_dir",
         "keep_cache",
         "log_level",
@@ -974,6 +975,7 @@ def run_project(manifest, output_dir, project_db, **options):
         ),
         on_result=checkpoint_local_result,
         on_start=checkpoint_local_start,
+        heartbeat_seconds=float(options.get("scheduler_heartbeat_seconds", 30)),
     )
     options["_local_scheduler_summary"] = {
         "initial": scheduler_summary,
