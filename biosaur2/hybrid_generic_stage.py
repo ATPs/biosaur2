@@ -39,16 +39,29 @@ def _run_generic_enabled_stage(**kwargs):
     generic_score_weights = kwargs["generic_score_weights"]
     generic_started = time.monotonic()
     logger.info("Hybrid generic stage: matching target precursor hypotheses")
+    standard_target_started = time.monotonic()
     target_links, target_summary = _generic_standard_links(
         ingestion.ms2_rows, ingestion, strict_contexts, args
     )
+    logger.debug(
+        'Hybrid generic standard target association complete: runtime_sec=%.3f events=%d',
+        time.monotonic() - standard_target_started,
+        len(target_links),
+    )
     logger.info("Hybrid generic stage: matching paired decoy hypotheses")
+    standard_decoy_started = time.monotonic()
     decoy_links, decoy_summary = _generic_standard_links(
         _generic_decoy_rows(run_id, ingestion.ms2_rows),
         ingestion,
         strict_contexts,
         args,
     )
+    logger.debug(
+        'Hybrid generic standard decoy association complete: runtime_sec=%.3f events=%d',
+        time.monotonic() - standard_decoy_started,
+        len(decoy_links),
+    )
+    standard_competition_started = time.monotonic()
     generic_score_weights, generic_score_calibration = (
         _calibrate_generic_score_weights(
             audit_by_event,
@@ -87,6 +100,11 @@ def _run_generic_enabled_stage(**kwargs):
             "audit": dict(sorted(generic_status_counts.items())),
             "competition": generic_competition_counts,
         },
+    )
+    logger.debug(
+        'Hybrid generic standard competition complete: runtime_sec=%.3f events=%d',
+        time.monotonic() - standard_competition_started,
+        len(target_links),
     )
 
     local_events = _generic_local_refinement_events(
@@ -142,6 +160,7 @@ def _run_generic_enabled_stage(**kwargs):
         "min_supported_channels": int(args.get("generic_local_min_supported_channels", 2)),
         "min_cosine": float(args.get("generic_local_min_isotope_cosine", 0.90)),
     }
+    standard_local_started = time.monotonic()
     target_local, decoy_local = _evaluate_cached_generic_pair_stage(
         source_path=args["file"],
         cache_root=args.get("hybrid_candidate_cache_dir"),
@@ -156,10 +175,22 @@ def _run_generic_enabled_stage(**kwargs):
         options=standard_local_options,
         telemetry=local_candidate_cache_telemetry,
     )
+    logger.debug(
+        'Hybrid generic local candidate evaluation complete: runtime_sec=%.3f events=%d workers=%d',
+        time.monotonic() - standard_local_started,
+        len(target_local),
+        local_workers,
+    )
+    standard_local_competition_started = time.monotonic()
     local_competitions, local_q_family_counts = (
         _compete_generic_local_by_input_family(
             target_local, decoy_local, local_input_status_by_event
         )
+    )
+    logger.debug(
+        'Hybrid generic local competition complete: runtime_sec=%.3f events=%d',
+        time.monotonic() - standard_local_competition_started,
+        len(local_competitions),
     )
     local_status_counts = Counter()
     q_value_max = float(args.get("generic_q_value_max", 0.01))
@@ -422,11 +453,16 @@ def _run_relaxed_generic_recovery(state):
                 }
             )
         else:
+            relaxed_detector_started = time.monotonic()
             strict_competitor_result = final_strict_detector(
                 residual_ledger.materialize(),
                 strict_contexts=strict_contexts,
                 next_feature_id=next_feature_id,
                 args=args,
+            )
+            logger.debug(
+                'Hybrid relaxed generic final-strict detection complete: runtime_sec=%.3f',
+                time.monotonic() - relaxed_detector_started,
             )
             strict_competitor_records = _strict_feature_records(
                 strict_competitor_result.get("contexts", ())
@@ -464,6 +500,7 @@ def _run_relaxed_generic_recovery(state):
             "min_cosine": float(args.get("generic_relaxed_min_isotope_cosine", 0.95)),
             "relaxed": True,
         }
+        relaxed_local_started = time.monotonic()
         raw_relaxed_target, raw_relaxed_decoy = (
             _evaluate_cached_generic_pair_stage(
                 source_path=args["file"],
@@ -479,6 +516,12 @@ def _run_relaxed_generic_recovery(state):
                 options=relaxed_local_options,
                 telemetry=local_candidate_cache_telemetry,
             )
+        )
+        logger.debug(
+            'Hybrid relaxed generic local candidate evaluation complete: runtime_sec=%.3f events=%d workers=%d',
+            time.monotonic() - relaxed_local_started,
+            len(raw_relaxed_target),
+            local_workers,
         )
         (
             relaxed_target_local, relaxed_decoy_local, relaxed_competitions,

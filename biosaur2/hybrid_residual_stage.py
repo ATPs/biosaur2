@@ -2,6 +2,7 @@
 
 from collections import Counter
 import logging
+import time
 
 import numpy as np
 
@@ -36,6 +37,7 @@ def _run_final_residual_direct_recheck(
     strict_quant_rows,
     next_feature_id,
 ):
+    residual_started = time.monotonic()
     final_residual_contexts = []
     final_residual_records = []
     final_residual_quant_rows = []
@@ -53,11 +55,16 @@ def _run_final_residual_direct_recheck(
                 "incomplete_input_strict_ownership"
             )
         else:
+            detector_started = time.monotonic()
             detector_result = final_strict_detector(
                 residual_ledger.materialize(),
                 strict_contexts=strict_contexts,
                 next_feature_id=next_feature_id,
                 args=args,
+            )
+            logger.debug(
+                'Hybrid final residual strict detection complete: runtime_sec=%.3f',
+                time.monotonic() - detector_started,
             )
             next_feature_id = int(detector_result["next_feature_id"])
             final_residual_summary.update(
@@ -136,6 +143,7 @@ def _run_final_residual_direct_recheck(
                 detected_contexts, duplicate_ids
             )
             detected_records = _strict_feature_records(detected_contexts)
+            ownership_started = time.monotonic()
             final_ownership = _allocate_strict_feature_population(
                 residual_ledger, detected_records
             )
@@ -157,6 +165,12 @@ def _run_final_residual_direct_recheck(
                         "status_counts"
                     ],
                 }
+            )
+            logger.debug(
+                'Hybrid final residual ownership complete: runtime_sec=%.3f detected=%d accepted=%d',
+                time.monotonic() - ownership_started,
+                final_residual_summary['detected_candidate_count'],
+                len(final_residual_records),
             )
             for record in final_residual_records:
                 _scans, rt, traces = _strict_trace_grid(record)
@@ -283,6 +297,11 @@ def _run_final_residual_direct_recheck(
     final_residual_summary[
         "direct_ms2_recheck"
     ] = final_residual_direct_recheck
+    logger.debug(
+        'Hybrid final residual direct recheck complete: runtime_sec=%.3f accepted=%d',
+        time.monotonic() - residual_started,
+        len(final_residual_records),
+    )
     return _run_final_residual_generic_recheck(
         run_id=run_id,
         ingestion=ingestion,
@@ -320,6 +339,7 @@ def _run_final_residual_generic_recheck(
     next_feature_id,
     final_quant_rows,
 ):
+    generic_recheck_started = time.monotonic()
     final_residual_recheck = {
         "status": "not_run",
         "eligible_unlinked_event_count": 0,
@@ -386,6 +406,11 @@ def _run_final_residual_generic_recheck(
             },
         )
     final_residual_summary["ms2_recheck"] = final_residual_recheck
+    logger.debug(
+        'Hybrid final residual generic recheck complete: runtime_sec=%.3f eligible_events=%d',
+        time.monotonic() - generic_recheck_started,
+        final_residual_recheck['eligible_unlinked_event_count'],
+    )
 
     return {
         "final_residual_contexts": final_residual_contexts,

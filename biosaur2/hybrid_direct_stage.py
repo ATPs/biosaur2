@@ -23,10 +23,16 @@ def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_con
         len(assay_result.assays),
         len(ingestion.ms2_rows),
     )
-    strict_ownership_started = time.monotonic()
+    strict_index_started = time.monotonic()
     strict_records = _strict_feature_records(strict_contexts)
     strict_index = build_strict_feature_index(strict_records)
     strict_hill_claims = _strict_hill_claim_indexes(strict_contexts)
+    logger.debug(
+        'Hybrid direct strict-index preparation complete: runtime_sec=%.3f strict_features=%d',
+        time.monotonic() - strict_index_started,
+        len(strict_records),
+    )
+    strict_ownership_started = time.monotonic()
     residual_ledger = ResidualMS1Ledger(ingestion.raw_ms1_store)
     residual_allocation_status_counts = Counter()
     strict_ownership = _allocate_strict_feature_population(
@@ -45,6 +51,7 @@ def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_con
         len(strict_records),
         strict_ownership['status_counts'],
     )
+    processed_index_started = time.monotonic()
     local_candidate_cache_telemetry = []
     direct_processed_competitors = []
     direct_processed_by_psm = defaultdict(list)
@@ -62,6 +69,12 @@ def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_con
                 value[0].candidate_key,
             )
         )
+    logger.debug(
+        'Hybrid direct processed-hill index complete: runtime_sec=%.3f competitors=%d assays=%d',
+        time.monotonic() - processed_index_started,
+        len(direct_processed_competitors),
+        len(direct_processed_by_psm),
+    )
     base_ppm = float(args.get("itol", 8.0))
     base_rt_tolerance = float(
         args.get("ms2_rt_tolerance_sec", 120.0)

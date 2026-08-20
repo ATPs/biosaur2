@@ -43,6 +43,7 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
     final_residual_summary = residual["final_residual_summary"]
     final_quant_rows = residual["final_quant_rows"]
     next_feature_id = residual["next_feature_id"]
+    output_assembly_started = time.monotonic()
     _update_generic_quant_support(final_quant_rows, audit_by_event)
     final_feature_rows = _final_strict_feature_rows(strict_contexts, args)
     if final_residual_contexts:
@@ -68,6 +69,12 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
             "External weak-candidate local funnel: %s",
             weak_candidate_audit,
         )
+    logger.debug(
+        'Hybrid final output assembly complete: runtime_sec=%.3f feature_rows=%d quant_rows=%d',
+        time.monotonic() - output_assembly_started,
+        len(final_feature_rows),
+        len(final_quant_rows),
+    )
     args["_hybrid_summary"] = {
         "trace_extractor": "cython",
         "relaxed_ms2_feature_enabled": bool(

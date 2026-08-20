@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+import time
 from typing import Any, Dict, Iterable, Mapping
 
 import pyarrow as pa
@@ -40,6 +42,9 @@ from .schema import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def _quoted_sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -52,6 +57,7 @@ class DuckDBOutputManager:
 
         self.duckdb = duckdb
         self.args = args
+        self.duckdb_threads = max(1, int(args.get("nprocs", 1) or 1))
         self.overwrite = bool(args.get("overwrite"))
         self.database_mode = args.get("format") == "duckdb"
         self.schemas = compact_schemas(
@@ -247,7 +253,14 @@ class DuckDBOutputManager:
     def _ensure_connection(self):
         if self.connection is not None:
             return
-        self.connection = self.duckdb.connect(str(self.staging_path))
+        connection_started = time.monotonic()
+        self.connection = self.duckdb.connect(
+            str(self.staging_path),
+            config={"threads": str(self.duckdb_threads)},
+        )
+        # DuckDB can reuse a process-wide database instance whose prior
+        # connection setting overrides ``connect(config=...)``.
+        self.connection.execute("SET threads TO %d" % self.duckdb_threads)
         for table_name in self.table_names:
             registration = "_schema_" + table_name
             empty = pa.Table.from_batches(
@@ -264,6 +277,12 @@ class DuckDBOutputManager:
             "input_path VARCHAR, input_size BIGINT, "
             "parameters_json VARCHAR, provenance_json VARCHAR)"
         )
+        logger.debug(
+            'DuckDB output initialization complete: runtime_sec=%.3f tables=%s threads=%d',
+            time.monotonic() - connection_started,
+            self.table_names,
+            self.duckdb_threads,
+        )
 
     def _append(self, table_name: str, rows: Iterable[Mapping[str, Any]]):
         self._ensure_connection()
@@ -276,9 +295,16 @@ class DuckDBOutputManager:
         )
         self.connection.register(registration, table)
         try:
+            insert_started = time.monotonic()
             self.connection.execute(
                 'INSERT INTO "%s" SELECT * FROM "%s"'
                 % (table_name, registration)
+            )
+            logger.debug(
+                'DuckDB insert complete: runtime_sec=%.3f table=%s rows=%d',
+                time.monotonic() - insert_started,
+                table_name,
+                len(rows),
             )
         finally:
             self.connection.unregister(registration)
@@ -408,6 +434,7 @@ class DuckDBOutputManager:
             ]
             if compression in {"ZSTD", "BROTLI"}:
                 options.append("COMPRESSION_LEVEL %d" % compression_level)
+            copy_started = time.monotonic()
             self.connection.execute(
                 'COPY (SELECT * FROM "%s" ORDER BY %s) TO %s (%s)'
                 % (
@@ -416,6 +443,11 @@ class DuckDBOutputManager:
                     _quoted_sql_string(str(temp_path)),
                     ", ".join(options),
                 )
+            )
+            logger.debug(
+                'DuckDB sorted Parquet copy complete: runtime_sec=%.3f table=%s',
+                time.monotonic() - copy_started,
+                table_name,
             )
 
     def _write_provenance(self):
