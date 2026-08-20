@@ -502,6 +502,44 @@ class ResidualMS1Ledger:
             allocation_id, requested_total, by_point
         )
 
+    def commit_observed_point_footprint(
+        self,
+        allocation_id: Hashable,
+        footprint: ComponentFootprint,
+    ) -> AllocationResult:
+        """Commit a previously mapped observed-point footprint atomically.
+
+        Callers may build footprints against the immutable raw store in worker
+        processes, but commits remain ordered in this ledger's owner process.
+        """
+
+        if allocation_id in self._allocations:
+            raise ValueError("allocation ID already exists: %r" % (allocation_id,))
+        if footprint.status != "accepted":
+            return AllocationResult(
+                allocation_id,
+                footprint.status,
+                float(footprint.requested_intensity),
+                0.0,
+                0,
+                float(footprint.requested_intensity),
+            )
+        by_point = {}
+        for value in footprint.allocations:
+            point_index = int(value.point_index)
+            amount = float(value.intensity)
+            if (
+                point_index < 0
+                or point_index >= self.store.intensity.size
+                or not math.isfinite(amount)
+                or amount < 0
+            ):
+                raise ValueError("observed footprint contains an invalid allocation")
+            by_point[point_index] = by_point.get(point_index, 0.0) + amount
+        return self._commit_point_allocations(
+            allocation_id, float(footprint.requested_intensity), by_point
+        )
+
     def allocate_component(
         self,
         allocation_id: Hashable,

@@ -36,7 +36,7 @@ def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_con
     residual_ledger = ResidualMS1Ledger(ingestion.raw_ms1_store)
     residual_allocation_status_counts = Counter()
     strict_ownership = _allocate_strict_feature_population(
-        residual_ledger, strict_records
+        residual_ledger, strict_records, workers=int(args.get("nprocs", 1))
     )
     for status, count in strict_ownership["status_counts"].items():
         residual_allocation_status_counts["strict_" + status] += count

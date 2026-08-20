@@ -20,6 +20,8 @@ from .hybrid_local import (
     _faims_equal,
     _local_candidate_raw_points,
 )
+from .parallel import balanced_ranges, run_process_tasks
+from .residual import ResidualMS1Ledger
 
 
 def _final_strict_feature_rows(strict_contexts, args):
@@ -111,18 +113,66 @@ def _strict_feature_observed_contributions(record):
     return tuple(contributions)
 
 
-def _allocate_strict_feature_population(ledger, strict_records):
+def _build_strict_observed_footprints(store, records):
+    """Map immutable strict feature points to raw-store footprints."""
+
+    mapper = ResidualMS1Ledger(store)
+    result = []
+    for record in records:
+        feature_id = int(record["feature_id"])
+        try:
+            footprint = mapper.observed_point_footprint(
+                _strict_feature_observed_contributions(record)
+            )
+        except (IndexError, KeyError, TypeError, ValueError):
+            footprint = None
+        result.append((feature_id, footprint))
+    return result
+
+
+def _allocate_strict_feature_population(ledger, strict_records, workers=1):
     """Register accepted strict ownership before targeted residual searches."""
 
     statuses = Counter()
     failed_feature_ids = []
-    for record in strict_records:
+    records = tuple(sorted(strict_records, key=lambda record: int(record["feature_id"])))
+    footprints = {}
+    # Initial strict features originate from a conflict-free detector population,
+    # so their raw-point mappings can be prepared concurrently. Residual strict
+    # candidates may overlap already claimed points and retain the serial path.
+    if int(workers) > 1 and len(records) > 1 and not ledger.allocation_count:
+        ranges = balanced_ranges(len(records), int(workers))
+        batches = run_process_tasks(
+            _build_strict_observed_footprints,
+            [(ledger.store, records[start:end]) for start, end in ranges],
+        )
+        footprints = {
+            feature_id: footprint
+            for batch in batches
+            for feature_id, footprint in batch
+        }
+    for record in records:
         feature_id = int(record["feature_id"])
         try:
-            contributions = _strict_feature_observed_contributions(record)
-            result = ledger.allocate_observed_points(
-                ("strict", feature_id), contributions
-            )
+            footprint = footprints.get(feature_id)
+            if footprint is None and feature_id in footprints:
+                raise ValueError("invalid strict provenance")
+            if footprint is not None:
+                result = ledger.commit_observed_point_footprint(
+                    ("strict", feature_id), footprint
+                )
+                # An unexpected cross-feature raw-point overlap must take the
+                # established claimed-intensity-aware mapping path.
+                if result.status == "raw_point_overallocation":
+                    result = ledger.allocate_observed_points(
+                        ("strict", feature_id),
+                        _strict_feature_observed_contributions(record),
+                    )
+            else:
+                result = ledger.allocate_observed_points(
+                    ("strict", feature_id),
+                    _strict_feature_observed_contributions(record),
+                )
             status = result.status
         except (IndexError, KeyError, TypeError, ValueError):
             status = "invalid_strict_provenance"

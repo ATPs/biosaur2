@@ -462,6 +462,63 @@ def test_strict_population_claims_each_raw_centroid_once():
     assert ledger.materialize().intensity.sum() == pytest.approx(0.0)
 
 
+def test_strict_population_parallel_footprints_match_serial_claims():
+    builder = RawMS1StoreBuilder()
+    for scan, scale in enumerate((1.0, 2.0, 1.0)):
+        builder.append(
+            [500.0, 500.5, 600.0, 600.5],
+            [10.0 * scale, 4.0 * scale, 8.0 * scale, 3.0 * scale],
+            source_scan_index=10 + scan,
+            scan_number=100 + scan,
+            rt_sec=float(scan),
+            faims_cv=None,
+        )
+    context = {
+        "hills": {
+            "hills_mz_median": [500.0, 500.5, 600.0, 600.5],
+            "hills_scan_lists": [[0, 1, 2]] * 4,
+            "hills_intensity_array": [
+                [10.0, 20.0, 10.0],
+                [4.0, 8.0, 4.0],
+                [8.0, 16.0, 8.0],
+                [3.0, 6.0, 3.0],
+            ],
+            "tmp_mz_array": [[value] * 3 for value in (500.0, 500.5, 600.0, 600.5)],
+        },
+        "rt_by_local": {0: 0.0, 1: 1.0, 2: 2.0},
+        "spectra": [{"scan_index": 10 + value} for value in range(3)],
+        "faims_cv": None,
+        "candidates": [
+            {
+                "feature_idx": 7,
+                "monoisotope idx": 0,
+                "hill_mz_1": 500.0,
+                "charge": 2,
+                "isotopes": [{"isotope_idx": 1}],
+            },
+            {
+                "feature_idx": 8,
+                "monoisotope idx": 2,
+                "hill_mz_1": 600.0,
+                "charge": 2,
+                "isotopes": [{"isotope_idx": 3}],
+            },
+        ],
+    }
+    records = _strict_feature_records([context])
+    serial_ledger = ResidualMS1Ledger(builder.finalize())
+    parallel_ledger = ResidualMS1Ledger(builder.finalize())
+    serial = _allocate_strict_feature_population(serial_ledger, records)
+    parallel = _allocate_strict_feature_population(
+        parallel_ledger, records, workers=2
+    )
+    assert parallel == serial
+    assert parallel_ledger._allocations == serial_ledger._allocations
+    assert parallel_ledger.residual_intensity == pytest.approx(
+        serial_ledger.residual_intensity
+    )
+
+
 def test_processed_hill_retry_uses_real_apex_and_bounded_width():
     competitor = SimpleNamespace(
         mono_mz_error_ppm=1.25,
