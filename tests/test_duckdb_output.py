@@ -257,18 +257,21 @@ def test_duckdb_staging_database_uses_cache_workspace(tmp_path):
     manager.abort()
 
 
-def test_duckdb_connection_defaults_to_one_thread_without_nprocs(tmp_path):
-    manager = DuckDBOutputManager(_args(tmp_path))
-    manager._ensure_connection()
-    assert manager.connection.execute("SELECT current_setting('threads')").fetchone() == (1,)
-    manager.abort()
-
-
-def test_duckdb_connection_threads_follow_nprocs(tmp_path):
-    manager = DuckDBOutputManager(_args(tmp_path, nprocs=3))
-    manager._ensure_connection()
-    assert manager.connection.execute("SELECT current_setting('threads')").fetchone() == (3,)
-    manager.abort()
+@pytest.mark.parametrize(
+    ("updates", "expected_threads"),
+    [({}, 1), ({"nprocs": 1}, 1), ({"nprocs": 4}, 4)],
+)
+def test_duckdb_connection_threads_follow_nprocs(
+    tmp_path, updates, expected_threads
+):
+    manager = DuckDBOutputManager(_args(tmp_path, **updates))
+    try:
+        manager._ensure_connection()
+        assert manager.connection.execute(
+            "SELECT current_setting('threads')"
+        ).fetchone()[0] == expected_threads
+    finally:
+        manager.abort()
 
 
 def test_optional_dependency_error_is_concise(tmp_path, monkeypatch):

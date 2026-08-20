@@ -56,6 +56,10 @@ class DuckDBOutputManager:
         import duckdb
 
         self.duckdb = duckdb
+        # Importing DuckDB creates an unused default connection whose scheduler
+        # starts one native thread per host core. This manager always opens its
+        # own configured connection below, so release the default immediately.
+        duckdb.default_connection().close()
         self.args = args
         self.duckdb_threads = max(1, int(args.get("nprocs", 1) or 1))
         self.overwrite = bool(args.get("overwrite"))

@@ -460,13 +460,18 @@ published, and the remaining workspace is deleted after Project success. With
 commands to reuse every layer.
 
 For Project mode, `--workers` is a busy-core target. The manager normally uses
-four workers per run and samples each owned run's complete process-tree PSS
-plus system available memory from Linux `/proc` every 30 seconds. When CPU is
-idle it can admit bounded speculative work, including a preemptible
-eight-worker run when the PSS estimate permits it. Declared allocations are capped at 1.5 times the
-target. CPU pressure pauses submission; a hard `--max-memory` breach (integer
-GiB, no swap) preempts newest speculative work, terminates its process tree,
-and requeues it after recovery. Local work uses this manager while feature-MBR matching is a bounded
+four workers per run and samples each owned run's complete process-tree PSS,
+thread count, CPU use, and system available memory from Linux `/proc` every 30
+seconds. Initial admission uses a conservative completed-run peak estimate.
+When that estimate blocks but observed PSS and host reserve permit progress,
+the manager admits at most two speculative tasks per resource sample, reserving
+the same conservative estimate for each unobserved task. This avoids treating
+every active run as simultaneously at peak memory. CPU pressure pauses
+submission; a hard `--max-memory` breach (integer GiB, no swap) preempts newest
+speculative work, terminates its process tree, and requeues it after recovery.
+Declared allocations remain capped at 1.5 times the target, including the
+existing preemptible eight-worker and one-worker overcommit tiers. Local work
+uses this manager while feature-MBR matching is a bounded
 in-memory Project stage. Atomic per-run checkpoint records make default resume
 skip compatible local work. Project alignment and competition are then rerun
 deterministically from source-fingerprinted strong/weak sidecars; there is no
@@ -475,7 +480,9 @@ independently atomically published with a heartbeat lease for cross-host
 recovery, so large Projects do not rewrite a growing global checkpoint after
 every completion.
 CLI startup fixes implicit OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O pools
-at one thread before numerical modules load.
+at one thread before numerical modules load. DuckDB output staging closes its
+unused host-sized default scheduler and opens a connection limited to the run's
+effective worker allocation.
 
 ## Output contract
 
