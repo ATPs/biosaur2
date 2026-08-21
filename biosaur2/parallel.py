@@ -358,12 +358,12 @@ def balanced_ranges(
 
 
 def effective_worker_budget(requested_workers, cpu_count_value=None):
-    """Return a positive CPU-bounded worker budget."""
+    """Return a positive worker budget capped at three times logical CPU capacity."""
 
     if requested_workers < 1:
         raise ValueError("requested_workers must be a positive integer")
     available = cpu_count_value if cpu_count_value is not None else os.cpu_count()
-    return min(requested_workers, max(1, available or 1))
+    return min(requested_workers, max(1, available or 1) * 3)
 
 
 def worker_slot_allocations(total_workers, task_count, target_per_task=4):
@@ -511,7 +511,8 @@ def run_adaptive_process_tasks(
     stop_submitting = False
     cooldown_until = 0.0
     allocation_ceiling = min(
-        max(1, os.cpu_count() or 1), int(math.ceil(target_workers * 1.5))
+        max(1, os.cpu_count() or 1) * 3,
+        int(math.ceil(target_workers * 1.5)),
     )
     estimator = _MemoryEstimator()
     sampler = resource_sampler or LinuxResourceSampler()
@@ -1097,7 +1098,7 @@ def _run_adaptive_process_tasks_legacy(
     initial_slots = max(1, int(math.ceil(target_workers / 4.0)))
     initial_started = 0
     allocation_ceiling = min(
-        max(1, os.cpu_count() or 1),
+        max(1, os.cpu_count() or 1) * 3,
         int(math.ceil(target_workers * 1.5)),
     )
     estimator = _MemoryEstimator()

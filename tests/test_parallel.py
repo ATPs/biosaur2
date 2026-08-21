@@ -142,7 +142,8 @@ def test_balanced_ranges_cap_cpu_count():
 
 
 def test_total_worker_budget_and_run_slot_allocations():
-    assert effective_worker_budget(8, cpu_count_value=6) == 6
+    assert effective_worker_budget(8, cpu_count_value=6) == 8
+    assert effective_worker_budget(24, cpu_count_value=6) == 18
     assert worker_slot_allocations(4, 10) == [4]
     assert worker_slot_allocations(10, 10) == [4, 3, 3]
     assert worker_slot_allocations(10, 2) == [5, 5]

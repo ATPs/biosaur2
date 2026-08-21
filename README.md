@@ -131,9 +131,10 @@ output path avoids overwriting the first result.
 
 ## CPU use
 
-`--workers` is the total CPU budget and defaults to 4. With several input
-files, Biosaur2 distributes that budget dynamically, targeting about four
-workers per active file without exceeding the total.
+`--workers` is the total adaptive scheduling budget and defaults to 4. With
+several input files, Biosaur2 targets about four workers per active file. A
+Project may request up to three times the host's logical CPU count so serial phases
+can overlap; CPU and memory admission continue to prevent sustained saturation.
 
 Biosaur2 CLI commands set OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O
 thread pools to one before loading numerical libraries. DuckDB output staging

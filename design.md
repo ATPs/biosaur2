@@ -469,8 +469,9 @@ the same conservative estimate for each unobserved task. This avoids treating
 every active run as simultaneously at peak memory. CPU pressure pauses
 submission; a hard `--max-memory` breach (integer GiB, no swap) preempts newest
 speculative work, terminates its process tree, and requeues it after recovery.
-Declared allocations remain capped at 1.5 times the target, including the
-existing preemptible eight-worker and one-worker overcommit tiers. Local work
+Declared allocations remain capped at 1.5 times the target and at three times the
+host's logical CPU count, including the existing preemptible eight-worker and
+one-worker overcommit tiers. Local work
 uses this manager while feature-MBR matching is a bounded
 in-memory Project stage. Atomic per-run checkpoint records make default resume
 skip compatible local work. Project alignment and competition are then rerun

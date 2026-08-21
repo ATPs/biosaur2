@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from biosaur2 import utils
+from biosaur2 import stage_cache
 from biosaur2.stage_cache import (
     build_strict_stage_payload,
     invalidate_stale_strict_stage_cache,
@@ -208,6 +209,34 @@ def test_stage_signature_excludes_downstream_and_scheduling_options():
     }
     assert strict_stage_argument_signature(first) == (
         strict_stage_argument_signature(second)
+    )
+
+
+def test_implementation_signature_supports_installed_compiled_extension(tmp_path):
+    package = tmp_path / "biosaur2"
+    package.mkdir()
+    for name in (
+        "main.py",
+        "preprocessing.py",
+        "calibration.py",
+        "direct_competitors.py",
+        "stage_cache.py",
+        "external_weak.py",
+    ):
+        (package / name).write_text(name, encoding="utf-8")
+    extension = package / "cutils.cpython-312-x86_64-linux-gnu.so"
+    extension.write_bytes(b"compiled-cutils")
+
+    signature = stage_cache._implementation_signature(
+        package=package,
+        cutils_extension=extension,
+    )
+
+    assert len(signature) == 64
+    extension.write_bytes(b"changed-compiled-cutils")
+    assert signature != stage_cache._implementation_signature(
+        package=package,
+        cutils_extension=extension,
     )
 
 

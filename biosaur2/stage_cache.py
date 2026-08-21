@@ -54,14 +54,18 @@ def strict_stage_argument_signature(args):
     }
 
 
-def _implementation_signature():
-    package = Path(__file__).resolve().parent
+def _implementation_signature(package=None, cutils_extension=None):
+    """Hash the loaded implementation for strict-cache compatibility."""
+
+    if package is None:
+        package = Path(__file__).resolve().parent
+    else:
+        package = Path(package).resolve()
     digest = hashlib.sha256()
     for name in (
         "main.py",
         "preprocessing.py",
         "calibration.py",
-        "cutils.pyx",
         "direct_competitors.py",
         "stage_cache.py",
         "external_weak.py",
@@ -69,6 +73,18 @@ def _implementation_signature():
         path = package / name
         digest.update(name.encode())
         digest.update(path.read_bytes())
+    cython_source = package / "cutils.pyx"
+    if cython_source.is_file():
+        digest.update(b"cutils.pyx")
+        digest.update(cython_source.read_bytes())
+    else:
+        if cutils_extension is None:
+            from . import cutils
+
+            cutils_extension = cutils.__file__
+        extension = Path(cutils_extension).resolve()
+        digest.update(b"cutils-extension")
+        digest.update(extension.read_bytes())
     return digest.hexdigest()
 
 
