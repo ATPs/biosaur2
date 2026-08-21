@@ -471,9 +471,12 @@ submission; a hard `--max-memory` breach (integer GiB, no swap) preempts newest
 speculative work, terminates its process tree, and requeues it after recovery.
 Declared allocations remain capped at 1.5 times the target and at three times the
 host's logical CPU count, including the existing preemptible eight-worker and
-one-worker overcommit tiers. Local work
-uses this manager while feature-MBR matching is a bounded
-in-memory Project stage. Atomic per-run checkpoint records make default resume
+one-worker overcommit tiers. Local work uses this manager while feature-MBR
+matching is a bounded in-memory Project stage. Sidecar reads and independent
+per-run feature/evidence publication use one bounded spawned pool, constrained
+by the effective worker budget, host CPU/memory limits and 32 processes.
+Alignment, target/decoy calibration and q-value assignment remain deterministic
+parent work. Atomic per-run checkpoint records make default resume
 skip compatible local work. Project alignment and competition are then rerun
 deterministically from source-fingerprinted strong/weak sidecars; there is no
 raw-recipient or external-recipient checkpoint. Run checkpoint records are
@@ -484,6 +487,22 @@ CLI startup fixes implicit OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O pools
 at one thread before numerical modules load. DuckDB output staging closes its
 unused host-sized default scheduler and opens a connection limited to the run's
 effective worker allocation.
+
+After completed local work, Project summary construction uses bounded spawned
+readers. Parquet feature/MS2 row counts come from file metadata, while direct
+assay counts stream only the nullable `assay_id` column in bounded batches. The
+parent remains the only Project DuckDB writer: it restores manifest order,
+inserts summary rows in one transaction, closes the neighboring temporary DB
+and then atomically publishes it. Summary readers are capped by the resolved
+Project budget, host CPU/memory limits and 32 concurrent processes.
+
+Explicit `project validate` uses the same read-only per-run process model.
+`project validate --workers N` overrides the recorded Project worker budget;
+the parent restores `run_order` before reporting problems, so parallel
+completion cannot change diagnostics. Validation readers are likewise capped
+by host CPU/memory limits and 32 processes. Both feature-MBR and validation
+stay serial below an 8 MiB input/output threshold, avoiding spawn overhead for
+small Projects.
 
 ## Output contract
 

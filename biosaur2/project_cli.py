@@ -334,10 +334,16 @@ README.md and examples/hybrid_project_manifest.tsv.
             formatter_class=_HelpFormatter,
         )
         parser.add_argument("--project-db", required=True, help="completed project DuckDB path")
+        parser.add_argument(
+            "--workers",
+            type=_positive_integer,
+            default=None,
+            help="parallel per-run validation readers; default: Project worker budget",
+        )
         _add_log_level_argument(parser)
         args = parser.parse_args(arguments[1:])
         _configure_logging(args.log_level)
-        result = validate_project(args.project_db)
+        result = validate_project(args.project_db, workers=args.workers)
         logger.info("Validated %d project runs", result["run_count"])
         return 0
     parser = argparse.ArgumentParser(

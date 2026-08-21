@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import multiprocessing
 import os
 from pathlib import Path
 import resource
@@ -13,6 +14,7 @@ import sys
 import threading
 import time
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .output import publish_staged_files, _temporary_neighbor
@@ -23,10 +25,11 @@ from .parallel import (
     physical_memory_bytes,
     run_adaptive_process_tasks,
 )
+from .thread_runtime import configure_cli_thread_pools
 from .project_manifest import read_manifest
 from .raw_ms1 import source_fingerprint
 from .external_mbr import run_feature_mbr_stage
-from .project_validation import _read_output_table, validate_project as validate_project
+from .project_validation import validate_project as validate_project
 from .schema import PROJECT_SCHEMA_VERSION
 from .identifications import PSM_COLUMN_OPTIONS
 
@@ -387,9 +390,13 @@ def _input_fingerprint(run):
     }
 
 
-def _summary_for_result(result):
-    paths = result["paths"]
-    summary = {
+SUMMARY_PARQUET_BATCH_SIZE = 65536
+SUMMARY_READER_MEMORY_BYTES = 256 * 1024 ** 2
+SUMMARY_READER_MAX_WORKERS = 32
+
+
+def _empty_summary():
+    return {
         "feature_count": None,
         "ms2_count": None,
         "audit_count": None,
@@ -399,285 +406,406 @@ def _summary_for_result(result):
         "direct_assay_count": None,
         "hybrid_summary": None,
     }
-    if result["status"] not in {"success", "skipped_resume"}:
-        return summary
+
+
+def _summary_error(run_id, path, table_name, error):
+    return RuntimeError(
+        "Project summary read failed for run %s table %s at %s: %s"
+        % (run_id, table_name, path, error)
+    )
+
+
+def _require_summary_path(run_id, path, table_name):
+    if not path.is_file():
+        raise _summary_error(run_id, path, table_name, "missing required output")
+
+
+def _parquet_file(run_id, path, table_name):
+    try:
+        return pq.ParquetFile(path)
+    except Exception as error:
+        raise _summary_error(run_id, path, table_name, error) from error
+
+
+def _tsv_count(run_id, path, table_name, value_column=None):
+    count = 0
+    value_count = 0
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle, delimiter="\t"):
+                count += 1
+                if value_column is not None and bool(row.get(value_column)):
+                    value_count += 1
+    except Exception as error:
+        raise _summary_error(run_id, path, table_name, error) from error
+    return count, value_count
+
+
+def _read_parquet_summary(result, run_id, mode):
+    paths = result["paths"]
+    summary = _empty_summary()
     feature_path = Path(paths["features"])
-    if not feature_path.is_file():
-        return summary
-    if paths.get("format") == "tsv":
-        with feature_path.open("r", encoding="utf-8", newline="") as handle:
-            feature_rows = list(csv.DictReader(handle, delimiter="\t"))
-        summary["feature_count"] = len(feature_rows)
-        summary["quant_feature_count"] = sum(
-            bool(row.get("quant_value")) for row in feature_rows
-        )
-        ms2_events_path = Path(paths["ms2_events"])
-        if ms2_events_path.is_file():
-            with ms2_events_path.open(
-                "r", encoding="utf-8", newline=""
-            ) as handle:
-                summary["linked_ms2_count"] = sum(
-                    1 for _ in csv.DictReader(handle, delimiter="\t")
-                )
-        summary["ms2_count"] = summary["linked_ms2_count"]
-        summary["audit_count"] = summary["linked_ms2_count"]
-        identification_path = Path(paths["identifications"])
-        if identification_path.is_file():
-            with identification_path.open(
-                "r", encoding="utf-8", newline=""
-            ) as handle:
-                identification_rows = list(csv.DictReader(handle, delimiter="\t"))
-            summary["accepted_identification_count"] = len(identification_rows)
-            summary["direct_assay_count"] = sum(
-                bool(row.get("assay_id")) for row in identification_rows
-            )
-        return summary
-    features = _read_output_table(feature_path, "features")
-    feature_rows = features.to_pylist()
-    summary["feature_count"] = len(feature_rows)
-    summary["quant_feature_count"] = len(feature_rows)
-    linked = 0
+    _require_summary_path(run_id, feature_path, "features")
+    features = _parquet_file(run_id, feature_path, "features")
+    summary["feature_count"] = features.metadata.num_rows
+    summary["quant_feature_count"] = features.metadata.num_rows
+
     ms2_events_path = Path(paths["ms2_events"])
+    if mode == "hybrid":
+        _require_summary_path(run_id, ms2_events_path, "ms2_events")
+    linked = 0
     if ms2_events_path.is_file():
-        linked = _read_output_table(
-            ms2_events_path, "ms2_events"
-        ).num_rows
+        linked = _parquet_file(
+            run_id, ms2_events_path, "ms2_events"
+        ).metadata.num_rows
     summary["ms2_count"] = linked
     summary["audit_count"] = linked
     summary["linked_ms2_count"] = linked
-    identification_path = Path(paths["identifications"])
-    if identification_path.is_file():
-        try:
-            identifications = _read_output_table(
-                identification_path, "identifications"
-            )
-        except Exception:
-            identifications = None
-        if identifications is not None:
-            identification_rows = identifications.to_pylist()
-            summary["accepted_identification_count"] = len(identification_rows)
-            summary["direct_assay_count"] = sum(
-                row.get("assay_id") is not None for row in identification_rows
-            )
-    if feature_path.suffix.lower() == ".duckdb":
-        import duckdb
 
-        with duckdb.connect(str(feature_path), read_only=True) as connection:
-            provenance = json.loads(
-                connection.execute(
-                    "SELECT provenance_json FROM runs LIMIT 1"
-                ).fetchone()[0]
-            )
-        encoded = provenance.get("hybrid_summary_json")
-        if encoded:
-            summary["hybrid_summary"] = json.loads(encoded)
-    elif feature_path.suffix.lower() == ".parquet":
-        metadata = pq.ParquetFile(feature_path).metadata.metadata or {}
+    identification_path = Path(paths["identifications"])
+    if mode == "hybrid":
+        _require_summary_path(run_id, identification_path, "identifications")
+    if identification_path.is_file():
+        identifications = _parquet_file(
+            run_id, identification_path, "identifications"
+        )
+        summary["accepted_identification_count"] = identifications.metadata.num_rows
+        direct = 0
+        try:
+            for batch in identifications.iter_batches(
+                batch_size=SUMMARY_PARQUET_BATCH_SIZE,
+                columns=["assay_id"],
+                use_threads=False,
+            ):
+                direct += batch.num_rows - batch.column(0).null_count
+        except Exception as error:
+            raise _summary_error(
+                run_id, identification_path, "identifications", error
+            ) from error
+        summary["direct_assay_count"] = direct
+
+    metadata = features.metadata.metadata or {}
+    try:
         encoded = metadata.get(b"biosaur2_hybrid_summary_json")
         if not encoded and metadata.get(b"biosaur2_provenance_json"):
-            provenance = json.loads(
-                metadata[b"biosaur2_provenance_json"]
-            )
+            provenance = json.loads(metadata[b"biosaur2_provenance_json"])
             encoded = provenance.get("hybrid_summary_json")
         if encoded:
             summary["hybrid_summary"] = json.loads(encoded)
+    except Exception as error:
+        raise _summary_error(run_id, feature_path, "features metadata", error) from error
     return summary
 
 
-def _write_project_database(
-    database, runs, results, options, *, external_stage=None
-):
+def _read_tsv_summary(result, run_id, mode):
+    paths = result["paths"]
+    summary = _empty_summary()
+    feature_path = Path(paths["features"])
+    _require_summary_path(run_id, feature_path, "features")
+    count, quant_count = _tsv_count(
+        run_id, feature_path, "features", value_column="quant_value"
+    )
+    summary["feature_count"] = count
+    summary["quant_feature_count"] = quant_count
+
+    ms2_events_path = Path(paths["ms2_events"])
+    if mode == "hybrid":
+        _require_summary_path(run_id, ms2_events_path, "ms2_events")
+    if ms2_events_path.is_file():
+        linked, _unused = _tsv_count(run_id, ms2_events_path, "ms2_events")
+        summary["linked_ms2_count"] = linked
+    summary["ms2_count"] = summary["linked_ms2_count"]
+    summary["audit_count"] = summary["linked_ms2_count"]
+
+    identification_path = Path(paths["identifications"])
+    if mode == "hybrid":
+        _require_summary_path(run_id, identification_path, "identifications")
+    if identification_path.is_file():
+        accepted, direct = _tsv_count(
+            run_id, identification_path, "identifications", value_column="assay_id"
+        )
+        summary["accepted_identification_count"] = accepted
+        summary["direct_assay_count"] = direct
+    return summary
+
+
+def _duckdb_table_exists(connection, table_name):
+    return connection.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = 'main' AND table_name = ?",
+        [table_name],
+    ).fetchone() is not None
+
+
+def _read_duckdb_summary(result, run_id, mode):
     import duckdb
 
-    temporary = _temporary_neighbor(database)
-    connection = duckdb.connect(str(temporary))
+    paths = result["paths"]
+    summary = _empty_summary()
+    feature_path = Path(paths["features"])
+    _require_summary_path(run_id, feature_path, "features")
     try:
-        connection.execute(
-            "CREATE TABLE runs (run_order INTEGER, run_id VARCHAR, mzml_path VARCHAR, "
-            "psm_path VARCHAR, status VARCHAR, runtime_sec DOUBLE, error VARCHAR, "
-            "cpu_user_sec DOUBLE, cpu_system_sec DOUBLE, peak_rss_kib BIGINT, "
-            "allocated_workers INTEGER, "
-            "output_format VARCHAR, run_output_path VARCHAR, "
-            "features_path VARCHAR, ms2_events_path VARCHAR, "
-            "identification_path VARCHAR, ms1_path VARCHAR, "
-            "external_evidence_path VARCHAR, raw_ms1_cache_path VARCHAR, "
-            "input_fingerprint_json VARCHAR, command_json VARCHAR)"
-        )
-        connection.execute(
-            "CREATE TABLE stage_status (run_id VARCHAR, stage VARCHAR, status VARCHAR, detail VARCHAR)"
-        )
-        connection.execute(
-            "CREATE TABLE identification_summary (run_id VARCHAR, accepted_identification_count BIGINT, "
-            "direct_assay_count BIGINT)"
-        )
-        connection.execute(
-            "CREATE TABLE qc_metrics (run_id VARCHAR, feature_count BIGINT, ms2_count BIGINT, "
-            "audit_count BIGINT, linked_ms2_count BIGINT, quant_feature_count BIGINT)"
-        )
-        connection.execute(
-            "CREATE TABLE hybrid_summary (run_id VARCHAR, strict_feature_count BIGINT, "
-            "direct_assay_count BIGINT, recovered_feature_count BIGINT, audit_row_count BIGINT, "
-            "direct_linked_count BIGINT, generic_strict_linked_count BIGINT, "
-            "generic_local_linked_count BIGINT, generic_local_new_feature_count BIGINT, "
-            "generic_decoy_only_count BIGINT, generic_local_decoy_only_count BIGINT, "
-            "audit_status_counts_json VARCHAR, generic_summary_json VARCHAR, summary_json VARCHAR)"
-        )
-        connection.execute(
-            "CREATE TABLE project_metadata (key VARCHAR, value_json VARCHAR)"
-        )
-        connection.execute(
-            "CREATE TABLE scheduler_summary (stage VARCHAR, summary_json VARCHAR)"
-        )
-        connection.execute(
-            "CREATE TABLE rt_alignment_models (alignment_group VARCHAR, "
-            "reference_run VARCHAR, source_run VARCHAR, target_run VARCHAR, method VARCHAR, "
-            "anchor_count INTEGER, inlier_count INTEGER, slope DOUBLE, "
-            "intercept DOUBLE, residual_mad_sec DOUBLE, status VARCHAR, "
-            "validation_anchor_count INTEGER, validation_median_bias_sec DOUBLE, "
-            "validation_mad_sec DOUBLE, validation_q90_abs_error_sec DOUBLE, "
-            "x_knots_json VARCHAR, y_knots_json VARCHAR)"
-        )
-        connection.execute(
-            "CREATE TABLE external_summary (run_id VARCHAR, "
-            "planned_assay_count BIGINT, evaluated_assay_count BIGINT, "
-            "new_external_feature_count BIGINT, new_strict_external_feature_count BIGINT, "
-            "new_weak_external_feature_count BIGINT, status_counts_json VARCHAR)"
-        )
-        for index, run in enumerate(runs):
-            result = results[index]
-            paths = result["paths"]
-            summary = _summary_for_result(result)
-            connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    index,
-                    run.run_id,
-                    str(run.mzml_path),
-                    None if run.psm_path is None else str(run.psm_path),
-                    result["status"],
-                    result.get("runtime_sec"),
-                    result.get("error"),
-                    result.get("cpu_user_sec"),
-                    result.get("cpu_system_sec"),
-                    result.get("peak_rss_kib"),
-                    result.get("allocated_workers"),
-                    paths.get("format", options.get("format", "parquet")),
-                    paths.get("run_output"),
-                    paths["features"],
-                    paths["ms2_events"],
-                    paths["identifications"],
-                    paths.get("ms1"),
-                    paths.get("external_evidence"),
-                    paths["raw_ms1_cache"],
-                    json.dumps(_input_fingerprint(run), sort_keys=True),
-                    json.dumps(result.get("command", [])),
-                ],
+        with duckdb.connect(
+            str(feature_path), read_only=True, config={"threads": "1"}
+        ) as connection:
+            connection.execute("SET threads TO 1")
+            summary["feature_count"] = connection.execute(
+                'SELECT COUNT(*) FROM "features"'
+            ).fetchone()[0]
+            summary["quant_feature_count"] = summary["feature_count"]
+            has_ms2_events = _duckdb_table_exists(connection, "ms2_events")
+            has_identifications = _duckdb_table_exists(
+                connection, "identifications"
             )
-            connection.execute(
-                "INSERT INTO stage_status VALUES (?, 'run', ?, ?)",
-                [run.run_id, result["status"], result.get("error")],
-            )
-            if options["mode"] == "hybrid":
-                cache_status = (
-                    "success"
-                    if Path(paths["raw_ms1_cache"], "manifest.json").is_file()
-                    else "missing"
-                )
+            if mode == "hybrid" and not has_ms2_events:
+                raise ValueError("missing required ms2_events table")
+            if mode == "hybrid" and not has_identifications:
+                raise ValueError("missing required identifications table")
+            linked = (
                 connection.execute(
-                    "INSERT INTO stage_status VALUES (?, 'raw_ms1_cache', ?, ?)",
-                    [run.run_id, cache_status, paths["raw_ms1_cache"]],
-                )
-                strict_cache_path = paths.get("strict_stage_cache")
-                if strict_cache_path:
-                    manifest_path = (
-                        None
-                        if not strict_cache_path
-                        else Path(strict_cache_path, "manifest.json")
-                    )
-                    if manifest_path is not None and manifest_path.is_file():
-                        try:
-                            manifest = json.loads(
-                                manifest_path.read_text(encoding="utf-8")
-                            )
-                            strict_cache_status = "success"
-                            strict_cache_detail = json.dumps(
-                                {
-                                    "path": strict_cache_path,
-                                    "payload_bytes": manifest.get(
-                                        "payload_bytes"
-                                    ),
-                                    "payload_sha256": manifest.get(
-                                        "payload_sha256"
-                                    ),
-                                    "strict_feature_count": manifest.get(
-                                        "strict_feature_count"
-                                    ),
-                                    "context_count": manifest.get(
-                                        "context_count"
-                                    ),
-                                },
-                                sort_keys=True,
-                            )
-                        except (OSError, TypeError, ValueError) as error:
-                            strict_cache_status = "invalid"
-                            strict_cache_detail = "%s: %s" % (
-                                strict_cache_path,
-                                error,
-                            )
-                    else:
-                        strict_cache_status = "missing"
-                        strict_cache_detail = strict_cache_path
-                else:
-                    strict_cache_status = "missing"
-                    strict_cache_detail = strict_cache_path
-                connection.execute(
-                    "INSERT INTO stage_status VALUES "
-                    "(?, 'strict_stage_cache', ?, ?)",
-                    [
-                        run.run_id,
-                        strict_cache_status,
-                        strict_cache_detail,
-                    ],
-                )
-                external_summary = (external_stage or {}).get(
-                    "summaries", {}
-                ).get(run.run_id)
-                external_status = (
-                    "disabled"
-                    if not options.get("external_id", False)
-                    else (
-                        "success"
-                        if external_summary is not None
-                        else "not_run"
-                    )
-                )
-                connection.execute(
-                    "INSERT INTO stage_status VALUES (?, 'external_id', ?, ?)",
-                    [
-                        run.run_id,
-                        external_status,
-                        paths.get("external_evidence"),
-                    ],
-                )
-            connection.execute(
-                "INSERT INTO identification_summary VALUES (?, ?, ?)",
-                [run.run_id, summary["accepted_identification_count"], summary["direct_assay_count"]],
+                    'SELECT COUNT(*) FROM "ms2_events"'
+                ).fetchone()[0]
+                if has_ms2_events
+                else 0
             )
-            connection.execute(
-                "INSERT INTO qc_metrics VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    run.run_id,
-                    summary["feature_count"],
-                    summary["ms2_count"],
-                    summary["audit_count"],
-                    summary["linked_ms2_count"],
-                    summary["quant_feature_count"],
-                ],
+            summary["ms2_count"] = linked
+            summary["audit_count"] = linked
+            summary["linked_ms2_count"] = linked
+            if has_identifications:
+                accepted, direct = connection.execute(
+                    'SELECT COUNT(*), COUNT("assay_id") FROM "identifications"'
+                ).fetchone()
+                summary["accepted_identification_count"] = accepted
+                summary["direct_assay_count"] = direct
+            provenance_row = connection.execute(
+                "SELECT provenance_json FROM runs LIMIT 1"
+            ).fetchone()
+            if provenance_row:
+                encoded = json.loads(provenance_row[0]).get(
+                    "hybrid_summary_json"
+                )
+                if encoded:
+                    summary["hybrid_summary"] = json.loads(encoded)
+    except Exception as error:
+        raise _summary_error(run_id, feature_path, "DuckDB output", error) from error
+    return summary
+
+
+def _summary_for_result(result, *, run_id=None, mode="legacy"):
+    if result["status"] not in {"success", "skipped_resume"}:
+        return _empty_summary()
+    run_id = run_id or result.get("run_id", "unknown")
+    paths = result["paths"]
+    output_format = paths.get("format")
+    feature_path = Path(paths["features"])
+    if output_format == "tsv" or feature_path.suffix.lower() == ".tsv":
+        return _read_tsv_summary(result, run_id, mode)
+    if output_format == "duckdb" or feature_path.suffix.lower() == ".duckdb":
+        return _read_duckdb_summary(result, run_id, mode)
+    return _read_parquet_summary(result, run_id, mode)
+
+
+def _configure_summary_worker():
+    configure_cli_thread_pools()
+    pa.set_cpu_count(1)
+    pa.set_io_thread_count(1)
+
+
+def _summary_worker(task):
+    index, run_id, result, mode = task
+    return index, _summary_for_result(result, run_id=run_id, mode=mode)
+
+
+def _summary_worker_count(
+    run_count, effective_workers, max_memory_bytes, cpu_count_value=None
+):
+    if run_count < 1:
+        return 0
+    cpu_count_value = cpu_count_value if cpu_count_value is not None else os.cpu_count()
+    cpu_slots = max(1, int(cpu_count_value or 1))
+    memory_slots = max(
+        1,
+        int(int(max_memory_bytes) * 0.80) // SUMMARY_READER_MEMORY_BYTES,
+    )
+    return min(
+        int(run_count),
+        int(effective_workers),
+        cpu_slots,
+        memory_slots,
+        SUMMARY_READER_MAX_WORKERS,
+    )
+
+
+def _summaries_for_results(runs, results, options):
+    mode = options.get("mode", "legacy")
+    summaries = {}
+    tasks = []
+    for index, run in enumerate(runs):
+        result = results[index]
+        if result["status"] in {"success", "skipped_resume"}:
+            tasks.append((index, run.run_id, result, mode))
+        else:
+            summaries[index] = _empty_summary()
+    worker_count = _summary_worker_count(
+        len(tasks),
+        options.get(
+            "_effective_workers",
+            effective_worker_budget(int(options.get("workers", 4))),
+        ),
+        options.get("_max_memory_bytes", physical_memory_bytes()),
+    )
+    logger.info(
+        "Project summary readers: completed_runs=%d workers=%d",
+        len(tasks), worker_count,
+    )
+    if worker_count <= 1:
+        for task in tasks:
+            index, summary = _summary_worker(task)
+            summaries[index] = summary
+        return summaries
+
+    # ``spawn`` imports this module before running the initializer, so set the
+    # inherited native-pool environment before any child imports NumPy/Arrow.
+    configure_cli_thread_pools()
+    context = multiprocessing.get_context("spawn")
+    pool = context.Pool(worker_count, initializer=_configure_summary_worker)
+    try:
+        for index, summary in pool.imap_unordered(
+            _summary_worker, tasks, chunksize=1
+        ):
+            summaries[index] = summary
+    except BaseException:
+        pool.terminate()
+        raise
+    else:
+        pool.close()
+    finally:
+        pool.join()
+    return summaries
+
+
+def _strict_cache_stage_row(run_id, paths):
+    strict_cache_path = paths.get("strict_stage_cache")
+    manifest_path = (
+        Path(strict_cache_path, "manifest.json") if strict_cache_path else None
+    )
+    if manifest_path is not None and manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            return (
+                run_id,
+                "strict_stage_cache",
+                "success",
+                json.dumps(
+                    {
+                        "path": strict_cache_path,
+                        "payload_bytes": manifest.get("payload_bytes"),
+                        "payload_sha256": manifest.get("payload_sha256"),
+                        "strict_feature_count": manifest.get("strict_feature_count"),
+                        "context_count": manifest.get("context_count"),
+                    },
+                    sort_keys=True,
+                ),
             )
-            hybrid = summary["hybrid_summary"] or {}
-            statuses = hybrid.get("audit_status_counts", {})
-            generic = hybrid.get("generic_summary") or {}
-            direct_linked = sum(
+        except (OSError, TypeError, ValueError) as error:
+            return (
+                run_id,
+                "strict_stage_cache",
+                "invalid",
+                "%s: %s" % (strict_cache_path, error),
+            )
+    return run_id, "strict_stage_cache", "missing", strict_cache_path
+
+
+def _project_database_rows(
+    runs, results, summaries, options, external_stage, input_fingerprints
+):
+    rows = {
+        "runs": [],
+        "stage_status": [],
+        "identification_summary": [],
+        "qc_metrics": [],
+        "hybrid_summary": [],
+        "external_summary": [],
+    }
+    external_summaries = (external_stage or {}).get("summaries", {})
+    for index, run in enumerate(runs):
+        result = results[index]
+        paths = result["paths"]
+        summary = summaries[index]
+        fingerprint = (
+            input_fingerprints[index]
+            if input_fingerprints is not None
+            else _input_fingerprint(run)
+        )
+        rows["runs"].append([
+            index,
+            run.run_id,
+            str(run.mzml_path),
+            None if run.psm_path is None else str(run.psm_path),
+            result["status"],
+            result.get("runtime_sec"),
+            result.get("error"),
+            result.get("cpu_user_sec"),
+            result.get("cpu_system_sec"),
+            result.get("peak_rss_kib"),
+            result.get("allocated_workers"),
+            paths.get("format", options.get("format", "parquet")),
+            paths.get("run_output"),
+            paths["features"],
+            paths["ms2_events"],
+            paths["identifications"],
+            paths.get("ms1"),
+            paths.get("external_evidence"),
+            paths["raw_ms1_cache"],
+            json.dumps(fingerprint, sort_keys=True),
+            json.dumps(result.get("command", [])),
+        ])
+        rows["stage_status"].append(
+            [run.run_id, "run", result["status"], result.get("error")]
+        )
+        if options.get("mode") == "hybrid":
+            cache_status = (
+                "success"
+                if Path(paths["raw_ms1_cache"], "manifest.json").is_file()
+                else "missing"
+            )
+            rows["stage_status"].append(
+                [run.run_id, "raw_ms1_cache", cache_status, paths["raw_ms1_cache"]]
+            )
+            rows["stage_status"].append(_strict_cache_stage_row(run.run_id, paths))
+            external_summary = external_summaries.get(run.run_id)
+            external_status = (
+                "disabled"
+                if not options.get("external_id", False)
+                else "success" if external_summary is not None else "not_run"
+            )
+            rows["stage_status"].append(
+                [run.run_id, "external_id", external_status, paths.get("external_evidence")]
+            )
+        rows["identification_summary"].append([
+            run.run_id,
+            summary["accepted_identification_count"],
+            summary["direct_assay_count"],
+        ])
+        rows["qc_metrics"].append([
+            run.run_id,
+            summary["feature_count"],
+            summary["ms2_count"],
+            summary["audit_count"],
+            summary["linked_ms2_count"],
+            summary["quant_feature_count"],
+        ])
+        hybrid = summary["hybrid_summary"] or {}
+        statuses = hybrid.get("audit_status_counts", {})
+        generic = hybrid.get("generic_summary") or {}
+        rows["hybrid_summary"].append([
+            run.run_id,
+            hybrid.get("strict_feature_count"),
+            hybrid.get("direct_assay_count"),
+            hybrid.get("recovered_feature_count"),
+            hybrid.get("audit_row_count"),
+            sum(
                 int(statuses.get(status, 0))
                 for status in (
                     "matched_strict_feature",
@@ -687,96 +815,136 @@ def _write_project_database(
                     "matched_recovered_feature",
                     "matched_recovered_feature_ambiguous_identity",
                 )
-            )
-            connection.execute(
-                "INSERT INTO hybrid_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    run.run_id,
-                    hybrid.get("strict_feature_count"),
-                    hybrid.get("direct_assay_count"),
-                    hybrid.get("recovered_feature_count"),
-                    hybrid.get("audit_row_count"),
-                    direct_linked,
-                    int(statuses.get("generic_matched_strict_feature", 0)),
-                    sum(
-                        int(statuses.get(status, 0))
-                        for status in (
-                            "generic_local_matched_strict_feature",
-                            "generic_local_matched_direct_feature",
-                            "generic_recovered_local_feature",
-                            "generic_matched_recovered_local_feature",
-                            "generic_relaxed_recovered_local_feature",
-                            "generic_relaxed_matched_recovered_local_feature",
-                        )
-                    ),
-                    hybrid.get("generic_recovered_feature_count"),
-                    int(statuses.get("generic_decoy_only", 0)),
-                    int(statuses.get("generic_local_decoy_only", 0)),
-                    json.dumps(statuses, sort_keys=True),
-                    json.dumps(generic, sort_keys=True),
-                    json.dumps(hybrid, sort_keys=True),
-                ],
-            )
-            external = (external_stage or {}).get("summaries", {}).get(
-                run.run_id, {}
-            )
-            connection.execute(
-                "INSERT INTO external_summary VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [
-                    run.run_id,
-                    external.get("planned_assay_count"),
-                    external.get("evaluated_assay_count"),
-                    external.get("new_external_feature_count"),
-                    external.get("new_strict_external_feature_count"),
-                    external.get("new_weak_external_feature_count"),
-                    json.dumps(
-                        external.get("status_counts", {}), sort_keys=True
-                    ),
-                ],
-            )
-        alignment_rows = (external_stage or {}).get("alignment_models", ())
-        if alignment_rows:
-            connection.executemany(
-                "INSERT INTO rt_alignment_models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    [
-                        row["alignment_group"],
-                        row["reference_run"],
-                        row["source_run"],
-                        row["target_run"],
-                        row["method"],
-                        row["anchor_count"],
-                        row["inlier_count"],
-                        row["slope"],
-                        row["intercept"],
-                        row["residual_mad_sec"],
-                        row["status"],
-                        row.get("validation_anchor_count", 0),
-                        row.get("validation_median_bias_sec"),
-                        row.get("validation_mad_sec"),
-                        row.get("validation_q90_abs_error_sec"),
-                        row["x_knots_json"],
-                        row["y_knots_json"],
-                    ]
-                    for row in alignment_rows
-                ],
-            )
+            ),
+            int(statuses.get("generic_matched_strict_feature", 0)),
+            sum(
+                int(statuses.get(status, 0))
+                for status in (
+                    "generic_local_matched_strict_feature",
+                    "generic_local_matched_direct_feature",
+                    "generic_recovered_local_feature",
+                    "generic_matched_recovered_local_feature",
+                    "generic_relaxed_recovered_local_feature",
+                    "generic_relaxed_matched_recovered_local_feature",
+                )
+            ),
+            hybrid.get("generic_recovered_feature_count"),
+            int(statuses.get("generic_decoy_only", 0)),
+            int(statuses.get("generic_local_decoy_only", 0)),
+            json.dumps(statuses, sort_keys=True),
+            json.dumps(generic, sort_keys=True),
+            json.dumps(hybrid, sort_keys=True),
+        ])
+        external = external_summaries.get(run.run_id, {})
+        rows["external_summary"].append([
+            run.run_id,
+            external.get("planned_assay_count"),
+            external.get("evaluated_assay_count"),
+            external.get("new_external_feature_count"),
+            external.get("new_strict_external_feature_count"),
+            external.get("new_weak_external_feature_count"),
+            json.dumps(external.get("status_counts", {}), sort_keys=True),
+        ])
+    rows["rt_alignment_models"] = [
+        [
+            row["alignment_group"],
+            row["reference_run"],
+            row["source_run"],
+            row["target_run"],
+            row["method"],
+            row["anchor_count"],
+            row["inlier_count"],
+            row["slope"],
+            row["intercept"],
+            row["residual_mad_sec"],
+            row["status"],
+            row.get("validation_anchor_count", 0),
+            row.get("validation_median_bias_sec"),
+            row.get("validation_mad_sec"),
+            row.get("validation_q90_abs_error_sec"),
+            row["x_knots_json"],
+            row["y_knots_json"],
+        ]
+        for row in (external_stage or {}).get("alignment_models", ())
+    ]
+    rows["scheduler_summary"] = [
+        [stage, json.dumps(summary, sort_keys=True)]
         for stage, summary in (
             ("local", options.get("_local_scheduler_summary", {})),
             ("external", (external_stage or {}).get("scheduler_summary", {})),
-        ):
-            connection.execute(
-                "INSERT INTO scheduler_summary VALUES (?, ?)",
-                [stage, json.dumps(summary, sort_keys=True)],
-            )
-        connection.execute(
-            "INSERT INTO project_metadata VALUES ('project_schema_version', ?)",
-            [PROJECT_SCHEMA_VERSION],
         )
-        connection.execute(
-            "INSERT INTO project_metadata VALUES ('resolved_options', ?)",
-            [json.dumps(options, sort_keys=True, default=str)],
+    ]
+    return rows
+
+
+def _create_project_tables(connection):
+    connection.execute(
+        "CREATE TABLE runs (run_order INTEGER, run_id VARCHAR, mzml_path VARCHAR, "
+        "psm_path VARCHAR, status VARCHAR, runtime_sec DOUBLE, error VARCHAR, "
+        "cpu_user_sec DOUBLE, cpu_system_sec DOUBLE, peak_rss_kib BIGINT, "
+        "allocated_workers INTEGER, output_format VARCHAR, run_output_path VARCHAR, "
+        "features_path VARCHAR, ms2_events_path VARCHAR, identification_path VARCHAR, "
+        "ms1_path VARCHAR, external_evidence_path VARCHAR, raw_ms1_cache_path VARCHAR, "
+        "input_fingerprint_json VARCHAR, command_json VARCHAR)"
+    )
+    connection.execute(
+        "CREATE TABLE stage_status (run_id VARCHAR, stage VARCHAR, status VARCHAR, detail VARCHAR)"
+    )
+    connection.execute(
+        "CREATE TABLE identification_summary (run_id VARCHAR, accepted_identification_count BIGINT, direct_assay_count BIGINT)"
+    )
+    connection.execute(
+        "CREATE TABLE qc_metrics (run_id VARCHAR, feature_count BIGINT, ms2_count BIGINT, audit_count BIGINT, linked_ms2_count BIGINT, quant_feature_count BIGINT)"
+    )
+    connection.execute(
+        "CREATE TABLE hybrid_summary (run_id VARCHAR, strict_feature_count BIGINT, direct_assay_count BIGINT, recovered_feature_count BIGINT, audit_row_count BIGINT, direct_linked_count BIGINT, generic_strict_linked_count BIGINT, generic_local_linked_count BIGINT, generic_local_new_feature_count BIGINT, generic_decoy_only_count BIGINT, generic_local_decoy_only_count BIGINT, audit_status_counts_json VARCHAR, generic_summary_json VARCHAR, summary_json VARCHAR)"
+    )
+    connection.execute("CREATE TABLE project_metadata (key VARCHAR, value_json VARCHAR)")
+    connection.execute("CREATE TABLE scheduler_summary (stage VARCHAR, summary_json VARCHAR)")
+    connection.execute(
+        "CREATE TABLE rt_alignment_models (alignment_group VARCHAR, reference_run VARCHAR, source_run VARCHAR, target_run VARCHAR, method VARCHAR, anchor_count INTEGER, inlier_count INTEGER, slope DOUBLE, intercept DOUBLE, residual_mad_sec DOUBLE, status VARCHAR, validation_anchor_count INTEGER, validation_median_bias_sec DOUBLE, validation_mad_sec DOUBLE, validation_q90_abs_error_sec DOUBLE, x_knots_json VARCHAR, y_knots_json VARCHAR)"
+    )
+    connection.execute(
+        "CREATE TABLE external_summary (run_id VARCHAR, planned_assay_count BIGINT, evaluated_assay_count BIGINT, new_external_feature_count BIGINT, new_strict_external_feature_count BIGINT, new_weak_external_feature_count BIGINT, status_counts_json VARCHAR)"
+    )
+
+
+def _write_project_database(
+    database, runs, results, options, *, external_stage=None,
+    input_fingerprints=None,
+):
+    import duckdb
+
+    summaries = _summaries_for_results(runs, results, options)
+    rows = _project_database_rows(
+        runs, results, summaries, options, external_stage, input_fingerprints
+    )
+    temporary = _temporary_neighbor(database)
+    connection = duckdb.connect(str(temporary), config={"threads": "1"})
+    try:
+        connection.execute("SET threads TO 1")
+        connection.execute("BEGIN TRANSACTION")
+        _create_project_tables(connection)
+        for table_name, values in rows.items():
+            if values:
+                connection.executemany(
+                    "INSERT INTO %s VALUES (%s)" % (
+                        table_name,
+                        ", ".join("?" for _ in values[0]),
+                    ),
+                    values,
+                )
+        connection.executemany(
+            "INSERT INTO project_metadata VALUES (?, ?)",
+            [
+                ["project_schema_version", PROJECT_SCHEMA_VERSION],
+                ["resolved_options", json.dumps(options, sort_keys=True, default=str)],
+            ],
         )
+        connection.execute("COMMIT")
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
     finally:
         connection.close()
     publish_staged_files([(temporary, database)])
@@ -847,6 +1015,9 @@ def run_project(manifest, output_dir, project_db, **options):
                 "peak_rss_kib": result.get("peak_rss_kib"),
                 "project_option_signature": record["project_option_signature"],
             }
+    input_fingerprints = {
+        index: _input_fingerprint(run) for index, run in enumerate(runs)
+    }
     tasks = []
     skipped = {}
     for index, run in enumerate(runs):
@@ -876,7 +1047,7 @@ def run_project(manifest, output_dir, project_db, **options):
             required_paths.append(paths["run_output"] or paths["ms1"])
         resume_valid = (
             resume_record is not None
-            and resume_record["input_fingerprint"] == _input_fingerprint(run)
+            and resume_record["input_fingerprint"] == input_fingerprints[index]
             and _scientific_command(resume_record["command"])
             == _scientific_command(command)
             and resume_record.get("project_option_signature")
@@ -933,12 +1104,13 @@ def run_project(manifest, output_dir, project_db, **options):
         if not checkpoint:
             return
         task = tasks[task_position][1]
-        run = runs[tasks[task_position][0]]
+        manifest_index = tasks[task_position][0]
+        run = runs[manifest_index]
         checkpoint.put_run(
             run.run_id,
             {
                 "status": "pending",
-                "input_fingerprint": _input_fingerprint(run),
+                "input_fingerprint": input_fingerprints[manifest_index],
                 "command": task["command"],
                 "project_option_signature": _local_resume_option_signature(options),
             },
@@ -948,12 +1120,13 @@ def run_project(manifest, output_dir, project_db, **options):
         if not checkpoint or isinstance(value, WorkerFailure):
             return
         task = tasks[task_position][1]
-        run = runs[tasks[task_position][0]]
+        manifest_index = tasks[task_position][0]
+        run = runs[manifest_index]
         checkpoint.put_run(
             run.run_id,
             {
                 "status": value.get("status", "failed"),
-                "input_fingerprint": _input_fingerprint(run),
+                "input_fingerprint": input_fingerprints[manifest_index],
                 "command": task["command"],
                 "project_option_signature": _local_resume_option_signature(options),
                 "result": value,
@@ -1050,7 +1223,12 @@ def run_project(manifest, output_dir, project_db, **options):
         external_stage = _run_external_stage(runs, results, options)
         logger.info("Project-level external-ID stage complete")
     _write_project_database(
-        database, runs, results, options, external_stage=external_stage
+        database,
+        runs,
+        results,
+        options,
+        external_stage=external_stage,
+        input_fingerprints=input_fingerprints,
     )
     if any(result["status"] in {"failed", "not_run"} for result in results.values()):
         raise RuntimeError("one or more project runs failed; inspect the project database")

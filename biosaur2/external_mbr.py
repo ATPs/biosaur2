@@ -14,6 +14,8 @@ import csv
 import json
 import logging
 import math
+import multiprocessing
+import os
 from pathlib import Path
 import shutil
 
@@ -26,12 +28,14 @@ from .confidence import TargetDecoyCompetition, deterministic_decoy_shift, targe
 from .external_alignment import AlignmentForest, MAX_REFERENCE_CANDIDATES, ReferenceStarAlignment, alignment_group_for_run, faims_key
 from .legacy_output import compact_feature
 from .output import _temporary_neighbor, publish_staged_files
+from .parallel import effective_worker_budget, physical_memory_bytes
 from .raw_ms1 import source_fingerprint
 from .schema import (
     EXTERNAL_EVIDENCE_COLUMNS,
     compact_schemas,
     hybrid_quant_output_columns,
 )
+from .thread_runtime import configure_cli_thread_pools
 
 
 SIDECAR_VERSION = "feature-mbr-v3"
@@ -41,6 +45,9 @@ MAX_CONFIGURED_SUPPORT_RUNS = 16
 SUPPORT_LLR_BIN_COUNT = 32
 SUPPORT_LLR_PSEUDOCOUNT = 1.0
 SUPPORT_LLR_CROSSFIT_FOLDS = 2
+MBR_WORKER_MEMORY_BYTES = 512 * 1024 ** 2
+MBR_MAX_WORKERS = 32
+MBR_MIN_PARALLEL_SIDECAR_BYTES = 8 * 1024 ** 2
 LOCAL_WEAK_OPTION_DEFAULTS = {
     "external_weak_min_mono_points": 2,
     "external_weak_min_secondary_points": 2,
@@ -50,11 +57,72 @@ LOCAL_WEAK_OPTION_DEFAULTS = {
 logger = logging.getLogger(__name__)
 
 
+def _configure_mbr_worker():
+    """Keep each sidecar/publish process to one native execution thread."""
+
+    configure_cli_thread_pools()
+    pa.set_cpu_count(1)
+    pa.set_io_thread_count(1)
+
+
+def _mbr_worker_count(
+    run_count, options, cpu_count_value=None, sidecar_bytes=None
+):
+    if run_count < 1:
+        return 0
+    if (
+        sidecar_bytes is not None
+        and sidecar_bytes < MBR_MIN_PARALLEL_SIDECAR_BYTES
+    ):
+        return 1
+    effective_workers = int(options.get(
+        "_effective_workers",
+        effective_worker_budget(int(options.get("workers", 4))),
+    ))
+    max_memory_bytes = int(
+        options.get("_max_memory_bytes")
+        or int(options.get("max_memory", 0) or 0) * (1024 ** 3)
+        or physical_memory_bytes()
+    )
+    cpu_count_value = (
+        cpu_count_value if cpu_count_value is not None else os.cpu_count()
+    )
+    memory_slots = max(
+        1, int(max_memory_bytes * 0.80) // MBR_WORKER_MEMORY_BYTES
+    )
+    return min(
+        int(run_count), effective_workers, max(1, int(cpu_count_value or 1)),
+        memory_slots, MBR_MAX_WORKERS,
+    )
+
+
+def _mbr_read_sidecar_worker(task):
+    run, paths, options = task
+    return run.run_id, read_feature_sidecars(run, paths, options)
+
+
+def _mbr_publish_worker(task):
+    run_id, paths, accepted, evidence_rows, options = task
+    count = _publish_features(paths["features"], accepted, options)
+    accepted_ids = {
+        item["candidate"].candidate_id: item["feature_id"]
+        for item in accepted
+    }
+    for row in evidence_rows:
+        if row["status"] == "accepted_matched_weak_feature":
+            row["feature_id"] = accepted_ids[row["weak_candidate_id"]]
+    _write_evidence(paths["external_evidence"], evidence_rows)
+    return run_id, count
+
+
 def _read_table(path, table_name):
     source = Path(path)
     if source.suffix.lower() == ".duckdb":
         import duckdb
-        with duckdb.connect(str(source), read_only=True) as connection:
+        with duckdb.connect(
+            str(source), read_only=True, config={"threads": "1"}
+        ) as connection:
+            connection.execute("SET threads TO 1")
             return connection.execute('SELECT * FROM "%s"' % table_name).fetch_arrow_table()
     if source.suffix.lower() == ".tsv":
         schema = compact_schemas()["hybrid_features"]
@@ -907,7 +975,10 @@ def _write_evidence(path, rows):
     import duckdb
     temporary = _temporary_neighbor(destination)
     shutil.copy2(destination, temporary)
-    with duckdb.connect(str(temporary)) as connection:
+    with duckdb.connect(
+        str(temporary), config={"threads": "1"}
+    ) as connection:
+        connection.execute("SET threads TO 1")
         connection.register("_evidence", table)
         connection.execute("CREATE OR REPLACE TABLE external_id_evidence AS SELECT * FROM _evidence")
         connection.unregister("_evidence")
@@ -968,65 +1039,116 @@ def run_feature_mbr_stage(runs, results, options):
 
     successful = [run for index, run in enumerate(runs) if results[index]["status"] in {"success", "skipped_resume"}]
     result_by_id = {runs[index].run_id: results[index] for index in range(len(runs))}
-    sidecars = {
-        run.run_id: read_feature_sidecars(
-            run, result_by_id[run.run_id]["paths"], options
-        )
-        for run in successful
-    }
-    missing = [run_id for run_id, value in sidecars.items() if value is None]
-    if missing:
-        raise RuntimeError("feature-MBR sidecars are missing or stale: " + ", ".join(sorted(missing)))
-    strong = {run_id: value[0] for run_id, value in sidecars.items()}
-    weak = {run_id: value[1] for run_id, value in sidecars.items()}
-    models = build_feature_alignment_models(
-        successful, strong, ppm=float(options.get("external_ppm", 8.0)),
-        min_anchors=int(options.get("external_alignment_min_anchors", 20)),
-        max_mad=float(options.get("external_alignment_max_mad_sec", 30.0)),
-        max_anchors=int(options.get("external_alignment_max_anchors", 256)),
-        validation_q90_limit=float(
-            options.get("external_rt_tolerance_sec", 120.0)
-        ),
+    sidecar_bytes = 0
+    for run in successful:
+        paths = result_by_id[run.run_id]["paths"]
+        for key in ("external_strong_features", "external_weak_candidates"):
+            try:
+                sidecar_bytes += Path(paths[key]).stat().st_size
+            except (KeyError, OSError):
+                pass
+    worker_count = _mbr_worker_count(
+        len(successful), options, sidecar_bytes=sidecar_bytes
     )
-    outcomes, support_calibrations = _candidate_outcomes(successful, strong, weak, models, {
-        "ppm": float(options.get("external_ppm", 8.0)),
-        "rt_tolerance_sec": float(options.get("external_rt_tolerance_sec", 120.0)),
-        "min_support_runs": int(options.get(
+    logger.info(
+        "Feature-MBR sidecar/publish workers: completed_runs=%d sidecar_mib=%.1f workers=%d",
+        len(successful), sidecar_bytes / float(1024 ** 2), worker_count,
+    )
+    pool = None
+    if worker_count > 1:
+        # ``spawn`` imports this module before its initializer runs, so set
+        # native-pool environment variables before creating child processes.
+        configure_cli_thread_pools()
+        pool = multiprocessing.get_context("spawn").Pool(
+            worker_count, initializer=_configure_mbr_worker
+        )
+
+    def worker_map(function, tasks):
+        if pool is None:
+            return [function(task) for task in tasks]
+        return list(pool.imap(function, tasks, chunksize=1))
+
+    try:
+        sidecars = dict(worker_map(_mbr_read_sidecar_worker, [
+            (run, result_by_id[run.run_id]["paths"], options)
+            for run in successful
+        ]))
+        missing = [run_id for run_id, value in sidecars.items() if value is None]
+        if missing:
+            raise RuntimeError(
+                "feature-MBR sidecars are missing or stale: "
+                + ", ".join(sorted(missing))
+            )
+        strong = {run_id: value[0] for run_id, value in sidecars.items()}
+        weak = {run_id: value[1] for run_id, value in sidecars.items()}
+        models = build_feature_alignment_models(
+            successful, strong, ppm=float(options.get("external_ppm", 8.0)),
+            min_anchors=int(options.get("external_alignment_min_anchors", 20)),
+            max_mad=float(options.get("external_alignment_max_mad_sec", 30.0)),
+            max_anchors=int(options.get("external_alignment_max_anchors", 256)),
+            validation_q90_limit=float(
+                options.get("external_rt_tolerance_sec", 120.0)
+            ),
+        )
+        outcomes, support_calibrations = _candidate_outcomes(successful, strong, weak, models, {
+            "ppm": float(options.get("external_ppm", 8.0)),
+            "rt_tolerance_sec": float(options.get("external_rt_tolerance_sec", 120.0)),
+            "min_support_runs": int(options.get(
+                "external_min_support_runs", DEFAULT_MIN_SUPPORT_RUNS
+            )),
+            "max_support_runs": int(options.get(
+                "external_max_support_runs", DEFAULT_MAX_SUPPORT_RUNS
+            )),
+        })
+        evidence = _evidence_rows(
+            outcomes, float(options.get("external_q_value_max", 0.10))
+        )
+        q_value_max = float(options.get("external_q_value_max", 0.10))
+        min_support_runs = int(options.get(
             "external_min_support_runs", DEFAULT_MIN_SUPPORT_RUNS
-        )),
-        "max_support_runs": int(options.get(
+        ))
+        max_support_runs = int(options.get(
             "external_max_support_runs", DEFAULT_MAX_SUPPORT_RUNS
-        )),
-    })
-    evidence = _evidence_rows(outcomes, float(options.get("external_q_value_max", 0.10)))
-    q_value_max = float(options.get("external_q_value_max", 0.10))
-    min_support_runs = int(options.get(
-        "external_min_support_runs", DEFAULT_MIN_SUPPORT_RUNS
-    ))
-    max_support_runs = int(options.get(
-        "external_max_support_runs", DEFAULT_MAX_SUPPORT_RUNS
-    ))
+        ))
+        outcomes_by_run = defaultdict(list)
+        for values in outcomes.values():
+            for item in values:
+                outcomes_by_run[item["target_run"]].append(item)
+        publish_tasks = []
+        summary_inputs = {}
+        for run in successful:
+            all_outcomes = outcomes_by_run[run.run_id]
+            accepted = [
+                item for item in all_outcomes
+                if _outcome_status(item, q_value_max)
+                == "accepted_matched_weak_feature"
+            ]
+            statuses = Counter(
+                _outcome_status(item, q_value_max) for item in all_outcomes
+            )
+            summary_inputs[run.run_id] = (
+                all_outcomes, accepted, dict(sorted(statuses.items()))
+            )
+            publish_tasks.append((
+                run.run_id, result_by_id[run.run_id]["paths"], accepted,
+                evidence.get(run.run_id, ()), options,
+            ))
+        published = dict(worker_map(_mbr_publish_worker, publish_tasks))
+    except BaseException:
+        if pool is not None:
+            pool.terminate()
+        raise
+    else:
+        if pool is not None:
+            pool.close()
+    finally:
+        if pool is not None:
+            pool.join()
+
     summaries = {}
     for run in successful:
-        all_outcomes = [item for values in outcomes.values() for item in values if item["target_run"] == run.run_id]
-        accepted = [
-            item for item in all_outcomes
-            if _outcome_status(item, q_value_max)
-            == "accepted_matched_weak_feature"
-        ]
-        count = _publish_features(
-            result_by_id[run.run_id]["paths"]["features"],
-            accepted,
-            options,
-        )
-        for row in evidence.get(run.run_id, ()):
-            if row["status"] == "accepted_matched_weak_feature":
-                match = next(item for item in accepted if item["candidate"].candidate_id == row["weak_candidate_id"])
-                row["feature_id"] = match["feature_id"]
-        _write_evidence(result_by_id[run.run_id]["paths"]["external_evidence"], evidence.get(run.run_id, ()))
-        statuses = Counter(
-            _outcome_status(item, q_value_max) for item in all_outcomes
-        )
+        all_outcomes, accepted, status_counts = summary_inputs[run.run_id]
+        count = published[run.run_id]
         target_support_counts = Counter(
             len(item["targets"]) for item in all_outcomes
         )
@@ -1040,7 +1162,7 @@ def run_feature_mbr_stage(runs, results, options):
             "run_id": run.run_id, "planned_assay_count": len(weak.get(run.run_id, ())),
             "evaluated_assay_count": len(all_outcomes), "new_external_feature_count": count,
             "new_strict_external_feature_count": 0, "new_weak_external_feature_count": count,
-            "status_counts": dict(sorted(statuses.items())),
+            "status_counts": status_counts,
             "external_min_support_runs": min_support_runs,
             "external_max_support_runs": max_support_runs,
             "target_support_run_count_distribution": dict(
@@ -1056,7 +1178,7 @@ def run_feature_mbr_stage(runs, results, options):
         logger.info(
             "Feature-MBR run %s: weak=%d evaluated=%d rescued=%d statuses=%s",
             run.run_id, len(weak.get(run.run_id, ())), len(all_outcomes),
-            count, dict(sorted(statuses.items())),
+            count, status_counts,
         )
     alignment_statuses = Counter(
         model.status for _declared, model in models.values()

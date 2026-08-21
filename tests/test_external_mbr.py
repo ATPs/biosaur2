@@ -59,6 +59,78 @@ def _candidate_row(mz=700.0):
     }
 
 
+def _four_run_stage_inputs(root):
+    root.mkdir()
+    run_ids = ("source_a", "source_b", "source_c", "target")
+    runs = [_run(run_id) for run_id in run_ids]
+    results = {}
+    paths_by_run = {}
+    anchors = [500.0 + value for value in range(5)]
+    for index, run in enumerate(runs):
+        mzml = root / (run.run_id + ".mzML")
+        mzml.write_bytes(run.run_id.encode())
+        run.mzml_path = mzml
+        paths = {
+            "features": str(root / (run.run_id + ".features.parquet")),
+            "external_evidence": str(root / (run.run_id + ".external.parquet")),
+            "external_strong_features": str(root / (run.run_id + ".strong.parquet")),
+            "external_weak_candidates": str(root / (run.run_id + ".weak.parquet")),
+        }
+        pq.write_table(
+            pa.Table.from_pylist(
+                [], schema=compact_schemas()["hybrid_features"]
+            ), paths["features"]
+        )
+        strong = [
+            _feature(run.run_id, feature_id, mz, 100.0 + feature_id)
+            for feature_id, mz in enumerate(anchors, start=1)
+        ]
+        if run.run_id != "target":
+            strong.extend(
+                _feature(
+                    run.run_id, 20 + candidate_id,
+                    700.0 + candidate_id * 0.1, 170.0,
+                )
+                for candidate_id in range(1, 21)
+            )
+        weak = []
+        if run.run_id == "target":
+            weak = [{
+                **_feature(
+                    run.run_id, candidate_id,
+                    700.0 + candidate_id * 0.1, 170.0, 0.75,
+                ).__dict__,
+                "candidate_id": candidate_id,
+                "row_json": __import__("json").dumps(
+                    _candidate_row(700.0 + candidate_id * 0.1)
+                ),
+                "mono_points": 2,
+                "secondary_points": 2,
+                "isotope_cosine": 0.75,
+            } for candidate_id in range(1, 21)]
+        write_feature_sidecars(
+            run.mzml_path, paths,
+            [record.__dict__ for record in strong], weak,
+        )
+        results[index] = {"status": "success", "paths": paths}
+        paths_by_run[run.run_id] = paths
+    return runs, results, paths_by_run
+
+
+def _feature_mbr_options(workers):
+    return {
+        "workers": workers,
+        "_effective_workers": workers,
+        "_max_memory_bytes": 8 * 1024 ** 3,
+        "external_ppm": 8.0,
+        "external_rt_tolerance_sec": 120.0,
+        "external_q_value_max": 0.05,
+        "external_alignment_min_anchors": 3,
+        "external_alignment_max_mad_sec": 30.0,
+        "external_alignment_max_anchors": 64,
+    }
+
+
 def test_external_evidence_schema_is_stable_for_empty_output(tmp_path):
     empty_path = tmp_path / "empty.parquet"
     populated_path = tmp_path / "populated.parquet"
@@ -95,6 +167,59 @@ def test_external_evidence_schema_is_stable_for_empty_output(tmp_path):
     assert empty_schema.metadata[
         b"biosaur2_external_evidence_schema_version"
     ] == b"1"
+
+
+def test_feature_mbr_duckdb_connections_are_single_threaded(tmp_path, monkeypatch):
+    duckdb = pytest.importorskip("duckdb")
+    feature_path = tmp_path / "features.duckdb"
+    evidence_path = tmp_path / "evidence.duckdb"
+    feature_table = pa.Table.from_pylist(
+        [], schema=compact_schemas()["hybrid_features"]
+    )
+    with duckdb.connect(str(feature_path)) as connection:
+        connection.register("_features", feature_table)
+        connection.execute("CREATE TABLE features AS SELECT * FROM _features")
+    with duckdb.connect(str(evidence_path)):
+        pass
+
+    original_connect = duckdb.connect
+    connections = []
+
+    class RecordedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.statements = []
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+        def execute(self, statement, *args, **kwargs):
+            self.statements.append(statement)
+            return self.connection.execute(statement, *args, **kwargs)
+
+        def register(self, *args, **kwargs):
+            return self.connection.register(*args, **kwargs)
+
+        def unregister(self, *args, **kwargs):
+            return self.connection.unregister(*args, **kwargs)
+
+    def recorded_connect(*args, **kwargs):
+        connection = RecordedConnection(original_connect(*args, **kwargs))
+        connections.append((args, kwargs, connection))
+        return connection
+
+    monkeypatch.setattr(duckdb, "connect", recorded_connect)
+    assert external_mbr._read_table(feature_path, "features").num_rows == 0
+    _write_evidence(evidence_path, [])
+
+    assert len(connections) == 2
+    for _args, kwargs, connection in connections:
+        assert kwargs["config"] == {"threads": "1"}
+        assert connection.statements[0] == "SET threads TO 1"
 
 
 def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
@@ -262,6 +387,39 @@ def test_feature_mbr_rescues_weak_candidate_without_raw_cache(tmp_path):
     assert gated["summaries"]["target"]["status_counts"] == {
         "insufficient_target_support_runs": 20
     }
+
+
+def test_feature_mbr_parallel_io_and_publish_match_serial_output(
+    tmp_path, monkeypatch
+):
+    serial_runs, serial_results, serial_paths = _four_run_stage_inputs(
+        tmp_path / "serial"
+    )
+    parallel_runs, parallel_results, parallel_paths = _four_run_stage_inputs(
+        tmp_path / "parallel"
+    )
+
+    serial = run_feature_mbr_stage(
+        serial_runs, serial_results, _feature_mbr_options(1)
+    )
+    monkeypatch.setattr(external_mbr, "MBR_MIN_PARALLEL_SIDECAR_BYTES", 0)
+    parallel = run_feature_mbr_stage(
+        parallel_runs, parallel_results, _feature_mbr_options(4)
+    )
+
+    assert parallel["summaries"] == serial["summaries"]
+    assert parallel["alignment_models"] == serial["alignment_models"]
+    assert parallel["reference_runs"] == serial["reference_runs"]
+    assert parallel["scheduler_summary"] == serial["scheduler_summary"]
+    for run_id in serial_paths:
+        assert pq.read_table(parallel_paths[run_id]["features"]).to_pylist() == (
+            pq.read_table(serial_paths[run_id]["features"]).to_pylist()
+        )
+        assert pq.read_table(
+            parallel_paths[run_id]["external_evidence"]
+        ).to_pylist() == pq.read_table(
+            serial_paths[run_id]["external_evidence"]
+        ).to_pylist()
 
 
 def test_external_competition_aggregates_distinct_run_supports():
