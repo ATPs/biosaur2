@@ -69,14 +69,15 @@ class ComponentFootprint:
 
 
 class ResidualMS1Ledger:
-    """Sparse reversible ownership ledger over one immutable RawMS1Store."""
+    """Dense reversible ownership ledger over one immutable RawMS1Store."""
 
     def __init__(self, store: RawMS1Store, *, tolerance: float = 1e-9):
         self.store = store
         self.tolerance = float(tolerance)
         if not math.isfinite(self.tolerance) or self.tolerance < 0:
             raise ValueError("residual tolerance must be finite and nonnegative")
-        self._claimed = {}
+        self._claimed = np.zeros(self.store.intensity.size, dtype=np.float64)
+        self._claimed_point_count = 0
         self._allocations = {}
 
     @property
@@ -85,11 +86,11 @@ class ResidualMS1Ledger:
 
     @property
     def claimed_point_count(self):
-        return len(self._claimed)
+        return self._claimed_point_count
 
     @property
     def claimed_intensity(self):
-        return float(sum(self._claimed.values()))
+        return float(np.sum(self._claimed, dtype=np.float64))
 
     @property
     def original_intensity(self):
@@ -100,12 +101,17 @@ class ResidualMS1Ledger:
         return self.original_intensity - self.claimed_intensity
 
     def state_fingerprint(self):
-        """Return an exact deterministic signature of current sparse claims."""
+        """Return an exact deterministic signature of current claims."""
 
         digest = hashlib.sha256()
-        digest.update(struct.pack("<Q", len(self._claimed)))
-        for point_index, amount in sorted(self._claimed.items()):
-            digest.update(struct.pack("<Qd", int(point_index), float(amount)))
+        point_indices = np.flatnonzero(self._claimed)
+        digest.update(struct.pack("<Q", point_indices.size))
+        for point_index in point_indices:
+            digest.update(
+                struct.pack(
+                    "<Qd", int(point_index), float(self._claimed[point_index])
+                )
+            )
         return digest.hexdigest()
 
     def footprint_overlap(self, footprint: ComponentFootprint) -> ComponentOverlap:
@@ -117,7 +123,7 @@ class ResidualMS1Ledger:
             )
         overlap = float(
             sum(
-                min(value.intensity, self._claimed.get(value.point_index, 0.0))
+                min(value.intensity, float(self._claimed[value.point_index]))
                 for value in footprint.allocations
             )
         )
@@ -211,10 +217,8 @@ class ResidualMS1Ledger:
 
     def _residual_slice(self, start: int, end: int):
         values = np.asarray(self.store.intensity[start:end], dtype=np.float64).copy()
-        for local, point_index in enumerate(range(start, end)):
-            claimed = self._claimed.get(point_index)
-            if claimed:
-                values[local] = max(0.0, values[local] - claimed)
+        np.subtract(values, self._claimed[start:end], out=values)
+        np.maximum(values, 0.0, out=values)
         return values
 
     def scan(self, local_index: int):
@@ -321,16 +325,10 @@ class ResidualMS1Ledger:
         point_indices = np.arange(
             scan_start + start, scan_start + end, dtype=np.int64
         )
-        residual = np.asarray(
-            [
-                max(
-                    0.0,
-                    float(self.store.intensity[index])
-                    - self._claimed.get(int(index), 0.0),
-                )
-                for index in point_indices
-            ],
-            dtype=np.float64,
+        residual = np.maximum(
+            0.0,
+            np.asarray(self.store.intensity[point_indices], dtype=np.float64)
+            - self._claimed[point_indices],
         )
         positive = residual > self.tolerance
         if not np.any(positive):
@@ -378,7 +376,7 @@ class ResidualMS1Ledger:
             available = max(
                 0.0,
                 float(self.store.intensity[point_index])
-                - self._claimed.get(point_index, 0.0),
+                - float(self._claimed[point_index]),
             )
             if amount > available + max(
                 self.tolerance, self.tolerance * available
@@ -392,9 +390,10 @@ class ResidualMS1Ledger:
                     float(requested_total),
                 )
         for value in accepted:
-            self._claimed[value.point_index] = (
-                self._claimed.get(value.point_index, 0.0) + value.intensity
-            )
+            previous = float(self._claimed[value.point_index])
+            if previous <= self.tolerance:
+                self._claimed_point_count += 1
+            self._claimed[value.point_index] = previous + value.intensity
         self._allocations[allocation_id] = accepted
         return AllocationResult(
             allocation_id,
@@ -474,7 +473,7 @@ class ResidualMS1Ledger:
                 available = max(
                     0.0,
                     float(self.store.intensity[point_index])
-                    - self._claimed.get(point_index, 0.0)
+                    - float(self._claimed[point_index])
                     - already_proposed,
                 )
                 if requested <= available + max(
@@ -540,6 +539,54 @@ class ResidualMS1Ledger:
             allocation_id, float(footprint.requested_intensity), by_point
         )
 
+    def commit_observed_point_arrays(
+        self,
+        allocation_id: Hashable,
+        status: str,
+        requested_intensity: float,
+        point_indices,
+        intensities,
+    ) -> AllocationResult:
+        """Commit a compact immutable-store footprint prepared by a worker.
+
+        Strict population workers pass numeric arrays through a temporary
+        memory-mapped artifact instead of pickling every ``RawPointAllocation``
+        through a multiprocessing queue.  The mutable claim ledger remains
+        exclusively owned and ordered by this process.
+        """
+
+        if allocation_id in self._allocations:
+            raise ValueError("allocation ID already exists: %r" % (allocation_id,))
+        requested_total = float(requested_intensity)
+        if status != "accepted":
+            return AllocationResult(
+                allocation_id,
+                str(status),
+                requested_total,
+                0.0,
+                0,
+                requested_total,
+            )
+        indices = np.asarray(point_indices, dtype=np.int64)
+        values = np.asarray(intensities, dtype=np.float64)
+        if indices.ndim != 1 or values.ndim != 1 or indices.size != values.size:
+            raise ValueError("observed footprint arrays have incompatible shapes")
+        by_point = {}
+        for point_index, amount in zip(indices, values):
+            point_index = int(point_index)
+            amount = float(amount)
+            if (
+                point_index < 0
+                or point_index >= self.store.intensity.size
+                or not math.isfinite(amount)
+                or amount < 0
+            ):
+                raise ValueError("observed footprint contains an invalid allocation")
+            by_point[point_index] = by_point.get(point_index, 0.0) + amount
+        return self._commit_point_allocations(
+            allocation_id, requested_total, by_point
+        )
+
     def allocate_component(
         self,
         allocation_id: Hashable,
@@ -594,7 +641,7 @@ class ResidualMS1Ledger:
             available = max(
                 0.0,
                 float(self.store.intensity[point_index])
-                - self._claimed.get(point_index, 0.0),
+                - float(self._claimed[point_index]),
             )
             if amount > available + max(
                 self.tolerance, self.tolerance * available
@@ -615,30 +662,34 @@ class ResidualMS1Ledger:
     def revert(self, allocation_id: Hashable):
         """Remove one accepted allocation and restore its residual intensity."""
 
-        allocations = self._allocations.pop(allocation_id)
+        allocations = self._allocations[allocation_id]
+        if allocations is None:
+            raise ValueError(
+                "sealed allocation cannot be reverted: %r" % (allocation_id,)
+            )
+        del self._allocations[allocation_id]
         for value in allocations:
             remaining = self._claimed[value.point_index] - value.intensity
             if remaining <= self.tolerance:
-                self._claimed.pop(value.point_index, None)
+                self._claimed[value.point_index] = 0.0
+                self._claimed_point_count -= 1
             else:
                 self._claimed[value.point_index] = remaining
+
+    def seal_allocation(self, allocation_id: Hashable):
+        """Discard rollback points while retaining the committed allocation ID."""
+
+        allocations = self._allocations[allocation_id]
+        if allocations is not None:
+            self._allocations[allocation_id] = None
 
     def materialize(self):
         """Return a RawMS1Store with the current residual intensity."""
 
         residual = np.asarray(self.store.intensity, dtype=np.float64).copy()
-        if self._claimed:
-            point_indices = np.fromiter(
-                self._claimed, dtype=np.intp, count=len(self._claimed)
-            )
-            claimed = np.fromiter(
-                self._claimed.values(),
-                dtype=np.float64,
-                count=len(self._claimed),
-            )
-            residual[point_indices] = np.maximum(
-                0.0, residual[point_indices] - claimed
-            )
+        if self._claimed_point_count:
+            np.subtract(residual, self._claimed, out=residual)
+            np.maximum(residual, 0.0, out=residual)
         return RawMS1Store(
             offsets=self.store.offsets,
             mz=self.store.mz,

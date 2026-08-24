@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from bisect import bisect_left, bisect_right
 import math
+from pathlib import Path
+import tempfile
 from typing import Mapping
 
 import numpy as np
@@ -24,13 +26,13 @@ from .parallel import balanced_ranges, run_process_tasks
 from .residual import ResidualMS1Ledger
 
 
-def _final_strict_feature_rows(strict_contexts, args):
-    """Build strict rows only after hybrid targeted/conflict decisions finish."""
+def _final_strict_feature_row_task(context_segments, args):
+    """Build one ordered group of independent strict output rows."""
 
     from . import utils
 
     result = []
-    for context in strict_contexts:
+    for context in context_segments:
         result.extend(utils.calc_peptide_features(
             context["hills"],
             context["candidates"],
@@ -44,6 +46,44 @@ def _final_strict_feature_rows(strict_contexts, args):
             spectra=context["spectra"],
         ))
     return result
+
+
+def _final_strict_feature_rows(strict_contexts, args):
+    """Build strict rows only after hybrid targeted/conflict decisions finish."""
+
+    contexts = tuple(context for context in strict_contexts if context["candidates"])
+    total_candidates = sum(len(context["candidates"]) for context in contexts)
+    workers = min(int(args.get("nprocs", 1)), total_candidates)
+    if workers <= 1:
+        return _final_strict_feature_row_task(contexts, args)
+
+    # Divide the global context/candidate order into at most nprocs tasks.  A
+    # task may contain pieces of neighbouring contexts, but its row order is
+    # exactly the legacy context-major order and is merged in task order.
+    offsets = []
+    offset = 0
+    for context in contexts:
+        offsets.append((offset, offset + len(context["candidates"]), context))
+        offset += len(context["candidates"])
+    tasks = []
+    for start, end in balanced_ranges(total_candidates, workers):
+        segments = []
+        for context_start, context_end, context in offsets:
+            overlap_start = max(start, context_start)
+            overlap_end = min(end, context_end)
+            if overlap_start >= overlap_end:
+                continue
+            local_start = overlap_start - context_start
+            local_end = overlap_end - context_start
+            segments.append({
+                **context,
+                "candidates": context["candidates"][local_start:local_end],
+            })
+        tasks.append((tuple(segments), args))
+    rows = []
+    for batch in run_process_tasks(_final_strict_feature_row_task, tasks):
+        rows.extend(batch)
+    return rows
 
 
 def _rt_distance(rt, start, end):
@@ -113,12 +153,33 @@ def _strict_feature_observed_contributions(record):
     return tuple(contributions)
 
 
-def _build_strict_observed_footprints(store, records):
-    """Map immutable strict feature points to raw-store footprints."""
+_STRICT_FOOTPRINT_META_DTYPE = np.dtype([
+    ("feature_id", np.int64),
+    ("requested", np.float64),
+    ("start", np.int64),
+    ("end", np.int64),
+    ("valid", np.bool_),
+    ("status", "S48"),
+])
+
+
+def _strict_footprint_artifact_paths(directory, worker_id):
+    prefix = Path(directory) / ("worker-%03d" % int(worker_id))
+    return {
+        "meta": str(prefix.with_suffix(".meta.npy")),
+        "indices": str(prefix.with_suffix(".indices.npy")),
+        "intensities": str(prefix.with_suffix(".intensities.npy")),
+    }
+
+
+def _build_strict_observed_footprint_artifact(store, records, directory, worker_id):
+    """Map immutable strict points and persist a compact worker artifact."""
 
     mapper = ResidualMS1Ledger(store)
-    result = []
-    for record in records:
+    metadata = np.empty(len(records), dtype=_STRICT_FOOTPRINT_META_DTYPE)
+    point_indices = []
+    intensities = []
+    for position, record in enumerate(records):
         feature_id = int(record["feature_id"])
         try:
             footprint = mapper.observed_point_footprint(
@@ -126,8 +187,48 @@ def _build_strict_observed_footprints(store, records):
             )
         except (IndexError, KeyError, TypeError, ValueError):
             footprint = None
-        result.append((feature_id, footprint))
-    return result
+        start = len(point_indices)
+        if footprint is None:
+            valid = False
+            status = b""
+            requested = 0.0
+        else:
+            valid = True
+            status = footprint.status.encode("ascii")
+            requested = float(footprint.requested_intensity)
+            if footprint.status == "accepted":
+                point_indices.extend(
+                    int(value.point_index) for value in footprint.allocations
+                )
+                intensities.extend(
+                    float(value.intensity) for value in footprint.allocations
+                )
+        metadata[position] = (
+            feature_id,
+            requested,
+            start,
+            len(point_indices),
+            valid,
+            status,
+        )
+    paths = _strict_footprint_artifact_paths(directory, worker_id)
+    np.save(paths["meta"], metadata, allow_pickle=False)
+    np.save(
+        paths["indices"], np.asarray(point_indices, dtype=np.int64),
+        allow_pickle=False,
+    )
+    np.save(
+        paths["intensities"], np.asarray(intensities, dtype=np.float64),
+        allow_pickle=False,
+    )
+    return paths
+
+
+def _remove_strict_footprint_artifacts(directory):
+    path = Path(directory)
+    for artifact in path.iterdir():
+        artifact.unlink()
+    path.rmdir()
 
 
 def _allocate_strict_feature_population(ledger, strict_records, workers=1):
@@ -136,49 +237,74 @@ def _allocate_strict_feature_population(ledger, strict_records, workers=1):
     statuses = Counter()
     failed_feature_ids = []
     records = tuple(sorted(strict_records, key=lambda record: int(record["feature_id"])))
-    footprints = {}
     # Initial strict features originate from a conflict-free detector population,
     # so their raw-point mappings can be prepared concurrently. Residual strict
     # candidates may overlap already claimed points and retain the serial path.
     if int(workers) > 1 and len(records) > 1 and not ledger.allocation_count:
         ranges = balanced_ranges(len(records), int(workers))
-        batches = run_process_tasks(
-            _build_strict_observed_footprints,
-            [(ledger.store, records[start:end]) for start, end in ranges],
-        )
-        footprints = {
-            feature_id: footprint
-            for batch in batches
-            for feature_id, footprint in batch
-        }
-    for record in records:
-        feature_id = int(record["feature_id"])
+        artifact_directory = tempfile.mkdtemp(prefix=".strict-footprints-")
         try:
-            footprint = footprints.get(feature_id)
-            if footprint is None and feature_id in footprints:
-                raise ValueError("invalid strict provenance")
-            if footprint is not None:
-                result = ledger.commit_observed_point_footprint(
-                    ("strict", feature_id), footprint
-                )
-                # An unexpected cross-feature raw-point overlap must take the
-                # established claimed-intensity-aware mapping path.
-                if result.status == "raw_point_overallocation":
-                    result = ledger.allocate_observed_points(
-                        ("strict", feature_id),
-                        _strict_feature_observed_contributions(record),
-                    )
-            else:
+            artifacts = run_process_tasks(
+                _build_strict_observed_footprint_artifact,
+                [
+                    (ledger.store, records[start:end], artifact_directory, worker_id)
+                    for worker_id, (start, end) in enumerate(ranges)
+                ],
+            )
+            for (start, end), paths in zip(ranges, artifacts):
+                metadata = np.load(paths["meta"], mmap_mode="r")
+                point_indices = np.load(paths["indices"], mmap_mode="r")
+                intensities = np.load(paths["intensities"], mmap_mode="r")
+                for record, entry in zip(records[start:end], metadata):
+                    feature_id = int(record["feature_id"])
+                    if feature_id != int(entry["feature_id"]):
+                        raise ValueError("strict footprint feature order mismatch")
+                    try:
+                        if bool(entry["valid"]):
+                            status = entry["status"].decode("ascii")
+                            result = ledger.commit_observed_point_arrays(
+                                ("strict", feature_id),
+                                status,
+                                float(entry["requested"]),
+                                point_indices[int(entry["start"]):int(entry["end"])],
+                                intensities[int(entry["start"]):int(entry["end"])],
+                            )
+                            if result.status == "raw_point_overallocation":
+                                result = ledger.allocate_observed_points(
+                                    ("strict", feature_id),
+                                    _strict_feature_observed_contributions(record),
+                                )
+                        else:
+                            result = ledger.allocate_observed_points(
+                                ("strict", feature_id),
+                                _strict_feature_observed_contributions(record),
+                            )
+                        status = result.status
+                        if status == "accepted":
+                            ledger.seal_allocation(("strict", feature_id))
+                    except (IndexError, KeyError, TypeError, ValueError):
+                        status = "invalid_strict_provenance"
+                    statuses[status] += 1
+                    if status != "accepted":
+                        failed_feature_ids.append(feature_id)
+        finally:
+            _remove_strict_footprint_artifacts(artifact_directory)
+    else:
+        for record in records:
+            feature_id = int(record["feature_id"])
+            try:
                 result = ledger.allocate_observed_points(
                     ("strict", feature_id),
                     _strict_feature_observed_contributions(record),
                 )
-            status = result.status
-        except (IndexError, KeyError, TypeError, ValueError):
-            status = "invalid_strict_provenance"
-        statuses[status] += 1
-        if status != "accepted":
-            failed_feature_ids.append(feature_id)
+                status = result.status
+                if status == "accepted":
+                    ledger.seal_allocation(("strict", feature_id))
+            except (IndexError, KeyError, TypeError, ValueError):
+                status = "invalid_strict_provenance"
+            statuses[status] += 1
+            if status != "accepted":
+                failed_feature_ids.append(feature_id)
     return {
         "status_counts": dict(sorted(statuses.items())),
         "accepted_feature_count": statuses["accepted"],

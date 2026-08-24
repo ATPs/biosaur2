@@ -9,6 +9,7 @@ from biosaur2.cache_runtime import (
     remove_cache_layers,
     run_cache_paths,
 )
+from biosaur2.search import _run_args_for_file
 
 
 def test_temporary_cache_workspace_cleans_only_its_invocation(tmp_path):
@@ -35,6 +36,31 @@ def test_retained_cache_path_is_stable_and_layered(tmp_path):
     assert Path(first["raw_ms1_cache"]).name == "raw-ms1"
     assert Path(first["strict_stage_cache"]).name == "strict-stage"
     assert Path(first["candidate_cache"]).name == "candidates"
+
+
+def test_temporary_hybrid_run_keeps_only_raw_mmap_cache_path(tmp_path):
+    source = tmp_path / "sample.mzML"
+    workspace = CacheWorkspace.create(tmp_path / "cache", keep=False)
+    args = {
+        "files": [str(source)],
+        "continue_on_error": False,
+        "feature_mode": "hybrid",
+        "cache_dir": str(workspace.root),
+        "_cache_workspace": str(workspace.workspace),
+        "keep_cache": False,
+        "workers": 4,
+        "o": "",
+        "format": "parquet",
+    }
+    run_args = _run_args_for_file(args, str(source), multiple_inputs=False)
+    assert "raw_ms1_cache_dir" in run_args
+    assert "hybrid_stage_cache_dir" not in run_args
+    assert "hybrid_candidate_cache_dir" not in run_args
+
+    args["keep_cache"] = True
+    retained = _run_args_for_file(args, str(source), multiple_inputs=False)
+    assert "hybrid_stage_cache_dir" in retained
+    assert "hybrid_candidate_cache_dir" in retained
 
 
 def test_project_workspace_retains_interrupted_cache_then_cleans_success(tmp_path):

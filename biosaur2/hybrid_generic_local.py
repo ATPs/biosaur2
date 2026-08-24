@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from bisect import bisect_left, bisect_right
 import logging
+import math
 
 import numpy as np
 
@@ -19,6 +20,9 @@ from .postprocess_cache import (
 
 
 logger = logging.getLogger(__name__)
+
+
+_SHARED_RAW_POINT = frozenset((None,))
 
 from .hybrid_assays import *
 from .hybrid_constants import *
@@ -87,6 +91,120 @@ def _generic_local_equivalent(left, right, ppm):
     right_width = right.rt_end_sec - right.rt_start_sec
     apex_tolerance = max(3.0, 0.25 * min(left_width, right_width))
     return abs(left.rt_apex_sec - right.rt_apex_sec) <= apex_tolerance
+
+
+class _GenericRecoveredIndex:
+    """Find prior generic candidates without changing acceptance order."""
+
+    def __init__(self, ppm, recovered=()):
+        self.ppm = float(ppm)
+        self._relative_ppm = self.ppm * 1e-6
+        self._mz_bucket_width = math.log1p(self._relative_ppm)
+        self._mz_neighbor_count = (
+            math.ceil(
+                max(
+                    math.log1p(self._relative_ppm),
+                    -math.log1p(-self._relative_ppm),
+                )
+                / self._mz_bucket_width
+            )
+            + 1
+            if 0 < self._relative_ppm < 1
+            else None
+        )
+        self._entries = []
+        self._point_positions = {}
+        self._mz_positions = defaultdict(list)
+        for candidate, feature_id in recovered:
+            self.add(candidate, feature_id)
+
+    def _faims_keys(self, value):
+        if value is None:
+            return (None,)
+        value = float(value)
+        if not math.isfinite(value):
+            return ()
+        bucket = math.floor(value * 1e6)
+        return (bucket - 1, bucket, bucket + 1)
+
+    def _mz_bucket(self, mz):
+        mz = float(mz)
+        if mz <= 0 or not math.isfinite(mz):
+            return None
+        if self._mz_bucket_width <= 0:
+            return None
+        return math.floor(math.log(mz) / self._mz_bucket_width)
+
+    def _candidate_positions(self, candidate, points):
+        positions = set()
+        raw_point_positions = set()
+        for point in points:
+            point_positions = self._point_positions.get(point)
+            if point_positions is None:
+                continue
+            if isinstance(point_positions, int):
+                positions.add(point_positions)
+                raw_point_positions.add(point_positions)
+            else:
+                positions.update(point_positions)
+                raw_point_positions.update(point_positions)
+        mz_bucket = self._mz_bucket(candidate.mono_mz)
+        if mz_bucket is None or self._mz_neighbor_count is None:
+            positions.update(range(len(self._entries)))
+        else:
+            charge = int(candidate.event["charge"])
+            for faims_key in self._faims_keys(candidate.event.get("faims_cv")):
+                for bucket in range(
+                    mz_bucket - self._mz_neighbor_count,
+                    mz_bucket + self._mz_neighbor_count + 1,
+                ):
+                    positions.update(
+                        self._mz_positions.get((charge, faims_key, bucket), ())
+                    )
+        return sorted(positions), raw_point_positions
+
+    def candidates(self, candidate):
+        points = _local_candidate_raw_points(candidate)
+        positions, raw_point_positions = self._candidate_positions(candidate, points)
+        return (
+            points,
+            [
+                (*self._entries[position], position in raw_point_positions)
+                for position in positions
+            ],
+        )
+
+    def conflict(self, candidate):
+        challenger_points, entries = self.candidates(candidate)
+        return any(
+            _protected_local_conflict(
+                previous,
+                candidate,
+                protected_points=_SHARED_RAW_POINT,
+                challenger_points=_SHARED_RAW_POINT,
+            )
+            for previous, _feature_id, has_shared_raw_point in entries
+            if has_shared_raw_point
+        )
+
+    def add(self, candidate, feature_id, points=None):
+        if points is None:
+            points = _local_candidate_raw_points(candidate)
+        position = len(self._entries)
+        self._entries.append((candidate, feature_id))
+        for point in points:
+            previous = self._point_positions.get(point)
+            if previous is None:
+                self._point_positions[point] = position
+            elif isinstance(previous, int):
+                self._point_positions[point] = (previous, position)
+            else:
+                self._point_positions[point] = previous + (position,)
+        mz_bucket = self._mz_bucket(candidate.mono_mz)
+        if mz_bucket is not None:
+            charge = int(candidate.event["charge"])
+            for faims_key in self._faims_keys(candidate.event.get("faims_cv")):
+                self._mz_positions[(charge, faims_key, mz_bucket)].append(position)
 
 
 def _generic_local_strict_equivalents(candidate, strict_index, ppm):

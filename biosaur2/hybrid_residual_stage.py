@@ -360,15 +360,15 @@ def _run_final_residual_generic_recheck(
             for event in ingestion.ms2_rows
             if int(event["ms2_event_id"]) in unlinked_ids
         ]
-        final_target_links, final_target_summary = _generic_standard_links(
-            unlinked_events, ingestion, final_residual_contexts, args
-        )
-        final_decoy_links, final_decoy_summary = _generic_standard_links(
-            _generic_decoy_rows(run_id, unlinked_events),
+        final_target_result, final_decoy_result = generic_standard_link_pair(
+            run_id,
+            unlinked_events,
             ingestion,
             final_residual_contexts,
             args,
         )
+        final_target_links, final_target_summary, _target_runtime = final_target_result
+        final_decoy_links, final_decoy_summary, _decoy_runtime = final_decoy_result
         rescored_target = _rescore_generic_link_rows(
             final_target_links, generic_score_weights
         )

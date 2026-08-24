@@ -5,6 +5,7 @@ biosaur2/*.so
 biosaur2/cutils.c
 dev/test
 .local
+.bench/
 dist/
 *.pyc
 *.pyo
@@ -39,4 +40,3 @@ Thumbs.db
 .nfs*
 .vscode/
 .idea/
-

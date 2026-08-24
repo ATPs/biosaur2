@@ -474,7 +474,9 @@ def _local_candidate_raw_points(candidate):
     return frozenset(points)
 
 
-def _protected_local_conflict(protected, challenger):
+def _protected_local_conflict(
+    protected, challenger, protected_points=None, challenger_points=None
+):
     protected_group = getattr(protected, "allocation_group_key", None)
     challenger_group = getattr(challenger, "allocation_group_key", None)
     if (
@@ -486,8 +488,10 @@ def _protected_local_conflict(protected, challenger):
         != challenger.allocation_component_index
     ):
         return False
-    protected_points = _local_candidate_raw_points(protected)
-    challenger_points = _local_candidate_raw_points(challenger)
+    if protected_points is None:
+        protected_points = _local_candidate_raw_points(protected)
+    if challenger_points is None:
+        challenger_points = _local_candidate_raw_points(challenger)
     if not protected_points or not (protected_points & challenger_points):
         return False
     protected_score = float(protected.isotope_cosine or 0.0)

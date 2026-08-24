@@ -10,6 +10,7 @@ from .generic_local import (
     compete_generic_local_candidates,
     generic_local_width_limit,
 )
+from .hybrid_generic_local import _SHARED_RAW_POINT
 from .hybrid_runtime import *
 
 
@@ -38,27 +39,20 @@ def _run_generic_enabled_stage(**kwargs):
     generic_recovered = kwargs["generic_recovered"]
     generic_score_weights = kwargs["generic_score_weights"]
     generic_started = time.monotonic()
-    logger.info("Hybrid generic stage: matching target precursor hypotheses")
-    standard_target_started = time.monotonic()
-    target_links, target_summary = _generic_standard_links(
-        ingestion.ms2_rows, ingestion, strict_contexts, args
+    logger.info("Hybrid generic stage: matching paired target/decoy precursor hypotheses")
+    target_result, decoy_result = generic_standard_link_pair(
+        run_id, ingestion.ms2_rows, ingestion, strict_contexts, args
     )
+    target_links, target_summary, target_runtime = target_result
+    decoy_links, decoy_summary, decoy_runtime = decoy_result
     logger.debug(
         'Hybrid generic standard target association complete: runtime_sec=%.3f events=%d',
-        time.monotonic() - standard_target_started,
+        target_runtime,
         len(target_links),
-    )
-    logger.info("Hybrid generic stage: matching paired decoy hypotheses")
-    standard_decoy_started = time.monotonic()
-    decoy_links, decoy_summary = _generic_standard_links(
-        _generic_decoy_rows(run_id, ingestion.ms2_rows),
-        ingestion,
-        strict_contexts,
-        args,
     )
     logger.debug(
         'Hybrid generic standard decoy association complete: runtime_sec=%.3f events=%d',
-        time.monotonic() - standard_decoy_started,
+        decoy_runtime,
         len(decoy_links),
     )
     standard_competition_started = time.monotonic()
@@ -211,10 +205,14 @@ def _apply_standard_generic_results(state):
     generic_recovered_feature_rows = state["generic_recovered_feature_rows"]
     generic_recovered_quant_rows = state["generic_recovered_quant_rows"]
     generic_recovered = state["generic_recovered"]
-    local_competitions = state["local_competitions"]
     local_ppm = state["local_ppm"]
+    generic_recovered_index = _GenericRecoveredIndex(
+        local_ppm, generic_recovered
+    )
+    local_competitions = state["local_competitions"]
     local_status_counts = state["local_status_counts"]
     q_value_max = state["q_value_max"]
+    result_application_started = time.monotonic()
     for competition in local_competitions:
         event_id = competition.event_id
         target = competition.target
@@ -268,14 +266,22 @@ def _apply_standard_generic_results(state):
                         status = "generic_local_raw_point_conflict"
                         break
             if status is None:
-                for previous, previous_feature_id in generic_recovered:
+                target_points, previous_entries = generic_recovered_index.candidates(
+                    target
+                )
+                for previous, previous_feature_id, has_shared_raw_point in previous_entries:
                     if _generic_local_equivalent(
                         previous, target, local_ppm
                     ):
                         feature_id = previous_feature_id
                         status = "generic_matched_recovered_local_feature"
                         break
-                    if _protected_local_conflict(previous, target):
+                    if has_shared_raw_point and _protected_local_conflict(
+                        previous,
+                        target,
+                        protected_points=_SHARED_RAW_POINT,
+                        challenger_points=_SHARED_RAW_POINT,
+                    ):
                         status = "generic_local_raw_point_conflict"
                         break
             if status is None and _candidate_uses_assigned_strict_hill(
@@ -298,6 +304,7 @@ def _apply_standard_generic_results(state):
                 next_feature_id += 1
                 status = "generic_recovered_local_feature"
                 generic_recovered.append((target, feature_id))
+                generic_recovered_index.add(target, feature_id, target_points)
                 generic_recovered_feature_rows.append(
                     _generic_recovered_feature_row(target, feature_id)
                 )
@@ -376,6 +383,14 @@ def _apply_standard_generic_results(state):
 
     state["next_feature_id"] = next_feature_id
     state["local_status_counts"] = local_status_counts
+    state["generic_recovered_index"] = generic_recovered_index
+    logger.debug(
+        "Hybrid generic local result application complete: runtime_sec=%.3f "
+        "accepted=%d indexed=%d",
+        time.monotonic() - result_application_started,
+        local_status_counts["generic_recovered_local_feature"],
+        len(generic_recovered),
+    )
     return _run_relaxed_generic_recovery(state)
 
 
@@ -395,6 +410,11 @@ def _run_relaxed_generic_recovery(state):
     generic_recovered_feature_rows = state["generic_recovered_feature_rows"]
     generic_recovered_quant_rows = state["generic_recovered_quant_rows"]
     generic_recovered = state["generic_recovered"]
+    generic_recovered_index = state.get("generic_recovered_index")
+    if generic_recovered_index is None:
+        generic_recovered_index = _GenericRecoveredIndex(
+            state["local_ppm"], generic_recovered
+        )
     local_events = state["local_events"]
     decoy_events = state["decoy_events"]
     local_workers = state["local_workers"]
@@ -530,6 +550,7 @@ def _run_relaxed_generic_recovery(state):
         ) = _apply_relaxed_generic_results(
             run_id, args, audit_by_event, strict_hill_claims, residual_ledger,
             residual_allocation_status_counts, recovered, generic_recovered,
+            generic_recovered_index,
             generic_recovered_feature_rows, generic_recovered_quant_rows,
             local_ppm, q_value_max, next_feature_id, raw_relaxed_target,
             raw_relaxed_decoy, final_strict_raw_point_index,
@@ -550,6 +571,7 @@ def _run_relaxed_generic_recovery(state):
 def _apply_relaxed_generic_results(
     run_id, args, audit_by_event, strict_hill_claims, residual_ledger,
     residual_allocation_status_counts, recovered, generic_recovered,
+    generic_recovered_index,
     generic_recovered_feature_rows, generic_recovered_quant_rows, local_ppm,
     q_value_max, next_feature_id, raw_relaxed_target, raw_relaxed_decoy,
     final_strict_raw_point_index, target_strict_protection_counts,
@@ -582,10 +604,7 @@ def _apply_relaxed_generic_results(
                 _protected_local_conflict(previous, candidate)
                 for previous, _feature_id in recovered
             )
-            or any(
-                _protected_local_conflict(previous, candidate)
-                for previous, _feature_id in generic_recovered
-            )
+            or generic_recovered_index.conflict(candidate)
         ):
             candidate = replace(
                 candidate,
@@ -618,10 +637,7 @@ def _apply_relaxed_generic_results(
                 _protected_local_conflict(previous, decoy_candidate)
                 for previous, _feature_id in recovered
             )
-            or any(
-                _protected_local_conflict(previous, decoy_candidate)
-                for previous, _feature_id in generic_recovered
-            )
+            or generic_recovered_index.conflict(decoy_candidate)
         ):
             decoy_candidate = replace(
                 decoy_candidate,
@@ -644,6 +660,7 @@ def _apply_relaxed_generic_results(
     relaxed_competitions = compete_generic_local_candidates(
         relaxed_target_local, relaxed_decoy_local
     )
+    relaxed_recovered_index = _GenericRecoveredIndex(local_ppm)
     for competition in relaxed_competitions:
         event_id = competition.event_id
         target = competition.target
@@ -657,7 +674,10 @@ def _apply_relaxed_generic_results(
         if accepted:
             feature_id = None
             status = None
-            for previous, previous_feature_id in relaxed_recovered:
+            target_points, previous_entries = relaxed_recovered_index.candidates(
+                target
+            )
+            for previous, previous_feature_id, has_shared_raw_point in previous_entries:
                 if _generic_local_equivalent(
                     previous, target, local_ppm
                 ):
@@ -666,7 +686,12 @@ def _apply_relaxed_generic_results(
                         "generic_relaxed_matched_recovered_local_feature"
                     )
                     break
-                if _protected_local_conflict(previous, target):
+                if has_shared_raw_point and _protected_local_conflict(
+                    previous,
+                    target,
+                    protected_points=_SHARED_RAW_POINT,
+                    challenger_points=_SHARED_RAW_POINT,
+                ):
                     status = "generic_relaxed_raw_point_conflict"
                     break
             if status is None:
@@ -688,6 +713,8 @@ def _apply_relaxed_generic_results(
                 status = "generic_relaxed_recovered_local_feature"
                 relaxed_recovered.append((target, feature_id))
                 generic_recovered.append((target, feature_id))
+                relaxed_recovered_index.add(target, feature_id, target_points)
+                generic_recovered_index.add(target, feature_id, target_points)
                 generic_recovered_feature_rows.append(
                     _generic_recovered_feature_row(target, feature_id)
                 )
@@ -986,7 +1013,7 @@ def _finalize_generic_stage(state):
         len(generic_recovered),
         local_candidate_cache_telemetry,
     )
-    return {
+    result = {
         "generic_summary": generic_summary,
         "generic_recovered_feature_rows": generic_recovered_feature_rows,
         "generic_recovered_quant_rows": generic_recovered_quant_rows,
@@ -994,6 +1021,8 @@ def _finalize_generic_stage(state):
         "generic_score_weights": generic_score_weights,
         "next_feature_id": next_feature_id,
     }
+    state.clear()
+    return result
 
 
 def run_generic_stage(

@@ -1,16 +1,15 @@
 from . import utils
-from collections import Counter
 from copy import deepcopy
-import json
 import logging
 from pathlib import Path
 import time
+import traceback
 
 import numpy as np
 import pandas as pd
 from scipy.stats import binom
 
-from .cutils import get_initial_isotopes, checking_cos_correlation_for_carbon, split_peaks, detect_hills, process_hills, get_and_calc_apex_intensity_and_scan
+from .cutils import get_initial_isotopes, checking_cos_correlation_for_carbon, detect_hills, process_hills
 from .parallel import balanced_ranges, run_process_tasks
 from .calibration import fit_mass_calibration
 from .spectra import faims_sort_key, group_spectra_by_faims
@@ -23,16 +22,27 @@ from .preprocessing import (
     process_tof,
 )
 from .raw_ms1 import load_raw_ms1_cache
-from .stage_cache import build_strict_stage_payload, invalidate_stale_strict_stage_cache, load_strict_stage_cache, save_strict_stage_cache
+from .stage_cache import invalidate_stale_strict_stage_cache, load_strict_stage_cache
 from .hybrid import AssayBuildResult, build_direct_assays, run_hybrid_postprocessing
 from .direct_competitors import capture_direct_processed_hill_competitors
+from .peak_splitting import split_peaks_multi
+from .candidate_selection import (
+    candidate_hill_ids as _candidate_hill_ids,
+    select_nonconflicting_isotope_candidates as _select_nonconflicting_isotope_candidates,
+    select_nonconflicting_isotope_candidates_parallel as _select_nonconflicting_isotope_candidates_parallel,
+)
+from .strict_cache_writer import (
+    cancel_strict_cache_writer as _cancel_strict_cache_writer,
+    finish_strict_cache_writer as _finish_strict_cache_writer,
+    start_strict_cache_writer as _start_strict_cache_writer,
+)
 from .identifications import (
     map_identifications_to_ms2,
     psm_column_map_from_args,
     read_identification_table,
 )
 from .output import input_stem
-from .external_weak import append_rejected_candidate, publish_detector_outcomes, remember_reject_snapshot
+from .external_weak import publish_detector_outcomes
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +59,7 @@ def _debug_stage_complete(name, started, **details):
         time.monotonic() - started,
         details,
     )
+
 
 def _final_residual_detector_supported(strict_contexts, args):
     if int(args.get("combine_every", 1)) != 1:
@@ -190,6 +201,8 @@ def _detect_final_residual_strict(
 
     detector_args = dict(args)
     detector_args["use_hill_calib"] = False
+    detector_args["_parallel_final_residual_candidates"] = True
+    detector_args["_feature_detection_phase"] = "final_residual"
     contexts = []
     next_hill_id = 1
     md_correction_int = {"Orbi": 1, "Tof": 2, "Icr": 3}.get(
@@ -206,11 +219,14 @@ def _detect_final_residual_strict(
         "rejected_candidate_count": 0,
     }
     for faims_cv, group in groups:
+        group_started = time.monotonic()
+        calibration_started = time.monotonic()
         isotope_calibration, group_diagnostics = (
             _strict_reference_isotope_calibration(
                 strict_contexts, faims_cv, detector_args
             )
         )
+        calibration_seconds = time.monotonic() - calibration_started
         detector_args["_isotope_calibration_override"] = isotope_calibration
         calibration_diagnostics[
             "null" if faims_cv is None else str(faims_cv)
@@ -223,6 +239,7 @@ def _detect_final_residual_strict(
             float(np.max(spectrum["m/z array"])) for spectrum in group
         )
         mz_step = float(detector_args["htol"]) * 1e-6 * max_mz
+        hills_started = time.monotonic()
         hills, _mass_diff = detect_hills(
             group,
             detector_args,
@@ -230,17 +247,41 @@ def _detect_final_residual_strict(
             0.0,
             md_correction_int=md_correction_int,
         )
+        hills_seconds = time.monotonic() - hills_started
         if not len(hills.get("hills_idx_array", ())):
+            logger.debug(
+                "Hybrid final residual detector group complete: faims=%s "
+                "calibration_sec=%.3f detect_hills_sec=%.3f runtime_sec=%.3f "
+                "reason=no_hills",
+                faims_cv, calibration_seconds, hills_seconds,
+                time.monotonic() - group_started,
+            )
             continue
+        feature_started = time.monotonic()
         hills = split_peaks_multi(hills, group, detector_args)
         if "hills_idx_array_unique" in hills and not len(
             hills["hills_idx_array_unique"]
         ):
+            logger.debug(
+                "Hybrid final residual detector group complete: faims=%s "
+                "calibration_sec=%.3f detect_hills_sec=%.3f runtime_sec=%.3f "
+                "reason=no_split_hills",
+                faims_cv, calibration_seconds, hills_seconds,
+                time.monotonic() - group_started,
+            )
             continue
         hills = process_hills(
             hills, group, mz_step, 0.0, detector_args
         )
         if not len(hills.get("hills_idx_array_unique", ())):
+            logger.debug(
+                "Hybrid final residual detector group complete: faims=%s "
+                "calibration_sec=%.3f detect_hills_sec=%.3f process_sec=%.3f "
+                "runtime_sec=%.3f reason=no_processed_hills",
+                faims_cv, calibration_seconds, hills_seconds,
+                time.monotonic() - feature_started,
+                time.monotonic() - group_started,
+            )
             continue
         next_hill_id = assign_deterministic_hill_ids(
             hills, next_hill_id
@@ -284,6 +325,17 @@ def _detect_final_residual_strict(
                     "paseftol": 0.0,
                 }
             )
+        logger.debug(
+            "Hybrid final residual detector group complete: faims=%s "
+            "calibration_sec=%.3f detect_hills_sec=%.3f process_features_sec=%.3f "
+            "candidates=%d runtime_sec=%.3f",
+            faims_cv,
+            calibration_seconds,
+            hills_seconds,
+            time.monotonic() - feature_started,
+            len(candidates),
+            time.monotonic() - group_started,
+        )
     calibration_boundary_guard["rejected_candidate_count"] = (
         calibration_boundary_guard["candidate_count_before_guard"]
         - calibration_boundary_guard["candidate_count_after_guard"]
@@ -296,52 +348,6 @@ def _detect_final_residual_strict(
         "isotope_calibration_reference": calibration_diagnostics,
         "calibration_boundary_guard": calibration_boundary_guard,
     }
-
-def _split_peaks_task(*args):
-    return list(split_peaks(*args))
-
-def _candidate_hill_ids(candidate):
-    return tuple(
-        sorted(
-            [int(candidate['monoisotope hill idx'])]
-            + [int(value['isotope_hill_idx']) for value in candidate['isotopes']]
-        )
-    )
-
-def _candidate_conflict_key(candidate, hills_dict):
-    mono_index = int(candidate['monoisotope idx'])
-    _, apex_intensity, _ = get_and_calc_apex_intensity_and_scan(
-        hills_dict, mono_index
-    )
-    mass_errors = [abs(float(value['mass_diff_ppm'])) for value in candidate['isotopes']]
-    mean_absolute_error = float(np.mean(mass_errors)) if mass_errors else float('inf')
-    isotope_count = int(candidate['nIsotopes'])
-    isotope_cosine = float(candidate['cos_cor_isotopes'])
-    return (
-        -(isotope_count + isotope_cosine),
-        -isotope_count,
-        -isotope_cosine,
-        -float(apex_intensity),
-        mean_absolute_error,
-        float(candidate['hill_mz_1']),
-        int(candidate['charge']),
-        _candidate_hill_ids(candidate),
-    )
-
-def _final_feature_key(candidate, hills_dict, RT_dict, data_start_id):
-    mono_index = int(candidate['monoisotope idx'])
-    _, _, apex_scan = get_and_calc_apex_intensity_and_scan(hills_dict, mono_index)
-    if RT_dict is False:
-        apex_rt = float(hills_dict['rtApex'][mono_index])
-    else:
-        apex_rt = float(RT_dict[apex_scan + data_start_id])
-    return (
-        float(candidate['hill_mz_1']),
-        apex_rt,
-        int(candidate['charge']),
-        int(candidate['monoisotope hill idx']),
-        _candidate_hill_ids(candidate),
-    )
 
 def _generate_initial_isotope_candidates(
     hills_dict, faims_val, mz_step, paseftol, args
@@ -503,44 +509,91 @@ def _calibrate_and_filter_isotope_candidates(ready, faims_val, args, rejected_si
     logger.info('Average mass std between monoisotopic and first 13C isotope: %.3f ppm', isotopes_mass_error_map[1][1])
 
     logger.debug(isotopes_mass_error_map)
+    workers = int(args.get('nprocs', 1))
+    if (
+        args.get('_parallel_final_residual_candidates', False)
+        and rejected_sink is None
+        and workers > 1
+        and len(ready) > 1
+    ):
+        filtered = []
+        for accepted, _rejected in run_process_tasks(
+            _filter_isotope_candidate_batch,
+            [
+                (ready[start:end], isotopes_mass_error_map)
+                for start, end in balanced_ranges(len(ready), workers)
+            ],
+        ):
+            filtered.extend(accepted)
+        ready[:] = filtered
+    else:
+        _filter_isotope_candidates_in_place(
+            ready, isotopes_mass_error_map, rejected_sink
+        )
+    logger.info('Number of potential isotope clusters after smart mass accuracy for isotopes: %d', len(ready))
+    return ready
+
+
+def _filter_isotope_candidate_batch(ready, isotopes_mass_error_map):
+    """Filter a candidate slice after the parent has fixed calibration."""
+
+    accepted = []
+    rejected = []
+    for pep_feature in ready:
+        if _filter_one_isotope_candidate(pep_feature, isotopes_mass_error_map):
+            accepted.append(pep_feature)
+        else:
+            rejected.append(pep_feature)
+    return accepted, rejected
+
+
+def _filter_one_isotope_candidate(pep_feature, isotopes_mass_error_map):
+    tmp = []
+    for cand in pep_feature['isotopes']:
+        map_val = isotopes_mass_error_map[cand['isotope_number']]
+        if abs(cand['mass_diff_ppm'] - map_val[0]) <= 5 * map_val[1]:
+            tmp.append(cand)
+        else:
+            break
+    tmp_n_isotopes = len(tmp)
+    if not tmp_n_isotopes:
+        return False
+    all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
+    all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
+    all_exp_intensity = all_exp_intensity[:tmp_n_isotopes+1]
+    cos_corr, _number_of_passed_isotopes = checking_cos_correlation_for_carbon(
+        all_theoretical_int, all_exp_intensity, 0.6
+    )
+    if not cos_corr:
+        return False
+    pep_feature['cos_cor_isotopes'] = cos_corr
+    pep_feature['isotopes'] = tmp
+    pep_feature['nIsotopes'] = tmp_n_isotopes + 1
+    pep_feature['intensity_array_for_cos_corr'] = [
+        all_theoretical_int, all_exp_intensity
+    ]
+    return True
+
+
+def _filter_isotope_candidates_in_place(
+    ready, isotopes_mass_error_map, rejected_sink=None
+):
+    """Preserve legacy in-place filtering and reject ordering."""
+
     max_l = len(ready)
     cur_l = 0
     while cur_l < max_l:
         pep_feature = ready[cur_l]
-        tmp = []
-        for cand in pep_feature['isotopes']:
-            map_val = isotopes_mass_error_map[cand['isotope_number']]
-            if abs(cand['mass_diff_ppm'] - map_val[0]) <= 5 * map_val[1]:
-                tmp.append(cand)
-            else:
-                break
-        tmp_n_isotopes = len(tmp)
-        if tmp_n_isotopes:
-            all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
-            all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
-            all_exp_intensity = all_exp_intensity[:tmp_n_isotopes+1]
-            cos_corr, number_of_passed_isotopes = checking_cos_correlation_for_carbon(all_theoretical_int, all_exp_intensity, 0.6)
-            if cos_corr:
-
-                ready[cur_l]['cos_cor_isotopes'] = cos_corr
-                ready[cur_l]['isotopes'] = tmp
-                ready[cur_l]['nIsotopes'] = tmp_n_isotopes + 1
-                ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
-            else:
-                if rejected_sink is not None:
-                    rejected_sink.append(pep_feature)
-                del ready[cur_l]
-                max_l -= 1
-                cur_l -= 1
-        else:
+        accepted = _filter_one_isotope_candidate(
+            pep_feature, isotopes_mass_error_map
+        )
+        if not accepted:
             if rejected_sink is not None:
                 rejected_sink.append(pep_feature)
             del ready[cur_l]
             max_l -= 1
             cur_l -= 1
         cur_l += 1
-    logger.info('Number of potential isotope clusters after smart mass accuracy for isotopes: %d', len(ready))
-    return ready
 
 def _capture_direct_competitors(
     ready, hills_dict, RT_dict, data_for_analyse_tmp, args, direct_assays,
@@ -567,87 +620,6 @@ def _capture_direct_competitors(
             )
         )
     return captured_direct_competitors
-
-def _select_nonconflicting_isotope_candidates(
-    ready, hills_dict, RT_dict, data_start_id, rejected_sink=None
-):
-    max_l = len(ready)
-    cur_l = 0
-    func_for_sort = lambda candidate: _candidate_conflict_key(
-        candidate, hills_dict
-    )
-    ready_final = []
-    ready_set = set()
-    original_by_candidate = {}
-    if not ready:
-        logger.info('No isotope clusters remained after smart mass accuracy filtering.')
-    else:
-        ready = sorted(ready, key=func_for_sort)
-        cur_isotopes = ready[0]['nIsotopes']
-
-        while cur_l < max_l:
-            pep_feature = ready[cur_l]
-            n_iso = pep_feature['nIsotopes']
-            if n_iso < cur_isotopes:
-                ready = sorted(ready, key=func_for_sort)
-                cur_isotopes = n_iso
-                cur_l = 0
-                pep_feature = ready[cur_l]
-
-            if pep_feature['monoisotope hill idx'] not in ready_set:
-                if not any(cand['isotope_hill_idx'] in ready_set for cand in pep_feature['isotopes']):
-                    ready_final.append(pep_feature)
-                    original_by_candidate.pop(id(pep_feature), None)
-                    ready_set.add(pep_feature['monoisotope hill idx'])
-                    for cand in pep_feature['isotopes']:
-                        ready_set.add(cand['isotope_hill_idx'])
-                    del ready[cur_l]
-                    max_l -= 1
-                    cur_l -= 1
-                else:
-                    tmp = []
-                    for cand in pep_feature['isotopes']:
-                        if cand['isotope_hill_idx'] not in ready_set:
-                            tmp.append(cand)
-                        else:
-                            break
-                    tmp_n_isotopes = len(tmp)
-                    if tmp_n_isotopes:
-                        if rejected_sink is not None:
-                            remember_reject_snapshot(original_by_candidate, pep_feature)
-                        all_theoretical_int, all_exp_intensity = pep_feature['intensity_array_for_cos_corr']
-                        all_theoretical_int = all_theoretical_int[:tmp_n_isotopes+1]
-                        all_exp_intensity = all_exp_intensity[:tmp_n_isotopes+1]
-                        cos_corr, number_of_passed_isotopes = checking_cos_correlation_for_carbon(all_theoretical_int, all_exp_intensity, 0.6)
-                        if cos_corr:
-                            ready[cur_l]['cos_cor_isotopes'] = cos_corr
-                            ready[cur_l]['isotopes'] = tmp
-                            ready[cur_l]['nIsotopes'] = tmp_n_isotopes + 1
-                            ready[cur_l]['intensity_array_for_cos_corr'] = [all_theoretical_int, all_exp_intensity]
-                            cur_l -= 1
-                        else:
-                            append_rejected_candidate(rejected_sink, original_by_candidate, pep_feature)
-                            del ready[cur_l]
-                            max_l -= 1
-                            cur_l -= 1
-                    else:
-                        append_rejected_candidate(rejected_sink, original_by_candidate, pep_feature)
-                        del ready[cur_l]
-                        max_l -= 1
-                        cur_l -= 1
-            else:
-                append_rejected_candidate(rejected_sink, original_by_candidate, pep_feature)
-                del ready[cur_l]
-                max_l -= 1
-                cur_l -= 1
-            cur_l += 1
-    ready_final.sort(
-        key=lambda candidate: _final_feature_key(
-            candidate, hills_dict, RT_dict, data_start_id
-        )
-    )
-    logger.info('Number of detected isotope clusters: %d', len(ready_final))
-    return ready_set, ready_final
 
 def _record_losing_direct_competitors(
     ready_final, captured_direct_competitors, direct_competitor_sink
@@ -727,12 +699,14 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
         utils.write_output([], args, write_header)
         return set(), {}, next_feature_idx, []
 
+    candidate_started = time.monotonic()
     ready = _generate_initial_isotope_candidates(
         hills_dict, faims_val, mz_step, paseftol, args
     )
     collect_weak = args.get('feature_mode') == 'hybrid' and args.get('external_id')
     initial_candidate_count = len(ready)
     smart_rejects = [] if collect_weak else None
+    filter_started = time.monotonic()
     ready = _calibrate_and_filter_isotope_candidates(ready, faims_val, args, smart_rejects)
     smart_accepted_count = len(ready)
     captured_direct_competitors = _capture_direct_competitors(
@@ -740,9 +714,21 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
         direct_events_by_id, direct_competitor_sink,
     )
     greedy_rejects = [] if collect_weak else None
-    ready_set, ready_final = _select_nonconflicting_isotope_candidates(
-        ready, hills_dict, RT_dict, data_start_id, greedy_rejects
-    )
+    selection_started = time.monotonic()
+    if (
+        args.get('_parallel_final_residual_candidates', False)
+        and greedy_rejects is None
+        and int(args.get('nprocs', 1)) > 1
+        and len(ready) > 1
+    ):
+        ready_set, ready_final = _select_nonconflicting_isotope_candidates_parallel(
+            ready, hills_dict, RT_dict, data_start_id, args['nprocs']
+        )
+    else:
+        ready_set, ready_final = _select_nonconflicting_isotope_candidates(
+            ready, hills_dict, RT_dict, data_start_id, greedy_rejects
+        )
+    selection_seconds = time.monotonic() - selection_started
     if collect_weak:
         publish_detector_outcomes(
             hills_dict, smart_rejects, greedy_rejects, initial_count=initial_candidate_count,
@@ -755,97 +741,16 @@ def process_features_iteration(hills_dict, faims_val, mz_step, paseftol, RT_dict
         ready_final, hills_dict, faims_val, RT_dict, data_start_id, write_header,
         args, next_feature_idx, data_for_analyse_tmp,
     )
+    logger.debug(
+        'Feature candidate timing: phase=%s faims=%s generated=%d selected=%d '
+        'generation_sec=%.3f filter_sec=%.3f selection_sec=%.3f write_sec=%.3f',
+        args.get('_feature_detection_phase', 'strict'), faims_val,
+        initial_candidate_count, len(ready_final),
+        filter_started - candidate_started, selection_started - filter_started,
+        selection_seconds, time.monotonic() - selection_started - selection_seconds,
+    )
 
     return ready_set, hill_to_feature_idx, next_feature_idx, ready_final
-
-def split_peaks_multi(hills_dict, data_for_analyse_tmp, args):
-    min_length_hill = args['minlh']
-
-    hills_dict['orig_idx_array'] = np.array(hills_dict['orig_idx_array'])
-    hills_dict['scan_idx_array'] = np.array(hills_dict['scan_idx_array'])
-    hills_dict['hills_idx_array'] = np.array(hills_dict['hills_idx_array'])
-
-    counter_hills_idx = Counter(hills_dict['hills_idx_array'])
-    counter_hills_idx_2 = dict()
-    for k,v in counter_hills_idx.items():
-        counter_hills_idx_2[k] = v
-    counter_hills_idx = counter_hills_idx_2
-
-    tmp_hill_length = np.array([counter_hills_idx[hill_idx] for hill_idx in hills_dict['hills_idx_array']])
-    idx_minl = tmp_hill_length >= min_length_hill
-    hills_dict['hills_idx_array'] = hills_dict['hills_idx_array'][idx_minl]
-    hills_dict['scan_idx_array'] = hills_dict['scan_idx_array'][idx_minl]
-    hills_dict['orig_idx_array'] = hills_dict['orig_idx_array'][idx_minl]
-
-    if not len(hills_dict['orig_idx_array']):
-        hills_dict['hills_idx_array_unique'] = []
-        return hills_dict
-
-    if len(hills_dict['orig_idx_array']):
-
-        idx_sort = np.argsort(hills_dict['hills_idx_array'] + ((hills_dict['scan_idx_array'] + 1) / (hills_dict['scan_idx_array'].max()+2)))
-        hills_dict['hills_idx_array'] = hills_dict['hills_idx_array'][idx_sort]
-        hills_dict['scan_idx_array'] = hills_dict['scan_idx_array'][idx_sort]
-        hills_dict['orig_idx_array'] = hills_dict['orig_idx_array'][idx_sort]
-
-        hills_dict['hills_idx_array_unique'] = sorted(list(set(hills_dict['hills_idx_array'])))
-
-        data_for_analyse_tmp_intensity = [z['intensity array'] for z in data_for_analyse_tmp]
-
-        requested_procs = args['nprocs']
-        len_full = len(hills_dict['hills_idx_array_unique'])
-        if len_full <= 1000 * requested_procs:
-            requested_procs = 1
-        ranges = balanced_ranges(len_full, requested_procs)
-        task_args = []
-        checked_id = 0
-        for worker_id, (start, end) in enumerate(ranges):
-            sorted_idx_child_process = list(
-                hills_dict['hills_idx_array_unique'][start:end]
-            )
-            idx_unique_set = set(sorted_idx_child_process)
-            local_idx = np.array(
-                [value in idx_unique_set for value in hills_dict['hills_idx_array']]
-            )
-            sorted_idx_array_child_process = hills_dict['hills_idx_array'][local_idx]
-            task_args.append(
-                (
-                    hills_dict,
-                    data_for_analyse_tmp_intensity,
-                    args,
-                    counter_hills_idx,
-                    sorted_idx_child_process,
-                    sorted_idx_array_child_process,
-                    worker_id,
-                    checked_id,
-                )
-            )
-            checked_id += len(sorted_idx_array_child_process)
-
-        if len(task_args) == 1:
-            worker_results = [_split_peaks_task(*task_args[0])]
-        else:
-            worker_results = run_process_tasks(_split_peaks_task, task_args)
-        new_idx_res = dict(enumerate(worker_results))
-        n_procs = len(worker_results)
-
-    final_idx_array = []
-    last_id = 1
-    for i in range(n_procs):
-        added_idx_map = {}
-        for ii, idx_val in enumerate(new_idx_res[i]):
-            if idx_val not in added_idx_map:
-                added_idx_map[idx_val] = int(last_id)
-                last_id += 1
-            final_idx_array.append(added_idx_map[idx_val])
-
-    # hills_dict['scan_idx_array'] = np.concatenate([hills_dict['scan_idx_array'][all_sorted_idx[i]] for i in range(n_procs)])
-    # hills_dict['orig_idx_array'] = np.concatenate([hills_dict['orig_idx_array'][all_sorted_idx[i]] for i in range(n_procs)])
-
-    hills_dict['hills_idx_array'] = list(final_idx_array)
-    del hills_dict['hills_idx_array_unique']
-
-    return hills_dict
 
 def process_file(args):
 
@@ -1289,6 +1194,8 @@ def _finalize_mzml_processing(
     args, input_file_path, strict_stage_cache_args, strict_stage_cache,
     ingestion, assay_result, strict_contexts, next_feature_idx, stop_after_hills,
 ):
+    strict_cache_writer = None
+    strict_cache_started = None
     if (
         args.get('feature_mode') == 'hybrid'
         and not stop_after_hills
@@ -1298,40 +1205,14 @@ def _finalize_mzml_processing(
         strict_cache_started = _debug_stage_start(
             'publish_strict_stage_cache', path=strict_stage_cache
         )
-        cache_payload = build_strict_stage_payload(
+        strict_cache_writer = _start_strict_cache_writer(
+            strict_stage_cache,
+            input_file_path,
+            strict_stage_cache_args,
             ingestion,
             strict_contexts,
             next_feature_idx,
             args,
-        )
-        cache_path = save_strict_stage_cache(
-            strict_stage_cache,
-            input_file_path,
-            strict_stage_cache_args,
-            cache_payload,
-        )
-        cache_manifest = json.loads(
-            (cache_path / 'manifest.json').read_text(encoding='utf-8')
-        )
-        logger.info(
-            'Published strict-stage cache: %s (%d features, %d bytes)',
-            cache_path,
-            cache_manifest['strict_feature_count'],
-            cache_manifest['payload_bytes'],
-        )
-        args['_strict_stage_cache'] = {
-            'status': 'created',
-            'path': str(cache_path),
-            'payload_bytes': cache_manifest['payload_bytes'],
-            'strict_feature_count': cache_manifest[
-                'strict_feature_count'
-            ],
-        }
-        _debug_stage_complete(
-            'publish_strict_stage_cache',
-            strict_cache_started,
-            strict_feature_count=cache_manifest['strict_feature_count'],
-            payload_bytes=cache_manifest['payload_bytes'],
         )
 
     if args.get('feature_mode') == 'hybrid' and not stop_after_hills:
@@ -1347,16 +1228,39 @@ def _finalize_mzml_processing(
         hybrid_started = _debug_stage_start(
             'hybrid_postprocessing', contexts=len(strict_contexts)
         )
-        next_feature_idx = run_hybrid_postprocessing(
-            run_id=input_stem(input_file_path),
-            ingestion=ingestion,
-            assay_result=assay_result,
-            strict_contexts=strict_contexts,
-            manager=manager,
-            next_feature_id=next_feature_idx,
-            args=args,
-            final_strict_detector=_detect_final_residual_strict,
-        )
+        try:
+            next_feature_idx = run_hybrid_postprocessing(
+                run_id=input_stem(input_file_path),
+                ingestion=ingestion,
+                assay_result=assay_result,
+                strict_contexts=strict_contexts,
+                manager=manager,
+                next_feature_id=next_feature_idx,
+                args=args,
+                final_strict_detector=_detect_final_residual_strict,
+            )
+        except BaseException:
+            if strict_cache_writer is not None:
+                _cancel_strict_cache_writer(*strict_cache_writer)
+            raise
+        if strict_cache_writer is not None:
+            cache_info = _finish_strict_cache_writer(*strict_cache_writer)
+            logger.info(
+                'Published strict-stage cache: %s (%d features, %d bytes)',
+                cache_info['path'],
+                cache_info['strict_feature_count'],
+                cache_info['payload_bytes'],
+            )
+            args['_strict_stage_cache'] = {
+                'status': 'created',
+                **cache_info,
+            }
+            _debug_stage_complete(
+                'publish_strict_stage_cache',
+                strict_cache_started,
+                strict_feature_count=cache_info['strict_feature_count'],
+                payload_bytes=cache_info['payload_bytes'],
+            )
         _debug_stage_complete(
             'hybrid_postprocessing', hybrid_started,
             next_feature_id=next_feature_idx,
