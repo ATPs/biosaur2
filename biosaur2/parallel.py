@@ -44,6 +44,7 @@ class WorkerProcessError(RuntimeError):
 
 
 GIB = 1024 ** 3
+_AUTO_MEMORY_RESERVATION_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class ResourceSample:
     cpu_count: int
     root_pss_bytes: Dict[int, int] = field(default_factory=dict)
     root_rss_bytes: Dict[int, int] = field(default_factory=dict)
+    root_cpu_seconds: Dict[int, float] = field(default_factory=dict)
     process_thread_count: int = 0
     sample_kind: str = "detailed"
 
@@ -260,12 +262,17 @@ class LinuxResourceSampler:
         self._previous_time = now
         self._previous_pid_ticks = pid_ticks
         root_memory = {}
+        root_cpu_seconds = {}
         process_threads = 0
         for pid in descendants:
             owner = owners.get(pid)
             if owner is None:
                 continue
             root_memory[owner] = root_memory.get(owner, 0) + memory_reader(pid, stats[pid])
+            root_cpu_seconds[owner] = (
+                root_cpu_seconds.get(owner, 0.0)
+                + stats[pid][1] / float(self._ticks_per_second)
+            )
             process_threads += stats[pid][3]
         return ResourceSample(
             process_cpu_cores=process_cpu,
@@ -276,6 +283,7 @@ class LinuxResourceSampler:
             cpu_count=value.cpu_count,
             root_pss_bytes=root_memory if kind == "detailed" else {},
             root_rss_bytes=root_memory if kind == "light" else {},
+            root_cpu_seconds=root_cpu_seconds,
             process_thread_count=process_threads,
             sample_kind=kind,
         )
@@ -720,6 +728,13 @@ def run_adaptive_process_tasks(
             del cpu_history[:-5]
         for record in active.values():
             pid = record["process"].pid
+            observed_cpu_seconds = value.root_cpu_seconds.get(pid)
+            if observed_cpu_seconds is not None:
+                record["cpu_seconds"] += max(
+                    0.0,
+                    observed_cpu_seconds - record["last_observed_cpu_seconds"],
+                )
+                record["last_observed_cpu_seconds"] = observed_cpu_seconds
             if value.sample_kind == "detailed":
                 observed = value.root_pss_bytes.get(pid)
                 if observed is not None:
@@ -808,16 +823,17 @@ def run_adaptive_process_tasks(
     def memory_allowed(allocation, value, speculative=False):
         estimate = estimator.estimate_bytes(allocation)
         if resource_mode == "auto" and not legacy_sampler:
-            remaining_growth = sum(
-                max(
-                    0,
-                    estimator.estimate_bytes(record["allocation"])
-                    - record["observed_memory_bytes"],
-                )
+            now = time.monotonic()
+            young_run_reservations = sum(
+                estimator.estimate_bytes(record["allocation"])
                 for record in active.values()
+                if (
+                    now - record["started_at"] < _AUTO_MEMORY_RESERVATION_SECONDS
+                    or record["cpu_seconds"] < _AUTO_MEMORY_RESERVATION_SECONDS
+                )
             )
             return value.mem_available_bytes >= (
-                host_memory_floor(value) + remaining_growth + estimate
+                host_memory_floor(value) + young_run_reservations + estimate
             )
         if speculative:
             # Completed peaks protect the next small batch while current PSS
@@ -914,6 +930,8 @@ def run_adaptive_process_tasks(
             "generation": generation,
             "peak_pss_bytes": 0,
             "observed_memory_bytes": 0,
+            "cpu_seconds": 0.0,
+            "last_observed_cpu_seconds": 0.0,
             "preemptions": preemptions,
             "process": process,
             "started_at": time.monotonic(),
