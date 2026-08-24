@@ -136,13 +136,25 @@ README.md and examples/hybrid_project_manifest.tsv.
             "--max-memory",
             type=_positive_integer,
             default=max(1, physical_memory_bytes() // (1024 ** 3)),
-            help="maximum project memory admission limit in integer GiB; swap is excluded",
+            help=(
+                "maximum host-use ceiling in auto mode or Project PSS admission "
+                "limit in detailed mode, in integer GiB; swap is excluded"
+            ),
         )
         parser.add_argument(
             "--scheduler-heartbeat-seconds",
             type=_positive_integer,
-            default=30,
-            help="seconds between Project scheduler resource heartbeats",
+            default=60,
+            help="seconds between owned-process resource heartbeats",
+        )
+        parser.add_argument(
+            "--scheduler-resource-mode",
+            choices=("auto", "detailed"),
+            default="auto",
+            help=(
+                "auto=host memory every 5 seconds plus owned-tree RSS every "
+                "heartbeat; detailed=full Project PSS accounting"
+            ),
         )
         parser.add_argument("--cache-dir", default=str(default_cache_dir()), help="root for all raw, strict-stage, candidate, and project caches")
         parser.add_argument("--keep-cache", action="store_true", help="retain fingerprinted caches for later reuse")

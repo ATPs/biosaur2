@@ -161,6 +161,7 @@ class ProjectCheckpoint:
         self.path = Path(path)
         self.records_dir = self.path.with_name(self.path.stem + ".records")
         self.runs_dir = self.records_dir / "runs"
+        self.scheduler_log_path = self.records_dir / "scheduler-events.jsonl"
         self.lease_dir = self.path.with_name(self.path.stem + ".lease")
         self.state = {}
         self._owner = None
@@ -384,3 +385,33 @@ class ProjectCheckpoint:
     def put_run(self, run_id, record):
         self.state.setdefault("runs", {})[run_id] = record
         self._write_record(self.runs_dir, run_id, record)
+
+    def append_scheduler_event(self, event):
+        """Append diagnostic scheduler history without delaying run checkpoints.
+
+        Per-run records remain the durable resume contract. A truncated final
+        JSONL line after a crash is intentionally ignored when the next manager
+        reads history to seed its memory estimator.
+        """
+
+        self.records_dir.mkdir(parents=True, exist_ok=True)
+        payload = {"time": time.time(), **event}
+        with self.scheduler_log_path.open("a", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+
+    def scheduler_events(self):
+        """Return valid scheduler history records in append order."""
+
+        events = []
+        try:
+            with self.scheduler_log_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        return events

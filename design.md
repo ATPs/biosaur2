@@ -460,15 +460,18 @@ published, and the remaining workspace is deleted after Project success. With
 commands to reuse every layer.
 
 For Project mode, `--workers` is a busy-core target. The manager normally uses
-four workers per run and samples each owned run's complete process-tree PSS,
-thread count, CPU use, and system available memory from Linux `/proc` every 30
-seconds. Initial admission uses a conservative completed-run peak estimate.
-When that estimate blocks but observed PSS and host reserve permit progress,
-the manager admits at most two speculative tasks per resource sample, reserving
-the same conservative estimate for each unobserved task. This avoids treating
-every active run as simultaneously at peak memory. CPU pressure pauses
-submission; a hard `--max-memory` breach (integer GiB, no swap) preempts newest
-speculative work, terminates its process tree, and requeues it after recovery.
+four workers per run. The default `--scheduler-resource-mode auto` reads only
+host available memory every five seconds. Every 60 seconds it
+walks active wrapper trees through Linux `children` files and reads one `stat`
+line per owned process to aggregate RSS, CPU use and thread counts; it does not
+enumerate unrelated host processes or read `smaps_rollup`. Cold admission
+reserves 16 GiB per run, then uses compatible resumed or completed per-run
+peaks times 1.2, constrained to 1-30 GiB. In auto mode, `--max-memory` is an
+integer-GiB host-use ceiling, so the manager retains at least the greater of
+8 GiB, 5% physical memory, and `physical_memory - max_memory`. CPU pressure
+pauses submission; a safety-floor breach terminates newest work, requeues it,
+and reports `MemoryLimitExceeded` after the third preemption. The explicit
+`detailed` resource mode retains complete Project PSS accounting.
 Declared allocations remain capped at 1.5 times the target and at three times the
 host's logical CPU count, including the existing preemptible eight-worker and
 one-worker overcommit tiers. Local work uses this manager while feature-MBR
@@ -482,7 +485,10 @@ deterministically from source-fingerprinted strong/weak sidecars; there is no
 raw-recipient or external-recipient checkpoint. Run checkpoint records are
 independently atomically published with a heartbeat lease for cross-host
 recovery, so large Projects do not rewrite a growing global checkpoint after
-every completion.
+every completion. The adjacent append-only `scheduler-events.jsonl` records
+start, completion, memory-preemption and summary history. It is diagnostic and
+seeds memory estimates after resume; only atomic per-run records determine
+which outputs are complete.
 CLI startup fixes implicit OpenMP, BLAS, NumExpr, vecLib and Arrow CPU/I/O pools
 at one thread before numerical modules load. DuckDB output staging closes its
 unused host-sized default scheduler and opens a connection limited to the run's
@@ -560,8 +566,9 @@ MS1 output defaults on in Hybrid and off in Legacy; `--write-ms1` and
 | relaxed local minima/cosine | mono 2; channel 2; channels 2; cosine 0.95 | Guarded retry defaults. |
 | relaxed MS2 feature | false | Conservative MS2-only retry is disabled by default. |
 | project workers | 4 | Busy-core target for the adaptive Project manager; normal runs use four workers and declared allocation is bounded at 1.5x. |
-| scheduler heartbeat | 30 sec | Resource sampling interval for adaptive Project admission and memory recovery. |
-| project max memory | physical RAM | Integer-GiB Project admission limit, excluding swap. |
+| scheduler heartbeat | 60 sec | Owned-process RSS/CPU/thread scan interval; auto mode reads only host memory every 5 sec. |
+| scheduler resource mode | `auto` | Fast host-memory admission; `detailed` retains complete Project PSS accounting. |
+| project max memory | physical RAM | Integer-GiB host-use ceiling in auto mode; Project PSS admission limit in detailed mode. |
 
 ## Module responsibilities
 

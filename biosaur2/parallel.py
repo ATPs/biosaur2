@@ -57,17 +57,24 @@ class ResourceSample:
     physical_memory_bytes: int
     cpu_count: int
     root_pss_bytes: Dict[int, int] = field(default_factory=dict)
+    root_rss_bytes: Dict[int, int] = field(default_factory=dict)
     process_thread_count: int = 0
+    sample_kind: str = "detailed"
 
 
 def _read_proc_stat(pid):
-    """Return ``(ppid, cpu_ticks)`` for a Linux process, or ``None``."""
+    """Return parent, CPU ticks, RSS bytes and threads for one Linux PID."""
 
     try:
         payload = Path("/proc") / str(pid) / "stat"
         text = payload.read_text(encoding="utf-8")
         fields = text[text.rfind(")") + 2:].split()
-        return int(fields[1]), int(fields[11]) + int(fields[12])
+        return (
+            int(fields[1]),
+            int(fields[11]) + int(fields[12]),
+            int(fields[21]) * os.sysconf("SC_PAGE_SIZE"),
+            int(fields[17]),
+        )
     except (FileNotFoundError, IndexError, PermissionError, ProcessLookupError, OSError, ValueError):
         return None
 
@@ -87,18 +94,16 @@ def _read_proc_memory_bytes(pid):
     return 0
 
 
-def _read_proc_thread_count(pid):
-    """Return a process's Linux thread count when it is still available."""
+def _read_proc_children(pid):
+    """Return direct children without enumerating unrelated host processes."""
 
     try:
-        for line in (Path("/proc") / str(pid) / "status").read_text(
+        text = (Path("/proc") / str(pid) / "task" / str(pid) / "children").read_text(
             encoding="utf-8"
-        ).splitlines():
-            if line.startswith("Threads:"):
-                return int(line.split()[1])
+        )
+        return [int(value) for value in text.split()]
     except (FileNotFoundError, PermissionError, ProcessLookupError, OSError, ValueError):
-        pass
-    return 0
+        return []
 
 
 def _read_meminfo():
@@ -110,6 +115,20 @@ def _read_meminfo():
     except (FileNotFoundError, ValueError):
         return 0, 0
     return values.get("MemTotal", 0), values.get("MemAvailable", 0)
+
+
+def _cgroup_memory_available_bytes():
+    """Return this cgroup's remaining memory when a finite limit is present."""
+
+    try:
+        limit_text = (Path("/sys/fs/cgroup/memory.max").read_text()).strip()
+        if limit_text == "max":
+            return 0
+        limit = int(limit_text)
+        current = int((Path("/sys/fs/cgroup/memory.current").read_text()).strip())
+        return max(0, limit - current)
+    except (FileNotFoundError, PermissionError, OSError, ValueError):
+        return 0
 
 
 def physical_memory_bytes():
@@ -133,6 +152,7 @@ class LinuxResourceSampler:
         self._previous_pid_ticks = {}
         self._previous_host = None
         self._ticks_per_second = max(1, os.sysconf("SC_CLK_TCK"))
+        self._physical_memory_bytes = physical_memory_bytes()
 
     @staticmethod
     def _host_counters():
@@ -162,22 +182,71 @@ class LinuxResourceSampler:
         changed = True
         while changed:
             changed = False
-            for pid, (parent, _ticks) in stats.items():
+            for pid, (parent, _ticks, _rss, _threads) in stats.items():
                 if parent in wanted and pid not in wanted:
                     wanted.add(pid)
                     changed = True
         return wanted, stats
 
-    def sample(self, root_pids):
+    @staticmethod
+    def _owned_descendants(root_pids):
+        """Walk only the manager-owned tree using Linux ``children`` files."""
+
+        stats = {}
+        owners = {}
+        pending = deque((int(pid), int(pid)) for pid in root_pids)
+        seen = set()
+        while pending:
+            pid, owner = pending.popleft()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            record = _read_proc_stat(pid)
+            if record is None:
+                continue
+            stats[pid] = record
+            owners[pid] = owner
+            pending.extend((child, owner) for child in _read_proc_children(pid))
+        return set(stats), stats, owners
+
+    def _sample_host(self, *, include_cpu=False, include_cgroup=False):
         now = time.monotonic()
-        descendants, stats = self._descendants(root_pids)
-        pid_ticks = {pid: stats[pid][1] for pid in descendants}
-        host_total, host_idle = self._host_counters()
-        cpu_count = max(1, os.cpu_count() or 1)
         total, available = _read_meminfo()
-        physical = physical_memory_bytes() or total
-        process_cpu = 0.0
         host_busy = 0.0
+        if include_cgroup:
+            cgroup_available = _cgroup_memory_available_bytes()
+            if cgroup_available:
+                available = min(available, cgroup_available) if available else cgroup_available
+        if include_cpu:
+            host_total, host_idle = self._host_counters()
+            if self._previous_host is not None:
+                previous_total, previous_idle = self._previous_host
+                total_delta = host_total - previous_total
+                idle_delta = host_idle - previous_idle
+                if total_delta > 0:
+                    host_busy = max(1, os.cpu_count() or 1) * max(
+                        0.0, 1.0 - idle_delta / total_delta
+                    )
+            self._previous_host = (host_total, host_idle)
+        return now, ResourceSample(
+            process_cpu_cores=0.0,
+            host_busy_cores=host_busy,
+            process_pss_bytes=0,
+            mem_available_bytes=available,
+            physical_memory_bytes=self._physical_memory_bytes or total,
+            cpu_count=max(1, os.cpu_count() or 1),
+            sample_kind="host",
+        )
+
+    def sample_host(self):
+        """Read only host available memory for the five-second fast path."""
+
+        _now, value = self._sample_host()
+        return value
+
+    def _finish_process_sample(self, now, value, descendants, stats, owners, memory_reader, kind):
+        pid_ticks = {pid: stats[pid][1] for pid in descendants}
+        process_cpu = 0.0
         if self._previous_time is not None:
             elapsed = max(now - self._previous_time, 1e-6)
             process_cpu = (
@@ -188,16 +257,45 @@ class LinuxResourceSampler:
                 / self._ticks_per_second
                 / elapsed
             )
-            previous_total, previous_idle = self._previous_host
-            total_delta = host_total - previous_total
-            idle_delta = host_idle - previous_idle
-            if total_delta > 0:
-                host_busy = cpu_count * max(0.0, 1.0 - idle_delta / total_delta)
         self._previous_time = now
         self._previous_pid_ticks = pid_ticks
-        self._previous_host = (host_total, host_idle)
+        root_memory = {}
+        process_threads = 0
+        for pid in descendants:
+            owner = owners.get(pid)
+            if owner is None:
+                continue
+            root_memory[owner] = root_memory.get(owner, 0) + memory_reader(pid, stats[pid])
+            process_threads += stats[pid][3]
+        return ResourceSample(
+            process_cpu_cores=process_cpu,
+            host_busy_cores=value.host_busy_cores,
+            process_pss_bytes=sum(root_memory.values()),
+            mem_available_bytes=value.mem_available_bytes,
+            physical_memory_bytes=value.physical_memory_bytes,
+            cpu_count=value.cpu_count,
+            root_pss_bytes=root_memory if kind == "detailed" else {},
+            root_rss_bytes=root_memory if kind == "light" else {},
+            process_thread_count=process_threads,
+            sample_kind=kind,
+        )
+
+    def sample_light(self, root_pids):
+        """Read RSS for only manager-owned descendants, not all host PIDs."""
+
+        now, value = self._sample_host(include_cpu=True, include_cgroup=True)
+        descendants, stats, owners = self._owned_descendants(root_pids)
+        return self._finish_process_sample(
+            now, value, descendants, stats, owners,
+            lambda _pid, record: record[2], "light",
+        )
+
+    def sample(self, root_pids):
+        """Return an expensive complete PSS sample for detailed mode."""
+
+        now, value = self._sample_host(include_cpu=True, include_cgroup=True)
+        descendants, stats = self._descendants(root_pids)
         root_set = {int(pid) for pid in root_pids}
-        owner_by_pid = {}
 
         def root_owner(pid):
             seen = set()
@@ -208,22 +306,10 @@ class LinuxResourceSampler:
                 pid = stats[pid][0]
             return None
 
-        root_pss = {pid: 0 for pid in root_set}
-        process_threads = 0
-        for pid in descendants:
-            owner = owner_by_pid.setdefault(pid, root_owner(pid))
-            if owner is not None:
-                root_pss[owner] += _read_proc_memory_bytes(pid)
-                process_threads += _read_proc_thread_count(pid)
-        return ResourceSample(
-            process_cpu_cores=process_cpu,
-            host_busy_cores=host_busy,
-            process_pss_bytes=sum(root_pss.values()),
-            mem_available_bytes=available,
-            physical_memory_bytes=physical,
-            cpu_count=cpu_count,
-            root_pss_bytes=root_pss,
-            process_thread_count=process_threads,
+        owners = {pid: root_owner(pid) for pid in descendants}
+        return self._finish_process_sample(
+            now, value, descendants, stats, owners,
+            lambda pid, _record: _read_proc_memory_bytes(pid), "detailed",
         )
 
 
@@ -234,18 +320,24 @@ class _MemoryEstimator:
         self.default_bytes = default_bytes
         self.completed = {}
 
+    @staticmethod
+    def _clamp(value):
+        return min(30 * GIB, max(1 * GIB, int(value)))
+
     def estimate_bytes(self, allocation=4):
         allocation = max(1, int(allocation))
         values = self.completed.get(allocation, ())
-        if len(values) >= 4:
+        if values:
+            if len(values) < 4:
+                return self._clamp(max(values) * 1.2)
             ordered = sorted(values)
             index = min(len(ordered) - 1, int(math.ceil(len(ordered) * 0.9)) - 1)
-            return max(4 * GIB, int(ordered[index] * 1.2))
+            return self._clamp(ordered[index] * 1.2)
         lower = [value for value in self.completed if value < allocation and self.completed[value]]
         if lower:
             source = max(lower)
-            return int(self.estimate_bytes(source) * allocation / float(source))
-        return self.default_bytes
+            return self._clamp(self.estimate_bytes(source) * allocation / float(source))
+        return self._clamp(self.default_bytes)
 
     def speculative_estimate_bytes(self, allocation=4):
         allocation = max(1, int(allocation))
@@ -269,7 +361,16 @@ class _MemoryEstimator:
         if not observed and isinstance(result, dict):
             observed = max(1, int(result.get("peak_rss_kib") or 0)) * 1024
         if observed:
-            self.completed.setdefault(max(1, int(allocation)), []).append(observed)
+            self.completed.setdefault(max(1, int(allocation)), []).append(
+                self._clamp(observed)
+            )
+
+    def seed(self, observations):
+        for allocation, peak_bytes in observations:
+            if peak_bytes:
+                self.completed.setdefault(max(1, int(allocation)), []).append(
+                    self._clamp(peak_bytes)
+                )
 
 
 def _process_tree_pids(root_pid):
@@ -488,10 +589,14 @@ def run_adaptive_process_tasks(
     on_result: Optional[Callable[[int, Any], None]] = None,
     on_start: Optional[Callable[[int, Sequence[Any], int], None]] = None,
     poll_seconds: float = 0.5,
-    heartbeat_seconds: float = 30.0,
+    heartbeat_seconds: float = 60.0,
     resource_sampler=None,
+    resource_mode: str = "auto",
+    host_poll_seconds: float = 5.0,
+    initial_memory_observations: Iterable[Tuple[int, int]] = (),
+    on_preempt: Optional[Callable[[int, Sequence[Any], int, int], None]] = None,
 ) -> Tuple[Dict[int, Any], List[int], Dict[str, Any]]:
-    """Schedule Project tasks with resource heartbeats and memory recovery."""
+    """Schedule Project tasks with fast host-memory polling and recovery."""
 
     if target_workers < 1:
         raise ValueError("target_workers must be a positive integer")
@@ -499,6 +604,10 @@ def run_adaptive_process_tasks(
         raise ValueError("max_memory_bytes must be positive")
     if heartbeat_seconds <= 0:
         raise ValueError("heartbeat_seconds must be positive")
+    if host_poll_seconds <= 0:
+        raise ValueError("host_poll_seconds must be positive")
+    if resource_mode not in {"auto", "detailed"}:
+        raise ValueError("resource_mode must be 'auto' or 'detailed'")
     context = multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     task_iterator = enumerate(task_args)
@@ -514,16 +623,21 @@ def run_adaptive_process_tasks(
         max(1, os.cpu_count() or 1) * 3,
         int(math.ceil(target_workers * 1.5)),
     )
-    estimator = _MemoryEstimator()
     sampler = resource_sampler or LinuxResourceSampler()
+    legacy_sampler = resource_sampler is not None and not hasattr(sampler, "sample_host")
+    estimator = _MemoryEstimator(16 * GIB)
+    estimator.seed(initial_memory_observations)
     cpu_history = []
     sample_sequence = 0
     unobserved_reservation_bytes = 0
     speculative_starts_in_sample = 0
+    last_tree_sample = None
     summary = {
         "target_workers": target_workers,
         "max_memory_bytes": max_memory_bytes,
         "heartbeat_seconds": heartbeat_seconds,
+        "host_poll_seconds": host_poll_seconds,
+        "resource_mode": resource_mode,
         "allocation_ceiling": allocation_ceiling,
         "peak_active_tasks": 0,
         "peak_allocated_workers": 0,
@@ -534,6 +648,7 @@ def run_adaptive_process_tasks(
         "peak_process_cpu_cores": 0.0,
         "peak_process_pss_bytes": 0,
         "peak_process_thread_count": 0,
+        "peak_process_rss_bytes": 0,
         "peak_unobserved_reservation_bytes": 0,
         "cpu_pause_count": 0,
         "memory_pause_count": 0,
@@ -542,6 +657,12 @@ def run_adaptive_process_tasks(
         "peak_speculative_starts_per_sample": 0,
         "memory_preemption_count": 0,
         "memory_requeue_count": 0,
+        "completion_batch_count": 0,
+        "peak_completion_batch_size": 0,
+        "host_sample_count": 0,
+        "light_sample_count": 0,
+        "detailed_sample_count": 0,
+        "host_memory_floor_bytes": 0,
         "heartbeat_count": 0,
         "memory_wait_seconds": 0.0,
         "last_wait_reason": None,
@@ -562,25 +683,56 @@ def run_adaptive_process_tasks(
     def reserve(value):
         return max(8 * GIB, int(value.physical_memory_bytes * 0.05))
 
+    def host_memory_floor(value):
+        configured = max(0, value.physical_memory_bytes - min(
+            max_memory_bytes, value.physical_memory_bytes
+        ))
+        floor = max(reserve(value), configured)
+        summary["host_memory_floor_bytes"] = max(
+            summary["host_memory_floor_bytes"], floor
+        )
+        return floor
+
     def median_cpu():
         if len(cpu_history) < 3:
             return None
         return sorted(cpu_history)[len(cpu_history) // 2]
 
-    def sample(event):
-        nonlocal sample_sequence, speculative_starts_in_sample, unobserved_reservation_bytes
-        value = sampler.sample([record["process"].pid for record in active.values()])
+    def root_pids():
+        return [record["process"].pid for record in active.values()]
+
+    def record_sample(event, value, reset_admission_window=False):
+        nonlocal sample_sequence, speculative_starts_in_sample, unobserved_reservation_bytes, last_tree_sample
         sample_sequence += 1
-        speculative_starts_in_sample = 0
-        unobserved_reservation_bytes = 0
-        if active:
+        if reset_admission_window:
+            speculative_starts_in_sample = 0
+            unobserved_reservation_bytes = 0
+        if value.sample_kind == "host":
+            summary["host_sample_count"] += 1
+        elif value.sample_kind == "light":
+            summary["light_sample_count"] += 1
+        else:
+            summary["detailed_sample_count"] += 1
+        if value.sample_kind != "host":
+            last_tree_sample = value
+        if active and value.sample_kind != "host":
             cpu_history.append(value.process_cpu_cores)
             del cpu_history[:-5]
         for record in active.values():
-            record["peak_pss_bytes"] = max(
-                record["peak_pss_bytes"],
-                value.root_pss_bytes.get(record["process"].pid, 0),
-            )
+            pid = record["process"].pid
+            if value.sample_kind == "detailed":
+                observed = value.root_pss_bytes.get(pid)
+                if observed is not None:
+                    record["peak_pss_bytes"] = max(record["peak_pss_bytes"], observed)
+                    record["observed_memory_bytes"] = observed
+            elif value.sample_kind == "light":
+                observed = value.root_rss_bytes.get(pid)
+                if observed is not None:
+                    record["observed_memory_bytes"] = observed
+                else:
+                    # A raced or unreadable /proc entry must not reduce the
+                    # reservation for a still-active task.
+                    record["observed_memory_bytes"] = 0
         summary["peak_process_cpu_cores"] = max(
             summary["peak_process_cpu_cores"], value.process_cpu_cores
         )
@@ -590,10 +742,15 @@ def run_adaptive_process_tasks(
         summary["peak_process_thread_count"] = max(
             summary["peak_process_thread_count"], value.process_thread_count
         )
+        if value.sample_kind == "light":
+            summary["peak_process_rss_bytes"] = max(
+                summary["peak_process_rss_bytes"], value.process_pss_bytes
+            )
         summary["resource_samples"].append(
             {
                 "sequence": sample_sequence,
                 "event": event,
+                "kind": value.sample_kind,
                 "active_tasks": len(active),
                 "allocated_workers": allocation_total(),
                 "process_cpu_cores": value.process_cpu_cores,
@@ -603,7 +760,37 @@ def run_adaptive_process_tasks(
                 "process_thread_count": value.process_thread_count,
             }
         )
+        del summary["resource_samples"][:-256]
         return value
+
+    def sample_host(event):
+        if legacy_sampler:
+            value = sampler.sample(root_pids())
+        elif resource_mode == "detailed" and last_tree_sample is not None:
+            host = sampler.sample_host()
+            value = ResourceSample(
+                process_cpu_cores=last_tree_sample.process_cpu_cores,
+                host_busy_cores=host.host_busy_cores,
+                process_pss_bytes=last_tree_sample.process_pss_bytes,
+                mem_available_bytes=host.mem_available_bytes,
+                physical_memory_bytes=host.physical_memory_bytes,
+                cpu_count=host.cpu_count,
+                root_pss_bytes=last_tree_sample.root_pss_bytes,
+                process_thread_count=last_tree_sample.process_thread_count,
+                sample_kind="host",
+            )
+        elif resource_mode == "detailed":
+            value = sampler.sample(root_pids())
+        else:
+            value = sampler.sample_host()
+        return record_sample(event, value)
+
+    def sample_heartbeat(event):
+        if legacy_sampler or resource_mode == "detailed":
+            value = sampler.sample(root_pids())
+        else:
+            value = sampler.sample_light(root_pids())
+        return record_sample(event, value, reset_admission_window=True)
 
     def pull_task():
         nonlocal exhausted
@@ -620,6 +807,18 @@ def run_adaptive_process_tasks(
 
     def memory_allowed(allocation, value, speculative=False):
         estimate = estimator.estimate_bytes(allocation)
+        if resource_mode == "auto" and not legacy_sampler:
+            remaining_growth = sum(
+                max(
+                    0,
+                    estimator.estimate_bytes(record["allocation"])
+                    - record["observed_memory_bytes"],
+                )
+                for record in active.values()
+            )
+            return value.mem_available_bytes >= (
+                host_memory_floor(value) + remaining_growth + estimate
+            )
         if speculative:
             # Completed peaks protect the next small batch while current PSS
             # represents all already-observed active process trees.
@@ -637,18 +836,26 @@ def run_adaptive_process_tasks(
         )
 
     def cpu_allowed(value, speculative=False):
-        median = median_cpu()
-        if median is None:
-            return not speculative
-        if median >= target_workers * 0.90:
-            summary["cpu_pause_count"] += 1
-            return False
         if value.host_busy_cores >= value.cpu_count * 0.95:
             summary["cpu_pause_count"] += 1
             return False
-        return not speculative or median < target_workers * 0.70
+        if resource_mode == "detailed" or legacy_sampler:
+            median = median_cpu()
+            if median is None:
+                return not speculative
+            if median is not None and median >= value.cpu_count * 0.90:
+                summary["cpu_pause_count"] += 1
+                return False
+        return True
 
     def choose(value):
+        if (
+            resource_mode == "auto"
+            and not legacy_sampler
+            and retry_queue
+            and time.monotonic() < cooldown_until
+        ):
+            return None, None, "memory_recovery"
         remaining = target_workers - normal_allocation_total()
         if remaining > 0:
             allocation = min(4, remaining)
@@ -706,6 +913,7 @@ def run_adaptive_process_tasks(
             "allocation": allocation,
             "generation": generation,
             "peak_pss_bytes": 0,
+            "observed_memory_bytes": 0,
             "preemptions": preemptions,
             "process": process,
             "started_at": time.monotonic(),
@@ -765,36 +973,51 @@ def run_adaptive_process_tasks(
 
     def preempt_for_memory(value):
         nonlocal cooldown_until, stop_submitting
-        if value.process_pss_bytes <= max_memory_bytes and value.mem_available_bytes >= reserve(value):
+        fast_mode = resource_mode == "auto" and not legacy_sampler
+        if fast_mode and value.mem_available_bytes >= host_memory_floor(value):
+            return
+        if not fast_mode and (
+            value.process_pss_bytes <= max_memory_bytes
+            and value.mem_available_bytes >= reserve(value)
+        ):
             return
         projected = value.process_pss_bytes
-        recovery = int(max_memory_bytes * 0.95)
+        projected_available = value.mem_available_bytes
+        recovery = host_memory_floor(value) if fast_mode else int(max_memory_bytes * 0.95)
         victims = sorted(
             active.items(),
-            key=lambda item: (
-                0 if item[1]["tier"] != "normal" else 1,
-                -item[1]["started_at"],
-            ),
+            key=lambda item: -item[1]["started_at"],
         )
         for worker_id, record in victims:
-            if projected <= recovery:
+            if fast_mode and projected_available >= recovery:
+                break
+            if not fast_mode and projected <= recovery:
                 break
             active.pop(worker_id, None)
             terminate_process_tree(record["process"].pid)
             record["process"].join(timeout=1.0)
-            projected -= max(
-                record["peak_pss_bytes"], estimator.estimate_bytes(record["allocation"])
+            reclaimed = max(
+                record["observed_memory_bytes"],
+                record["peak_pss_bytes"],
+                estimator.estimate_bytes(record["allocation"]),
             )
+            if fast_mode:
+                projected_available += reclaimed
+            else:
+                projected -= reclaimed
             preemptions = record["preemptions"] + 1
-            if preemptions >= 3 and not active:
+            if on_preempt is not None:
+                on_preempt(worker_id, record["args"], record["allocation"], preemptions)
+            if preemptions >= 3:
                 failure = WorkerFailure(
                     worker_id, "MemoryLimitExceeded",
-                    "task exceeds --max-memory after repeated resource preemption", "",
+                    "task exceeded the memory safety floor after repeated resource preemption", "",
                 )
                 results[worker_id] = failure
                 if on_result is not None:
                     on_result(worker_id, failure)
-                stop_submitting = True
+                if stop_on_result is not None and stop_on_result(failure):
+                    stop_submitting = True
             else:
                 retry_queue.appendleft((worker_id, record["args"], preemptions))
                 summary["memory_requeue_count"] += 1
@@ -807,22 +1030,31 @@ def run_adaptive_process_tasks(
         )
 
     try:
-        value = sample("initial")
+        value = sample_host("initial")
         if estimator.estimate_bytes(4) > max_memory_bytes:
             raise ValueError(
                 "--max-memory is below the initial per-run admission estimate "
                 "of %.1f GiB" % (estimator.estimate_bytes(4) / float(GIB))
             )
+        next_host_sample = time.monotonic() + host_poll_seconds
         next_heartbeat = time.monotonic()
         while active or retry_queue or not exhausted:
-            if time.monotonic() >= next_heartbeat:
-                value = sample("heartbeat")
-                next_heartbeat = time.monotonic() + heartbeat_seconds
+            now = time.monotonic()
+            if now >= next_host_sample:
+                value = sample_host("host")
+                next_host_sample = now + host_poll_seconds
+                preempt_for_memory(value)
+                if not stop_submitting:
+                    fill(value)
+            if now >= next_heartbeat:
+                value = sample_heartbeat("heartbeat")
+                next_heartbeat = now + heartbeat_seconds
                 summary["heartbeat_count"] += 1
                 logger.info(
-                    "Project scheduler heartbeat: active=%d allocated=%d cpu=%.1f pss=%.1f GiB available=%.1f GiB",
+                    "Project scheduler heartbeat: active=%d allocated=%d cpu=%.1f memory=%.1f GiB available=%.1f GiB kind=%s",
                     len(active), allocation_total(), value.process_cpu_cores,
                     value.process_pss_bytes / float(GIB), value.mem_available_bytes / float(GIB),
+                    value.sample_kind,
                 )
                 preempt_for_memory(value)
                 if not stop_submitting:
@@ -831,12 +1063,21 @@ def run_adaptive_process_tasks(
                 if not stop_submitting:
                     fill(value)
                 if not active and not stop_submitting and (retry_queue or not exhausted):
-                    summary["memory_wait_seconds"] += poll_seconds
-                    time.sleep(poll_seconds)
+                    wait_seconds = min(
+                        poll_seconds,
+                        max(0.001, next_host_sample - time.monotonic()),
+                    )
+                    summary["memory_wait_seconds"] += wait_seconds
+                    time.sleep(wait_seconds)
                     continue
                 break
             try:
-                status, worker_id, generation, payload = result_queue.get(timeout=poll_seconds)
+                timeout = min(
+                    poll_seconds,
+                    max(0.001, next_host_sample - time.monotonic()),
+                    max(0.001, next_heartbeat - time.monotonic()),
+                )
+                first = result_queue.get(timeout=timeout)
             except queue.Empty:
                 failed = next(
                     (
@@ -859,22 +1100,36 @@ def run_adaptive_process_tasks(
                     results[worker_id] = payload
                     if on_result is not None:
                         on_result(worker_id, payload)
+                    if stop_on_result is None or stop_on_result(payload):
+                        stop_submitting = True
+                continue
+            batch = [first]
+            for _index in range(255):
+                try:
+                    batch.append(result_queue.get_nowait())
+                except queue.Empty:
+                    break
+            summary["completion_batch_count"] += 1
+            summary["peak_completion_batch_size"] = max(
+                summary["peak_completion_batch_size"], len(batch)
+            )
+            accepted = []
+            for status, worker_id, generation, payload in batch:
+                record = active.get(worker_id)
+                if record is not None and record["generation"] == generation:
+                    accepted.append((status, worker_id, record, payload))
+            for status, worker_id, record, payload in accepted:
+                active.pop(worker_id, None)
+                record["process"].join()
+                estimator.observe(record["allocation"], record["peak_pss_bytes"], payload)
+                results[worker_id] = payload
+                if on_result is not None:
+                    on_result(worker_id, payload)
+                if status == "error" or (
+                    stop_on_result is not None and stop_on_result(payload)
+                ):
                     stop_submitting = True
-                continue
-            record = active.get(worker_id)
-            if record is None or record["generation"] != generation:
-                continue
-            active.pop(worker_id)
-            record["process"].join()
-            estimator.observe(record["allocation"], record["peak_pss_bytes"], payload)
-            results[worker_id] = payload
-            if on_result is not None:
-                on_result(worker_id, payload)
-            if status == "error" or (stop_on_result is not None and stop_on_result(payload)):
-                stop_submitting = True
             if not stop_submitting:
-                value = sample("completion")
-                preempt_for_memory(value)
                 fill(value)
         return results, started, summary
     finally:

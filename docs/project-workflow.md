@@ -98,15 +98,17 @@ cross-run stage. A single-file Hybrid command may create private sidecars for
 later Project use, but cannot rescue candidates by itself.
 
 `--workers` is the Project manager's busy-core target. It normally allocates
-four workers per run. Initial admission uses conservative completed-run memory
-peaks; after that limit is reached, sampled Project PSS and host reserve can
-admit at most two additional speculative tasks per resource sample while CPU is
-idle. A resource heartbeat runs every 30 seconds by default; use
-`--scheduler-heartbeat-seconds` to change that interval. CPU pressure pauses
-new submission. A hard memory breach terminates the newest preemptible run and
-requeues it after memory recovers. `--max-memory` is an integer GiB admission
-cap; swap is excluded. Each run's DuckDB output connection is limited to its
-effective run worker allocation.
+four workers per run. The default `--scheduler-resource-mode auto` reads host
+available memory every five seconds and scans only active Biosaur2 process trees
+for RSS, CPU and thread counts every 60 seconds. It starts at 16 GiB per run,
+then lowers or raises the per-allocation estimate from resumed and completed
+peaks, constrained to 1-30 GiB. In this mode, `--max-memory` is an integer-GiB
+host-use ceiling and the manager retains the larger of 8 GiB, 5% physical RAM,
+or the difference between physical RAM and that ceiling. A safety-floor breach
+terminates newest work and requeues it; the third preemption is a final memory
+failure. Use `--scheduler-resource-mode detailed` to retain complete Project
+PSS accounting. Each run's DuckDB output connection is limited to its effective
+run worker allocation.
 
 For Parquet or TSV, every run directory contains its own `features`,
 `ms2_events`, `identifications` and Project external evidence files. With

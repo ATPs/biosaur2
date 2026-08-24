@@ -55,6 +55,20 @@ def _scientific_command(command):
     return normalized
 
 
+def _command_worker_allocation(command):
+    """Read a recorded scheduling allocation without changing resume checks."""
+
+    if not command:
+        return 4
+    for index, option in enumerate(command[:-1]):
+        if option == "--workers":
+            try:
+                return max(1, int(command[index + 1]))
+            except (TypeError, ValueError):
+                break
+    return 4
+
+
 def _resume_option_signature(options):
     """Return science/output options while ignoring scheduling-only controls."""
 
@@ -64,6 +78,7 @@ def _resume_option_signature(options):
         "workers",
         "max_memory",
         "scheduler_heartbeat_seconds",
+        "scheduler_resource_mode",
         "cache_dir",
         "keep_cache",
         "log_level",
@@ -1100,6 +1115,26 @@ def run_project(manifest, output_dir, project_db, **options):
         for _index, task in tasks:
             yield (task,)
 
+    initial_memory_observations = [
+        (
+            _command_worker_allocation(result["command"]),
+            int(result["peak_rss_kib"]) * 1024,
+        )
+        for result in skipped.values()
+        if result.get("peak_rss_kib")
+    ]
+    if checkpoint and options.get("resume", True):
+        initial_memory_observations.extend(
+            (
+                int(event.get("allocation") or 4),
+                int(event["peak_rss_kib"]) * 1024,
+            )
+            for event in checkpoint.scheduler_events()
+            if event.get("event") == "complete"
+            and event.get("status") == "success"
+            and event.get("peak_rss_kib")
+        )
+
     def checkpoint_local_start(task_position, _args, _allocation):
         if not checkpoint:
             return
@@ -1113,15 +1148,43 @@ def run_project(manifest, output_dir, project_db, **options):
                 "input_fingerprint": input_fingerprints[manifest_index],
                 "command": task["command"],
                 "project_option_signature": _local_resume_option_signature(options),
+                "scheduler_allocation": _allocation,
             },
+        )
+        checkpoint.append_scheduler_event(
+            {
+                "event": "start",
+                "run_id": run.run_id,
+                "allocation": _allocation,
+            }
         )
 
     def checkpoint_local_result(task_position, value):
-        if not checkpoint or isinstance(value, WorkerFailure):
+        if not checkpoint:
             return
         task = tasks[task_position][1]
         manifest_index = tasks[task_position][0]
         run = runs[manifest_index]
+        if isinstance(value, WorkerFailure):
+            checkpoint.append_scheduler_event(
+                {
+                    "event": "complete",
+                    "run_id": run.run_id,
+                    "status": "worker_failure",
+                    "exception_type": value.exception_type,
+                }
+            )
+            return
+        checkpoint.append_scheduler_event(
+            {
+                "event": "complete",
+                "run_id": run.run_id,
+                "status": value.get("status", "failed"),
+                "allocation": value.get("allocated_workers"),
+                "peak_rss_kib": value.get("peak_rss_kib"),
+                "runtime_sec": value.get("runtime_sec"),
+            }
+        )
         checkpoint.put_run(
             run.run_id,
             {
@@ -1138,6 +1201,19 @@ def run_project(manifest, output_dir, project_db, **options):
                     task["paths"], ("raw", "strict", "candidate")
                 )
 
+    def checkpoint_local_preempt(task_position, _args, allocation, preemptions):
+        if not checkpoint:
+            return
+        task = tasks[task_position][1]
+        checkpoint.append_scheduler_event(
+            {
+                "event": "preempt",
+                "run_id": task["run_id"],
+                "allocation": allocation,
+                "preemptions": preemptions,
+            }
+        )
+
     raw, _started, scheduler_summary = run_adaptive_process_tasks(
         _project_worker_budgeted,
         task_arguments(),
@@ -1148,8 +1224,22 @@ def run_project(manifest, output_dir, project_db, **options):
         ),
         on_result=checkpoint_local_result,
         on_start=checkpoint_local_start,
-        heartbeat_seconds=float(options.get("scheduler_heartbeat_seconds", 30)),
+        heartbeat_seconds=float(options.get("scheduler_heartbeat_seconds", 60)),
+        resource_mode=options.get("scheduler_resource_mode", "auto"),
+        initial_memory_observations=initial_memory_observations,
+        on_preempt=checkpoint_local_preempt,
     )
+    if checkpoint:
+        checkpoint.append_scheduler_event(
+            {
+                "event": "summary",
+                "scheduler": {
+                    key: value
+                    for key, value in scheduler_summary.items()
+                    if key != "resource_samples"
+                },
+            }
+        )
     options["_local_scheduler_summary"] = {
         "initial": scheduler_summary,
         "refreshes": [],

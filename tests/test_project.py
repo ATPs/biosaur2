@@ -12,6 +12,7 @@ from biosaur2 import project_validation
 from biosaur2.schema import compact_schemas
 from biosaur2.project import (
     _command_for_run,
+    _command_worker_allocation,
     _project_worker,
     _local_resume_option_signature,
     _resume_option_signature,
@@ -228,6 +229,17 @@ def test_log_level_does_not_affect_project_resume_signature():
     }
     debug = dict(base, log_level="debug")
     assert _resume_option_signature(base) == _resume_option_signature(debug)
+
+
+def test_scheduler_resource_mode_does_not_affect_project_resume_signature():
+    base = {"mode": "hybrid", "format": "parquet", "workers": 4}
+    detailed = dict(base, scheduler_resource_mode="detailed")
+    assert _resume_option_signature(base) == _resume_option_signature(detailed)
+
+
+def test_recorded_worker_allocation_uses_the_execution_command():
+    assert _command_worker_allocation(["python", "-m", "biosaur2.search"]) == 4
+    assert _command_worker_allocation(["biosaur2", "run", "--workers", "8"]) == 8
 def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
     captured = {}
 
@@ -257,6 +269,8 @@ def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
     assert captured["options"]["write_ms1"] is False
     assert captured["options"]["resume"] is True
     assert captured["options"]["max_memory"] > 0
+    assert captured["options"]["scheduler_heartbeat_seconds"] == 60
+    assert captured["options"]["scheduler_resource_mode"] == "auto"
 
     project_cli.run_project_cli(
         [
