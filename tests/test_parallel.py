@@ -156,7 +156,7 @@ class _ObservedRssFastSampler:
         self.rss_bytes = rss_bytes
 
     @staticmethod
-    def _sample(kind, pids=(), rss_bytes=None):
+    def _sample(kind, pids=(), rss_bytes=None, root_cpu_seconds=None):
         return ResourceSample(
             process_cpu_cores=0.0,
             host_busy_cores=0.0,
@@ -167,6 +167,7 @@ class _ObservedRssFastSampler:
             root_rss_bytes=(
                 {pid: rss_bytes for pid in pids} if rss_bytes is not None else {}
             ),
+            root_cpu_seconds=root_cpu_seconds or {},
             sample_kind=kind,
         )
 
@@ -175,6 +176,23 @@ class _ObservedRssFastSampler:
 
     def sample_light(self, pids):
         return self._sample("light", pids, self.rss_bytes)
+
+
+class _CpuTimedFastSampler(_ObservedRssFastSampler):
+    def __init__(self, cpu_seconds_per_heartbeat):
+        super().__init__()
+        self.cpu_seconds_per_heartbeat = cpu_seconds_per_heartbeat
+        self.root_cpu_seconds = {}
+
+    def sample_light(self, pids):
+        for pid in pids:
+            self.root_cpu_seconds[pid] = (
+                self.root_cpu_seconds.get(pid, 0.0)
+                + self.cpu_seconds_per_heartbeat
+            )
+        return self._sample(
+            "light", pids, root_cpu_seconds=dict(self.root_cpu_seconds)
+        )
 
 
 @pytest.mark.parametrize(
@@ -295,9 +313,12 @@ def test_adaptive_scheduler_uses_observed_pss_after_normal_admission_blocks():
     assert any(sample["event"] == "heartbeat" for sample in summary["resource_samples"])
 
 
-@pytest.mark.parametrize("rss_bytes", [None, 4 * GIB])
-def test_auto_scheduler_reserves_runs_for_a_fixed_startup_window(
-    monkeypatch, rss_bytes
+@pytest.mark.parametrize(
+    ("cpu_seconds_per_heartbeat", "minimum_start_delay"),
+    [(0.04, 0.08), (0.01, 0.14)],
+)
+def test_auto_scheduler_reserves_runs_until_wall_and_cpu_windows_finish(
+    monkeypatch, cpu_seconds_per_heartbeat, minimum_start_delay
 ):
     monkeypatch.setattr(
         "biosaur2.parallel._AUTO_MEMORY_RESERVATION_SECONDS", 0.08
@@ -308,7 +329,7 @@ def test_auto_scheduler_reserves_runs_for_a_fixed_startup_window(
         ((value,) for value in range(2)),
         target_workers=8,
         max_memory_bytes=64 * GIB,
-        resource_sampler=_ObservedRssFastSampler(rss_bytes),
+        resource_sampler=_CpuTimedFastSampler(cpu_seconds_per_heartbeat),
         on_start=lambda *_args: start_times.append(time.monotonic()),
         poll_seconds=0.01,
         host_poll_seconds=1.0,
@@ -317,7 +338,7 @@ def test_auto_scheduler_reserves_runs_for_a_fixed_startup_window(
     assert set(results) == {0, 1}
     assert started == [0, 1]
     assert summary["peak_active_tasks"] == 2
-    assert start_times[1] - start_times[0] >= 0.08
+    assert start_times[1] - start_times[0] >= minimum_start_delay
 
 
 def test_adaptive_scheduler_limits_speculative_starts_per_resource_sample():
@@ -467,3 +488,4 @@ def test_light_sampler_reports_the_current_process_tree_rss():
     sample = LinuxResourceSampler().sample_light([os.getpid()])
     assert sample.sample_kind == "light"
     assert sample.root_rss_bytes[os.getpid()] > 0
+    assert sample.root_cpu_seconds[os.getpid()] >= 0

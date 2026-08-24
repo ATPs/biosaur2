@@ -467,13 +467,16 @@ line per owned process to aggregate RSS, CPU use and thread counts; it does not
 enumerate unrelated host processes or read `smaps_rollup`. Cold admission
 reserves 16 GiB per run, then uses compatible resumed or completed per-run
 peaks times 1.2, constrained to 1-30 GiB. Each newly started run retains that
-estimate for its first three minutes, regardless of RSS heartbeat observations.
-After that, host available memory already reflects its actual RSS, so auto mode
-does not reserve its possible future growth. In auto mode, `--max-memory` is an
-integer-GiB host-use ceiling, so the manager retains at least the greater of
-8 GiB, 5% physical memory, and `physical_memory - max_memory`. CPU pressure
-pauses submission; a safety-floor breach terminates newest work, requeues it,
-and reports `MemoryLimitExceeded` after the third preemption. The explicit
+estimate until both its wall time and its aggregate owned-process CPU time
+reach three minutes. The default heartbeat aggregates those CPU seconds from
+the already-read owned process `stat` lines; it does not add scans or increase
+sampling frequency. After both conditions are met, host available memory
+already reflects actual RSS, so auto mode does not reserve possible future
+growth. In auto mode, `--max-memory` is an integer-GiB host-use ceiling, so the
+manager retains at least the greater of 8 GiB, 5% physical memory, and
+`physical_memory - max_memory`. CPU pressure pauses submission; a safety-floor
+breach terminates newest work, requeues it, and reports `MemoryLimitExceeded`
+after the third preemption. The explicit
 `detailed` resource mode retains complete Project PSS accounting.
 Declared allocations remain capped at 1.5 times the target and at three times the
 host's logical CPU count, including the existing preemptible eight-worker and
