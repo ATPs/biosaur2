@@ -151,6 +151,32 @@ class _FastSampler:
         return self._sample("light", pids)
 
 
+class _ObservedRssFastSampler:
+    def __init__(self, rss_bytes=None):
+        self.rss_bytes = rss_bytes
+
+    @staticmethod
+    def _sample(kind, pids=(), rss_bytes=None):
+        return ResourceSample(
+            process_cpu_cores=0.0,
+            host_busy_cores=0.0,
+            process_pss_bytes=0,
+            mem_available_bytes=24 * GIB,
+            physical_memory_bytes=64 * GIB,
+            cpu_count=80,
+            root_rss_bytes=(
+                {pid: rss_bytes for pid in pids} if rss_bytes is not None else {}
+            ),
+            sample_kind=kind,
+        )
+
+    def sample_host(self):
+        return self._sample("host")
+
+    def sample_light(self, pids):
+        return self._sample("light", pids, self.rss_bytes)
+
+
 @pytest.mark.parametrize(
     ("item_count", "workers", "expected"),
     [
@@ -267,6 +293,31 @@ def test_adaptive_scheduler_uses_observed_pss_after_normal_admission_blocks():
     assert summary["observed_memory_admission_count"] == 1
     assert summary["peak_unobserved_reservation_bytes"] == 16 * GIB
     assert any(sample["event"] == "heartbeat" for sample in summary["resource_samples"])
+
+
+@pytest.mark.parametrize("rss_bytes", [None, 4 * GIB])
+def test_auto_scheduler_reserves_runs_for_a_fixed_startup_window(
+    monkeypatch, rss_bytes
+):
+    monkeypatch.setattr(
+        "biosaur2.parallel._AUTO_MEMORY_RESERVATION_SECONDS", 0.08
+    )
+    start_times = []
+    results, started, summary = run_adaptive_process_tasks(
+        _slow_resource_task,
+        ((value,) for value in range(2)),
+        target_workers=8,
+        max_memory_bytes=64 * GIB,
+        resource_sampler=_ObservedRssFastSampler(rss_bytes),
+        on_start=lambda *_args: start_times.append(time.monotonic()),
+        poll_seconds=0.01,
+        host_poll_seconds=1.0,
+        heartbeat_seconds=0.02,
+    )
+    assert set(results) == {0, 1}
+    assert started == [0, 1]
+    assert summary["peak_active_tasks"] == 2
+    assert start_times[1] - start_times[0] >= 0.08
 
 
 def test_adaptive_scheduler_limits_speculative_starts_per_resource_sample():

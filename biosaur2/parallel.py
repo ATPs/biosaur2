@@ -44,6 +44,7 @@ class WorkerProcessError(RuntimeError):
 
 
 GIB = 1024 ** 3
+_AUTO_MEMORY_RESERVATION_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -808,16 +809,14 @@ def run_adaptive_process_tasks(
     def memory_allowed(allocation, value, speculative=False):
         estimate = estimator.estimate_bytes(allocation)
         if resource_mode == "auto" and not legacy_sampler:
-            remaining_growth = sum(
-                max(
-                    0,
-                    estimator.estimate_bytes(record["allocation"])
-                    - record["observed_memory_bytes"],
-                )
+            reservation_deadline = time.monotonic() - _AUTO_MEMORY_RESERVATION_SECONDS
+            young_run_reservations = sum(
+                estimator.estimate_bytes(record["allocation"])
                 for record in active.values()
+                if record["started_at"] > reservation_deadline
             )
             return value.mem_available_bytes >= (
-                host_memory_floor(value) + remaining_growth + estimate
+                host_memory_floor(value) + young_run_reservations + estimate
             )
         if speculative:
             # Completed peaks protect the next small batch while current PSS
