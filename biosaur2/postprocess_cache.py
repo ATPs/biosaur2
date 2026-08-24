@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import pickle
 import shutil
 import tempfile
+import time
 
 from .raw_ms1 import source_fingerprint
 from .generic_association import C13_C12_MASS_DIFF
+
+
+logger = logging.getLogger(__name__)
 
 
 LOCAL_CANDIDATE_CACHE_VERSION = 2
@@ -148,28 +153,55 @@ def save_local_candidate_pairs(path, fingerprint, targets, decoys):
     temporary = Path(
         tempfile.mkdtemp(prefix=".%s." % target.name, dir=target.parent)
     )
+    started = time.monotonic()
     try:
         payload_path = temporary / PAYLOAD_NAME
         with payload_path.open("wb") as handle:
+            pickle_started = time.monotonic()
             pickle.dump(
                 {"target": tuple(targets), "decoy": tuple(decoys)},
                 handle,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
+            pickle_seconds = time.monotonic() - pickle_started
             handle.flush()
+            payload_fsync_started = time.monotonic()
             os.fsync(handle.fileno())
+            payload_fsync_seconds = time.monotonic() - payload_fsync_started
+        payload_hash_started = time.monotonic()
+        payload_sha256 = _file_sha256(payload_path)
+        payload_hash_seconds = time.monotonic() - payload_hash_started
         manifest = {
             "fingerprint": fingerprint,
             "payload": PAYLOAD_NAME,
             "payload_bytes": payload_path.stat().st_size,
-            "payload_sha256": _file_sha256(payload_path),
+            "payload_sha256": payload_sha256,
         }
         with (temporary / MANIFEST_NAME).open("w", encoding="utf-8") as handle:
+            manifest_write_started = time.monotonic()
             json.dump(manifest, handle, sort_keys=True, indent=2)
             handle.write("\n")
+            manifest_write_seconds = time.monotonic() - manifest_write_started
             handle.flush()
+            manifest_fsync_started = time.monotonic()
             os.fsync(handle.fileno())
+            manifest_fsync_seconds = time.monotonic() - manifest_fsync_started
+        publish_started = time.monotonic()
         os.replace(temporary, target)
+        logger.debug(
+            "Hybrid local-candidate cache publish complete: path=%s "
+            "pickle_sec=%.3f payload_fsync_sec=%.3f payload_hash_sec=%.3f "
+            "manifest_write_sec=%.3f manifest_fsync_sec=%.3f publish_sec=%.3f "
+            "runtime_sec=%.3f",
+            target,
+            pickle_seconds,
+            payload_fsync_seconds,
+            payload_hash_seconds,
+            manifest_write_seconds,
+            manifest_fsync_seconds,
+            time.monotonic() - publish_started,
+            time.monotonic() - started,
+        )
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise

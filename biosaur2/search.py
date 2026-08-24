@@ -292,8 +292,11 @@ def _run_args_for_file(args, filename, multiple_inputs, allocated_workers=None):
             keep=bool(args.get("keep_cache")),
         ).paths_for(filename)
         run_args["raw_ms1_cache_dir"] = cache_paths["raw_ms1_cache"]
-        run_args["hybrid_stage_cache_dir"] = cache_paths["strict_stage_cache"]
-        run_args["hybrid_candidate_cache_dir"] = cache_paths["candidate_cache"]
+        # The raw store is required for this invocation's mmap-backed residual
+        # work. Reusable hybrid snapshots are only useful when retained.
+        if args.get("keep_cache"):
+            run_args["hybrid_stage_cache_dir"] = cache_paths["strict_stage_cache"]
+            run_args["hybrid_candidate_cache_dir"] = cache_paths["candidate_cache"]
         run_args["external_strong_features_cache_path"] = cache_paths[
             "external_strong_features"
         ]
@@ -598,7 +601,7 @@ Advanced output notes:
         help=_advanced_help(show_all, 'enable/disable q-filtered same-run PSM assay association and local recovery in hybrid mode'),
     )
     parser.add_argument(
-        '--external-id', action=argparse.BooleanOptionalAction, default=True,
+        '--external-id', action=argparse.BooleanOptionalAction, default=False,
         help=_advanced_help(show_all, 'collect private weak feature candidates for Project match-between-runs; a single-run command cannot rescue them'),
     )
     parser.add_argument('--external-weak-min-mono-points', type=_positive_integer, default=2, help=_advanced_help(show_all, 'minimum monoisotopic points for a Project external weak candidate'))

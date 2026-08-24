@@ -64,6 +64,9 @@ def _implementation_signature(package=None, cutils_extension=None):
     digest = hashlib.sha256()
     for name in (
         "main.py",
+        "candidate_selection.py",
+        "peak_splitting.py",
+        "strict_cache_writer.py",
         "preprocessing.py",
         "calibration.py",
         "direct_competitors.py",
@@ -72,7 +75,8 @@ def _implementation_signature(package=None, cutils_extension=None):
     ):
         path = package / name
         digest.update(name.encode())
-        digest.update(path.read_bytes())
+        if path.is_file():
+            digest.update(path.read_bytes())
     cython_source = package / "cutils.pyx"
     if cython_source.is_file():
         digest.update(b"cutils.pyx")

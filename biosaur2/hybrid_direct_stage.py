@@ -14,6 +14,36 @@ from .residual import ResidualMS1Ledger
 logger = logging.getLogger(__name__)
 
 
+def _strict_quantification_task(run_id, args, records, support_counts):
+    """Quantify an independent ordered slice of strict features."""
+
+    rows = []
+    for record in records:
+        _scans, rt, traces = _strict_trace_grid(record)
+        candidate = record["candidate"]
+        supporting_psm_count, supporting_ms2_count = support_counts.get(
+            int(record["feature_id"]), (0, 0)
+        )
+        rows.append(
+            _quant_row(
+                run_id,
+                record["feature_id"],
+                FEATURE_ORIGIN_STRICT_UNTARGETED,
+                "direct_id" if supporting_psm_count else "strict",
+                rt,
+                traces,
+                method=args.get("quant_method", "envelope_area"),
+                baseline=args.get("feature_baseline", "edge_linear"),
+                quality_score=float(candidate.get("cos_cor_isotopes", 0.0)),
+                isotope_cosine=float(candidate.get("cos_cor_isotopes", 0.0)),
+                mass_error=float(np.median([value["mass_diff_ppm"] for value in candidate["isotopes"]])),
+                supporting_psm_count=supporting_psm_count,
+                supporting_ms2_count=supporting_ms2_count,
+            )
+        )
+    return rows
+
+
 def _prepare_and_run_direct_stage(*, run_id, ingestion, assay_result, strict_contexts, next_feature_id, args):
     hybrid_started = time.monotonic()
     logger.debug(
@@ -455,29 +485,28 @@ def _quantify_direct_stage(run_id, args, state):
     strict_records = state["strict_records"]
     support = state["support"]
     recovered_quant_rows = state["recovered_quant_rows"]
-    strict_quant_rows = []
     logger.info("Hybrid quantifying %d strict features", len(strict_records))
     strict_quantification_started = time.monotonic()
-    for record in strict_records:
-        _scans, rt, traces = _strict_trace_grid(record)
-        candidate = record["candidate"]
-        direct_support = support.get(record["feature_id"], ())
-        strict_quant_rows.append(
-            _quant_row(
-                run_id,
-                record["feature_id"],
-                FEATURE_ORIGIN_STRICT_UNTARGETED,
-                "direct_id" if direct_support else "strict",
-                rt,
-                traces,
-                method=args.get("quant_method", "envelope_area"),
-                baseline=args.get("feature_baseline", "edge_linear"),
-                quality_score=float(candidate.get("cos_cor_isotopes", 0.0)),
-                isotope_cosine=float(candidate.get("cos_cor_isotopes", 0.0)),
-                mass_error=float(np.median([value["mass_diff_ppm"] for value in candidate["isotopes"]])),
-                supporting_psm_count=len(direct_support),
-                supporting_ms2_count=len({assay.ms2_event_id for assay in direct_support}),
-            )
+    support_counts = {
+        int(feature_id): (
+            len(assays), len({assay.ms2_event_id for assay in assays})
+        )
+        for feature_id, assays in support.items()
+    }
+    workers = min(int(args.get("nprocs", 1)), len(strict_records))
+    if workers > 1:
+        strict_quant_rows = []
+        for batch in run_process_tasks(
+            _strict_quantification_task,
+            [
+                (run_id, args, strict_records[start:end], support_counts)
+                for start, end in balanced_ranges(len(strict_records), workers)
+            ],
+        ):
+            strict_quant_rows.extend(batch)
+    else:
+        strict_quant_rows = _strict_quantification_task(
+            run_id, args, strict_records, support_counts
         )
     logger.info("Hybrid strict-feature quantification complete")
     logger.debug(

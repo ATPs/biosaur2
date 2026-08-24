@@ -100,6 +100,47 @@ def _args():
     }
 
 
+def _detector_args(*, workers, parallel=False):
+    return {
+        "ignore_iso_calib": True,
+        "itol": 8.0,
+        "nprocs": workers,
+        "_parallel_final_residual_candidates": parallel,
+        "isotope_calibration": {},
+    }
+
+
+def test_final_residual_parallel_candidate_filter_matches_serial():
+    candidates = [
+        _candidate(0, 10, 1, 11, 0.8),
+        _candidate(2, 12, 2, 12, 0.8),
+    ]
+    serial = main._calibrate_and_filter_isotope_candidates(
+        copy.deepcopy(candidates), None, _detector_args(workers=1)
+    )
+    parallel = main._calibrate_and_filter_isotope_candidates(
+        copy.deepcopy(candidates), None,
+        _detector_args(workers=2, parallel=True),
+    )
+    assert parallel == serial
+
+
+def test_final_residual_parallel_components_match_serial_selection():
+    candidates = [
+        _candidate(0, 10, 1, 11, 0.8),
+        _candidate(2, 12, 2, 12, 0.8),
+    ]
+    hills = _hills()
+    rt_by_local = {0: 0.0, 1: 1.0, 2: 2.0}
+    serial = main._select_nonconflicting_isotope_candidates(
+        copy.deepcopy(candidates), hills, rt_by_local, 0
+    )
+    parallel = main._select_nonconflicting_isotope_candidates_parallel(
+        copy.deepcopy(candidates), hills, rt_by_local, 0, workers=2
+    )
+    assert parallel == serial
+
+
 def _claim_candidate_fraction(ledger, fraction):
     contributions = []
     for scan, scale in enumerate((1.0, 2.0, 1.0)):

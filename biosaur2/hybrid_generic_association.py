@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import logging
 import math
+import time
 
 import numpy as np
 
@@ -25,6 +27,10 @@ from .generic_association import (
     precursor_joint_support,
 )
 from .hybrid_constants import *
+from .parallel import run_process_tasks
+
+
+logger = logging.getLogger(__name__)
 
 
 def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
@@ -122,6 +128,42 @@ def _generic_standard_links(ms2_rows, ingestion, strict_contexts, args):
         if values
     }
     return build_association_rows(ms2_rows, aggregate, final_candidates), aggregate["summary"]
+
+
+def _generic_standard_link_task(ms2_rows, ingestion, strict_contexts, args):
+    started = time.monotonic()
+    links, summary = _generic_standard_links(
+        ms2_rows, ingestion, strict_contexts, args
+    )
+    return links, summary, time.monotonic() - started
+
+
+def generic_standard_link_pair(
+    run_id, ms2_rows, ingestion, strict_contexts, args
+):
+    """Build target and decoy links independently, sharing forked read-only state."""
+
+    target_rows = tuple(ms2_rows)
+    decoy_rows = tuple(_generic_decoy_rows(run_id, target_rows))
+    task_args = (
+        (target_rows, ingestion, strict_contexts, args),
+        (decoy_rows, ingestion, strict_contexts, args),
+    )
+    if int(args.get("nprocs", 1)) <= 1:
+        target, decoy = (
+            _generic_standard_link_task(*task_args[0]),
+            _generic_standard_link_task(*task_args[1]),
+        )
+    else:
+        parallel_started = time.monotonic()
+        target, decoy = run_process_tasks(_generic_standard_link_task, task_args)
+        logger.debug(
+            "Hybrid generic target/decoy association worker pair complete: "
+            "runtime_sec=%.3f workers=2 events=%d",
+            time.monotonic() - parallel_started,
+            len(target_rows),
+        )
+    return target, decoy
 
 
 def _compact_generic_association_summary(summary):

@@ -44,6 +44,28 @@ def test_mode_selects_default_format_and_ms1(
     assert captured["write_ms1"] is expected_ms1
 
 
+def test_standalone_hybrid_external_id_is_opt_in(monkeypatch, tmp_path):
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    captured = {}
+    monkeypatch.setattr(
+        search_module, "_execute_inputs", lambda args, *_args: captured.update(args)
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["biosaur2", str(source), "--feature-mode", "hybrid"]
+    )
+    search_module.run()
+    assert captured["external_id"] is False
+
+    monkeypatch.setattr(
+        sys, "argv", [
+            "biosaur2", str(source), "--feature-mode", "hybrid", "--external-id",
+        ]
+    )
+    search_module.run()
+    assert captured["external_id"] is True
+
+
 @pytest.mark.parametrize(
     ("extra", "expected"),
     [

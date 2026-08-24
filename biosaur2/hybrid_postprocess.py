@@ -1,6 +1,7 @@
 """Hybrid workflow orchestration and compatibility entry point implementation."""
 
 from collections import Counter
+import gc
 import logging
 import math
 import time
@@ -220,6 +221,9 @@ def run_hybrid_postprocessing(
         next_feature_id=direct["next_feature_id"],
         final_strict_detector=final_strict_detector,
     )
+    direct.pop("strict_index", None)
+    direct.pop("strict_hill_claims", None)
+    gc.collect()
     residual = run_final_residual_stage(
         run_id=run_id,
         ingestion=ingestion,

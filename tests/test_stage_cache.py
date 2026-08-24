@@ -266,6 +266,7 @@ def test_hybrid_stage_cache_cold_and_replay_are_logically_equal(tmp_path):
                 "parquet",
                 "--feature-mode",
                 "hybrid",
+                "--external-id",
                 "--no-generic-ms2-refine",
                 "--cache-dir",
                 str(cache_root),

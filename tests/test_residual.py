@@ -107,8 +107,10 @@ def test_materialized_residual_matches_sparse_claims_exactly():
 
     materialized = ledger.materialize()
     expected = ledger.store.intensity.copy()
-    for point_index, claimed in ledger._claimed.items():
-        expected[point_index] = max(0.0, expected[point_index] - claimed)
+    point_indices = np.flatnonzero(ledger._claimed)
+    expected[point_indices] = np.maximum(
+        0.0, expected[point_indices] - ledger._claimed[point_indices]
+    )
     np.testing.assert_allclose(materialized.intensity, expected)
 
 

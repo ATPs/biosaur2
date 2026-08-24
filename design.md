@@ -200,6 +200,12 @@ and allocated once in the residual ledger. If strict ownership cannot be
 reconstructed safely, later final-residual detection is suppressed rather than
 operating on an invalid residual state.
 
+For an initially conflict-free strict population, workers may map immutable
+raw-point footprints concurrently. They write compact numeric footprint
+artifacts, then the ledger owner consumes those artifacts in original feature
+ID order. The owner retains all mutable claims, exact overallocation fallback
+and failure accounting; parallel transport cannot change ownership order.
+
 This ordering deliberately protects the complete strict MS1 population,
 including features without MS2. Direct and generic candidates must either link
 to that population or demonstrate defensible residual evidence without taking
@@ -240,6 +246,12 @@ from their final assigned traces. Direct PSM/MS2 support counts are accumulated
 after de-duplication. A PSM does not copy intensity into the feature and does
 not generate a second abundance row.
 
+Strict trace quantification and final legacy-compatible strict-row preparation
+are independent per feature after conflict decisions complete. They may run in
+ordered worker ranges and are merged by the parent in the pre-existing feature
+order. Quantification and final feature row values, IDs and schemas remain the
+same.
+
 ### Stage 6: generic MS2 association with strict features
 
 For every still-relevant MS2 event, the workflow creates bounded target
@@ -259,6 +271,12 @@ compete within the same family, and extraction q-values are calculated
 independently of the Percolator PSM q-value. A generic event that already has a
 defensible strict feature is associated without changing that feature's
 abundance.
+
+When a run has more than one worker, the read-only target and paired-decoy link
+passes may run as a two-process forked pair.  Each child receives the immutable
+strict context through copy-on-write state and returns only its link rows and
+summary.  Score calibration, q-value competition and audit mutation remain in
+the parent, so worker completion order cannot alter scientific output.
 
 ### Stage 7: generic residual local recovery
 
@@ -283,6 +301,12 @@ excessive width, event-scan absence, isolation inconsistency, a decoy win, a
 q-value failure, strict-hill ownership, or an unresolved raw-point conflict.
 
 Accepted generic features receive new IDs and residual allocations only once.
+The parent applies accepted candidates in input order.  Its private incremental
+index caches each accepted candidate's raw-point footprint and narrows possible
+m/z/charge/FAIMS equivalents and raw-point conflicts before rerunning the same
+exact predicates in prior acceptance order.  The index is an execution detail:
+feature IDs, ledger allocation order, audit outcomes and quantification order
+are unchanged.
 
 ### Stage 8: optional guarded relaxed retry
 
@@ -313,12 +337,20 @@ and generic feature to prevent rediscovery. Accepted candidates must allocate
 successfully in the same ledger and are quantified as strict untargeted
 features. This stage never receives an MS2-only threshold relaxation.
 
+Residual `detect_hills` remains scan-sequential. After it, calibrated candidate
+filtering can be range-parallel, and the greedy selector can process independent
+connected components of shared mono/isotope hill IDs in parallel. Each component
+runs the unchanged greedy rule, then the parent applies the established final
+feature sort before assigning IDs. This optimization is restricted to the final
+residual detector and is disabled for weak-candidate audit collection.
+
 ### Stage 10: final MS2 recheck and audit finalization
 
 Unresolved direct assays are rechecked against new final-residual strict
 features. Unidentified events are re-evaluated through a separate final-strict
-target/decoy family. Failed prior audit reasons are preserved unless a valid
-feature association is obtained.
+target/decoy family, using the same independent read-only worker pair when
+available. Failed prior audit reasons are preserved unless a valid feature
+association is obtained.
 
 Finally, every MS2 event has exactly one audit row. Quantitative feature links,
 precursor-only signal, statistical rejection, metadata failure, insufficient
@@ -442,6 +474,19 @@ results:
    postprocessing. They are invalidated by source or weak-gate changes and let
    Project matching run without raw MS1 access.
 
+For a cold Hybrid run, strict-stage payload construction and atomic cache
+publication may execute in one background process after strict detection while
+the parent begins independent Hybrid postprocessing. The cache remains absent
+until its atomic rename completes. The parent joins the writer before reporting
+successful completion and propagates any writer error, so cache validity and
+subsequent-cache behavior are unchanged.
+
+Split-hill workers write numeric labels to invocation-local `.npy` artifacts.
+The parent memory-maps them in worker-range order, maps labels by first
+encounter exactly as before, and removes the artifacts after successful merge
+or failure. This avoids sending million-element Python lists through process
+queues while preserving deterministic hill IDs.
+
 Cache keys include source fingerprints, scientific parameters and relevant
 implementation signatures. Scheduling-only/downstream options do not
 unnecessarily invalidate upstream caches. A stale or partially published cache
@@ -451,7 +496,9 @@ atomic publication.
 `--cache-dir` defines one root for all cache layers in single-run and project
 processing. The default root is `.biosaur2_cache` in the current directory.
 Single-run commands use an isolated invocation namespace without
-`--keep-cache`. Project mode instead uses a deterministic project workspace and
+`--keep-cache`. In that temporary single-run mode only the raw MS1 mmap store
+is created: reusable strict-stage and generic-candidate caches are disabled so
+their serialization cannot compete with the current analysis. Project mode instead uses a deterministic project workspace and
 an atomic checkpoint: interruption retains compatible cache layers and the next
 invocation resumes automatically. Completed local raw, strict and candidate
 layers are deleted after their compact external sidecars and outputs are
@@ -565,6 +612,7 @@ MS1 output defaults on in Hybrid and off in Legacy; `--write-ms1` and
 | generic local maximum width | `auto` | Strict-feature width q99 clamped to 15-60 s; fallback 30 s. |
 | relaxed local minima/cosine | mono 2; channel 2; channels 2; cosine 0.95 | Guarded retry defaults. |
 | relaxed MS2 feature | false | Conservative MS2-only retry is disabled by default. |
+| standalone external ID | false | Use `--external-id` to collect weak candidates; Project keeps this enabled by default. |
 | project workers | 4 | Busy-core target for the adaptive Project manager; normal runs use four workers and declared allocation is bounded at 1.5x. |
 | scheduler heartbeat | 60 sec | Owned-process RSS/CPU/thread scan interval; auto mode reads only host memory every 5 sec. |
 | scheduler resource mode | `auto` | Fast host-memory admission; `detailed` retains complete Project PSS accounting. |
@@ -575,6 +623,7 @@ MS1 output defaults on in Hybrid and off in Legacy; `--write-ms1` and
 | Module | Responsibility |
 |---|---|
 | `main.py` | Strict detection orchestration, strict-stage cache and final residual strict detector. |
+| `candidate_selection.py`, `peak_splitting.py`, `strict_cache_writer.py` | Deterministic candidate conflict selection, disk-backed split result transport and asynchronous retained-cache publication. |
 | `hills.py`, `cutils.pyx` | Deterministic hill normalization and performance-critical detection routines. |
 | `preprocessing.py`, `raw_ms1.py` | mzML ingestion, MS1/MS2 metadata and compact raw store/cache. |
 | `identifications.py`, `chemistry.py` | Percolator parsing/mapping, modification normalization, exact formulas and isotope libraries. |
