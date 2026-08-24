@@ -83,6 +83,18 @@ def test_project_checkpoint_updates_only_the_changed_record(tmp_path):
     checkpoint.release()
 
 
+def test_project_checkpoint_preserves_scheduler_event_history(tmp_path):
+    path = tmp_path / "project-state.json"
+    checkpoint = ProjectCheckpoint(path).open({"project_db": "project.duckdb"}, resume=True)
+    checkpoint.append_scheduler_event({"event": "start", "run_id": "run", "allocation": 4})
+    checkpoint.append_scheduler_event({"event": "complete", "run_id": "run", "peak_rss_kib": 1024})
+    checkpoint.release()
+
+    resumed = ProjectCheckpoint(path).open({"project_db": "project.duckdb"}, resume=True)
+    assert [event["event"] for event in resumed.scheduler_events()] == ["start", "complete"]
+    resumed.release()
+
+
 def test_project_checkpoint_does_not_replace_an_active_lease(tmp_path):
     path = tmp_path / "project-state.json"
     first = ProjectCheckpoint(path).open({"project_db": "project.duckdb"}, resume=True)

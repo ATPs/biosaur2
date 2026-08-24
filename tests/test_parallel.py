@@ -5,6 +5,7 @@ import pytest
 
 from biosaur2.parallel import (
     GIB,
+    LinuxResourceSampler,
     ResourceSample,
     WorkerFailure,
     WorkerProcessError,
@@ -16,6 +17,7 @@ from biosaur2.parallel import (
     worker_slot_allocations,
     run_process_tasks,
 )
+from biosaur2.parallel import _MemoryEstimator
 
 
 def _identity(value):
@@ -120,6 +122,33 @@ class _ObservedHeadroomSampler(_IdleSampler):
             cpu_count=80,
             root_pss_bytes={pid: 4 * GIB for pid in pids},
         )
+
+
+class _FastSampler:
+    def __init__(self):
+        self.host_calls = 0
+        self.light_calls = 0
+
+    @staticmethod
+    def _sample(kind, pids=()):
+        return ResourceSample(
+            process_cpu_cores=0.0,
+            host_busy_cores=0.0,
+            process_pss_bytes=0,
+            mem_available_bytes=512 * GIB,
+            physical_memory_bytes=512 * GIB,
+            cpu_count=80,
+            root_rss_bytes={pid: 0 for pid in pids},
+            sample_kind=kind,
+        )
+
+    def sample_host(self):
+        self.host_calls += 1
+        return self._sample("host")
+
+    def sample_light(self, pids):
+        self.light_calls += 1
+        return self._sample("light", pids)
 
 
 @pytest.mark.parametrize(
@@ -345,7 +374,7 @@ def test_budgeted_scheduler_reports_a_clean_child_exit_without_result():
     assert results[0].exception_type == "ProcessExit"
 
 
-def test_adaptive_scheduler_defaults_to_thirty_second_heartbeats():
+def test_adaptive_scheduler_defaults_to_sixty_second_heartbeats():
     _results, _started, summary = run_adaptive_process_tasks(
         _slow_resource_task,
         ((0,),),
@@ -353,4 +382,37 @@ def test_adaptive_scheduler_defaults_to_thirty_second_heartbeats():
         max_memory_bytes=64 * GIB,
         resource_sampler=_IdleSampler(),
     )
-    assert summary["heartbeat_seconds"] == 30.0
+    assert summary["heartbeat_seconds"] == 60.0
+
+
+def test_memory_estimator_clamps_completed_peaks_to_one_through_thirty_gib():
+    estimator = _MemoryEstimator()
+    estimator.observe(4, 0, {"peak_rss_kib": 128})
+    assert estimator.estimate_bytes(4) == int(1.2 * GIB)
+    estimator.observe(4, 0, {"peak_rss_kib": 64 * 1024 ** 2})
+    assert estimator.estimate_bytes(4) == 30 * GIB
+
+
+def test_auto_scheduler_uses_host_ticks_and_owned_tree_heartbeats():
+    sampler = _FastSampler()
+    _results, _started, summary = run_adaptive_process_tasks(
+        _slow_resource_task,
+        ((0,),),
+        target_workers=1,
+        max_memory_bytes=64 * GIB,
+        resource_sampler=sampler,
+        poll_seconds=0.01,
+        host_poll_seconds=0.02,
+        heartbeat_seconds=60,
+    )
+    assert summary["resource_mode"] == "auto"
+    assert summary["host_poll_seconds"] == 0.02
+    assert summary["host_sample_count"] >= 2
+    assert summary["light_sample_count"] == 1
+    assert summary["detailed_sample_count"] == 0
+
+
+def test_light_sampler_reports_the_current_process_tree_rss():
+    sample = LinuxResourceSampler().sample_light([os.getpid()])
+    assert sample.sample_kind == "light"
+    assert sample.root_rss_bytes[os.getpid()] > 0
