@@ -61,7 +61,7 @@ def _run_generic_enabled_stage(**kwargs):
             audit_by_event,
             target_links,
             decoy_links,
-            q_value_max=float(args.get("generic_q_value_max", 0.01)),
+            q_value_max=float(args.get("generic_q_value_max", 0.05)),
         )
     )
     generic_score_calibration["rescored_target_count"] = (
@@ -79,7 +79,7 @@ def _run_generic_enabled_stage(**kwargs):
         audit_by_event,
         target_links,
         decoy_links,
-        q_value_max=float(args.get("generic_q_value_max", 0.01)),
+        q_value_max=float(args.get("generic_q_value_max", 0.05)),
     )
     generic_summary = {
         "target": _compact_generic_association_summary(target_summary),
@@ -187,7 +187,7 @@ def _run_generic_enabled_stage(**kwargs):
         len(local_competitions),
     )
     local_status_counts = Counter()
-    q_value_max = float(args.get("generic_q_value_max", 0.01))
+    q_value_max = float(args.get("generic_q_value_max", 0.05))
     state = locals()
     return _apply_standard_generic_results(state)
 

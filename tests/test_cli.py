@@ -66,6 +66,20 @@ def test_standalone_hybrid_external_id_is_opt_in(monkeypatch, tmp_path):
     assert captured["external_id"] is True
 
 
+def test_generic_q_value_default_is_five_percent(monkeypatch, tmp_path):
+    source = tmp_path / "sample.mzML"
+    source.write_bytes(b"")
+    captured = {}
+    monkeypatch.setattr(
+        search_module, "_execute_inputs", lambda args, *_args: captured.update(args)
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["biosaur2", str(source), "--feature-mode", "hybrid"]
+    )
+    search_module.run()
+    assert captured["generic_q_value_max"] == 0.05
+
+
 @pytest.mark.parametrize(
     ("extra", "expected"),
     [

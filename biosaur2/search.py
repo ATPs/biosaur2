@@ -613,7 +613,7 @@ Advanced output notes:
         help='enable/disable unidentified-MS2 charge/C13 hypotheses, target-decoy association, and local recovery in hybrid mode',
     )
     parser.add_argument(
-        '--generic-q-value-max', type=float, default=0.01,
+        '--generic-q-value-max', type=float, default=0.05,
         help=(
             'estimated false-discovery limit for unidentified-MS2 associations '
             'from target/decoy (real-versus-shifted precursor) competition; '

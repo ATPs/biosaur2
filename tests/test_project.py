@@ -291,6 +291,7 @@ def test_project_hybrid_mode_is_explicit_opt_in(monkeypatch, tmp_path):
     assert captured["options"]["external_weak_max_strong_overlap"] == 0.30
     assert captured["options"]["external_min_support_runs"] == 1
     assert captured["options"]["external_max_support_runs"] == 4
+    assert captured["options"]["generic_q_value_max"] == 0.05
 
 
 def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):

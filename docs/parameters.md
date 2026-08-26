@@ -25,7 +25,7 @@ scientific tolerance changes on representative data.
 | `--psm-q-value-max` | 0.01 | Maximum Percolator PSM q-value used to build direct peptide assays. |
 | `--fixed-mod` | none | Repeatable `SITE=MOD`, for example `C=UNIMOD:4` or `peptide_n_term=UNIMOD:1`. |
 | `--generic-ms2-refine` | true | For MS2 without a usable direct assay, test precursor hypotheses with target/decoy control and local recovery. |
-| `--generic-q-value-max` | 0.01 | Maximum q-value for Biosaur2's unidentified-MS2 target/decoy associations, not a peptide-identification q-value. |
+| `--generic-q-value-max` | 0.05 | Maximum estimated false-discovery rate for generic, unidentified-MS2-to-feature associations. It does not filter Percolator peptide IDs. |
 | `--generic-ms2-ppm` | 10 | Selected-ion precursor tolerance for generic hypotheses. |
 | `--ms2-rt-tolerance-sec` | 120 | Initial same-run raw-MS1 search distance on each side of an MS2 event. It does not match runs. |
 | `--quant-method` | `all` | Report envelope area, mono area and envelope apex; `quant_value` uses envelope area. |
@@ -38,6 +38,44 @@ whether an unidentified MS2 precursor was associated with MS1 signal more
 convincingly than shifted decoys. Project external rescue has a third,
 independent `--external-q-value-max` described below. See
 [Hybrid workflow](hybrid-workflow.md).
+
+### Choosing `--generic-q-value-max`
+
+Use this option only to control **generic MS2 associations**: cases where an
+MS2 scan has no usable direct peptide/PSM assay, but its precursor m/z, charge,
+retention time, and isotope pattern may still identify a real MS1 feature.
+It answers this practical question: "Can this otherwise unidentified MS2 scan
+be linked to this MS1 feature with enough evidence?"
+
+For each such scan, Biosaur2 evaluates two alternatives using the same rules:
+
+1. The **target** is the measured precursor hypothesis.
+2. The **decoy** is an intentionally shifted, false precursor hypothesis.
+3. If target-like matches win much more often than decoy-like matches, the
+   program estimates how many of the accepted target links could be false.
+
+That estimate is the generic q-value. It is a property of the accepted set,
+not a guarantee that any one MS2-to-feature link has exactly that probability
+of being wrong. With the default `0.05`, the accepted generic links are allowed
+an estimated false-discovery rate of at most 5%. As a simple interpretation,
+if 100 generic links pass at this limit, roughly five false links are permitted
+on average by this control method.
+
+`--generic-q-value-max` is independent of peptide identification quality. It
+does **not** mean that Percolator PSMs with q-values up to 5% are used: direct
+PSM assays remain controlled by `--psm-q-value-max` (default `0.01`). It also
+does not change strict untargeted feature detection, m/z tolerance, or create a
+feature for an MS2 scan that lacks adequate MS1 evidence.
+
+| Value | Practical effect |
+| --- | --- |
+| `0.01` | Stricter: accepts fewer generic links and leaves more MS2 scans unresolved, but permits about 1% estimated false discoveries. |
+| `0.05` (default) | Balanced: permits about 5% estimated false discoveries among accepted generic links. |
+| Higher than `0.05` | More permissive: may increase coverage, but permits a larger estimated false-discovery rate. Validate on a representative panel before using it. |
+
+Changing this value is useful when choosing the coverage-versus-conservatism
+tradeoff for unidentified MS2 scans. Check the target/decoy, quantitative-link,
+and unresolved-event summaries after changing it.
 
 The advanced `--psm-*-column` options, visible only in `biosaur2 --help-all`,
 override automatic semantic-column detection for composite PSM IDs, split

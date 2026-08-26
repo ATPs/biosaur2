@@ -46,8 +46,8 @@ a deterministic, deliberately shifted false precursor processed with the same
 association and extraction rules. Target and decoy wins across events estimate
 how often accepted generic associations may be false.
 
-`--generic-q-value-max 0.01` keeps generic associations at an estimated
-false-discovery rate no greater than about 1%. It is not the Percolator PSM
+`--generic-q-value-max 0.05` keeps generic associations at an estimated
+false-discovery rate no greater than about 5%. It is not the Percolator PSM
 q-value:
 
 | Threshold | Question |

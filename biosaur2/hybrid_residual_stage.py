@@ -381,7 +381,7 @@ def _run_final_residual_generic_recheck(
                 final_target_links,
                 final_decoy_links,
                 q_value_max=float(
-                    args.get("generic_q_value_max", 0.01)
+                    args.get("generic_q_value_max", 0.05)
                 ),
                 eligible_event_ids=unlinked_ids,
                 preserve_failed_audit=True,
