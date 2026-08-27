@@ -197,14 +197,14 @@ def test_stage_signature_excludes_downstream_and_scheduling_options():
     first = _args(
         nprocs=1,
         relaxed_ms2_feature=False,
-        generic_q_value_max=0.01,
+        generic_q_value_max=0.05,
         quant_method="envelope_area",
     )
     second = {
         **first,
         "nprocs": 32,
         "relaxed_ms2_feature": True,
-        "generic_q_value_max": 0.02,
+        "generic_q_value_max": 0.10,
         "quant_method": "mono_area",
     }
     assert strict_stage_argument_signature(first) == (

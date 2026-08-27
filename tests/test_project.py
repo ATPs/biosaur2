@@ -319,7 +319,7 @@ def test_project_hybrid_command_propagates_rt_tolerance(tmp_path):
         "direct_id": True,
         "external_id": False,
         "generic_ms2_refine": True,
-        "generic_q_value_max": 0.01,
+        "generic_q_value_max": 0.05,
         "max_charge": 8,
         "relaxed_ms2_feature": True,
         "ms2_rt_tolerance_sec": 90.0,

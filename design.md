@@ -610,7 +610,7 @@ MS1 output defaults on in Hybrid and off in Legacy; `--write-ms1` and
 | Hybrid mono traces | omitted | `--write-mono-hills` adds the two monoisotopic point arrays. |
 | Hybrid raw/corrected areas | omitted | `--write-quant-details` adds four baseline diagnostic columns. |
 | project baseline | `edge_linear` | Optional baseline preprocessing. |
-| generic extraction q-value maximum | 0.01 | Separate target/decoy family; configurable. |
+| generic extraction q-value maximum | 0.05 | Separate target/decoy family; the maintained development and validation baseline. |
 | generic selected-isotope errors | `0,1,2,3` | Test a selected peak interpreted as M through M+3. |
 | generic local isotope channels | 5 | Channels evaluated for a generic envelope. |
 | generic local point minima | mono 3; channel 3; supported channels 2 | Standard local-recovery support. |

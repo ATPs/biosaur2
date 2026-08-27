@@ -1,4 +1,5 @@
 from dataclasses import replace
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +49,13 @@ from biosaur2.identifications import (
 from biosaur2.raw_ms1 import RawMS1StoreBuilder
 from biosaur2.residual import ResidualMS1Ledger
 from biosaur2.generic_local import evaluate_generic_local_candidate
+
+
+def test_generic_score_calibration_default_q_value_is_five_percent():
+    default = inspect.signature(_calibrate_generic_score_weights).parameters[
+        "q_value_max"
+    ].default
+    assert default == 0.05
 
 
 def _assay(rt=2.0):
@@ -996,7 +1004,7 @@ def test_generic_strict_links_require_target_decoy_q_value_and_preserve_direct()
         for event_id in range(202)
     ]
     counts, competition_counts = _apply_generic_strict_associations(
-        audits, targets, decoys, q_value_max=0.01
+        audits, targets, decoys, q_value_max=0.05
     )
     assert counts == {
         "generic_matched_strict_feature": 200,
@@ -1052,7 +1060,7 @@ def test_generic_strict_links_can_recheck_explicit_unlinked_events_only():
         audits,
         targets,
         decoys,
-        q_value_max=0.01,
+        q_value_max=0.05,
         eligible_event_ids=range(100),
     )
 
@@ -1341,7 +1349,7 @@ def test_generic_decoy_only_has_distinct_audit_status():
         )
     ]
     counts, competition_counts = _apply_generic_strict_associations(
-        audits, targets, decoys, q_value_max=0.01
+        audits, targets, decoys, q_value_max=0.05
     )
     assert counts == {"generic_decoy_only": 1}
     assert audits[1]["status"] == "generic_decoy_only"

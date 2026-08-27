@@ -297,7 +297,7 @@ def _generic_q_metrics(
 
 
 def _calibrate_generic_score_weights(
-    audit_by_event, target_rows, decoy_rows, *, q_value_max=0.01
+    audit_by_event, target_rows, decoy_rows, *, q_value_max=0.05
 ):
     """Learn run-specific generic weights from held-out direct PSM anchors.
 

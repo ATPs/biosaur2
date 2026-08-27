@@ -277,7 +277,7 @@ def test_relaxed_recovery_disabled_preserves_standard_local_state(monkeypatch):
         "width_limit": 60.0,
         "local_competitions": (),
         "local_status_counts": Counter({"generic_local_candidate": 2}),
-        "q_value_max": 0.01,
+        "q_value_max": 0.05,
     }
 
     result = generic_stage._run_relaxed_generic_recovery(state)

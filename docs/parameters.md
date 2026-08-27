@@ -69,13 +69,13 @@ feature for an MS2 scan that lacks adequate MS1 evidence.
 
 | Value | Practical effect |
 | --- | --- |
-| `0.01` | Stricter: accepts fewer generic links and leaves more MS2 scans unresolved, but permits about 1% estimated false discoveries. |
-| `0.05` (default) | Balanced: permits about 5% estimated false discoveries among accepted generic links. |
+| `0.05` (default and maintained baseline) | Permits about 5% estimated false discoveries among accepted generic links. |
 | Higher than `0.05` | More permissive: may increase coverage, but permits a larger estimated false-discovery rate. Validate on a representative panel before using it. |
 
-Changing this value is useful when choosing the coverage-versus-conservatism
-tradeoff for unidentified MS2 scans. Check the target/decoy, quantitative-link,
-and unresolved-event summaries after changing it.
+Future development, regression testing, and scientific acceptance use `0.05`.
+Older `0.01` results are historical comparisons, not a compatibility target.
+If this value is explicitly overridden, check the target/decoy,
+quantitative-link, and unresolved-event summaries after changing it.
 
 The advanced `--psm-*-column` options, visible only in `biosaur2 --help-all`,
 override automatic semantic-column detection for composite PSM IDs, split
