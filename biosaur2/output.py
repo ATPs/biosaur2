@@ -258,6 +258,11 @@ def build_provenance(args: Mapping[str, Any]):
         for key, value in args.items()
         if not key.startswith("_") and key != "file"
     }
+    input_fingerprint = None
+    if input_exists:
+        from .raw_ms1 import source_fingerprint
+
+        input_fingerprint = source_fingerprint(input_path)
     return {
         "version": package_version,
         "schema_version": SCHEMA_VERSION,
@@ -267,6 +272,7 @@ def build_provenance(args: Mapping[str, Any]):
         "parameters_json": json.dumps(parameters, sort_keys=True, default=str),
         "input_path": str(input_path),
         "input_size": input_path.stat().st_size if input_exists else None,
+        "input_fingerprint": input_fingerprint,
         "source_format": "mzML" if ".mzml" in input_path.name.lower() else "hills",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "rt_unit": "minute for feature/hill scalar RT; second for MS1 and area",

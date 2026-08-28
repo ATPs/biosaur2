@@ -521,30 +521,46 @@ def process_mzml(args):
     return ingest_mzml(args).spectra
 
 
-def collect_ms1_rows(args):
-    """Compatibility helper retaining the historical standalone reader."""
-    from .utils import iter_ms1_spectra
+def collect_mzml_metadata(args):
+    """Return lightweight MS1/MS2 metadata for standalone rescue."""
 
-    rows = []
-    for scan_index, spectrum in enumerate(iter_ms1_spectra(args["file"])):
+    from .utils import _extract_ms1_scan_id, iter_spectrum_metadata
+
+    ms1_rows = []
+    ms2_rows = []
+    ms1_by_native_id = {}
+    preceding_ms1 = None
+    ms1_count = 0
+    ms2_count = 0
+    for spectrum_index, spectrum in enumerate(iter_spectrum_metadata(args["file"])):
+        if spectrum.get("ms level") == 2:
+            _append_ms2_rows(
+                ms2_rows, spectrum, ms2_count, spectrum_index, preceding_ms1, args
+            )
+            ms2_count += 1
+            continue
+        if spectrum.get("ms level") != 1:
+            continue
         scan_info = _scan_info(spectrum)
-        rows.append(
+        rt_sec = retention_time_seconds(
+            scan_info["scan start time"], args.get("input_rt_unit", "seconds")
+        )
+        scan_number = _extract_ms1_scan_id(spectrum, ms1_count)
+        native_id = spectrum.get("id")
+        if native_id is not None:
+            ms1_by_native_id[str(native_id)] = ms1_count
+        ms1_rows.append(
             {
-                "scan_index": scan_index,
-                "scan_number": extract_scan_number(spectrum),
-                "rt_sec": retention_time_seconds(
-                    scan_info["scan start time"], args.get("input_rt_unit", "seconds")
-                ),
-                "total_intensity": float(
-                    spectrum.get(
-                        "total ion current", np.sum(spectrum.get("intensity array", []))
-                    )
-                ),
+                "scan_index": ms1_count,
+                "scan_number": scan_number,
+                "rt_sec": rt_sec,
                 "faims_cv": faims_value(spectrum),
-                "ion_mobility_1_over_k0": None,
             }
         )
-    return rows
+        preceding_ms1 = ms1_count
+        ms1_count += 1
+    _resolve_ms2_precursors(ms2_rows, ms1_by_native_id)
+    return ms1_rows, ms2_rows
 
 
 def process_mzml_dia(args):

@@ -300,6 +300,17 @@ def _command_for_run(run, paths, options):
             command.append("--write-quant-details")
         command.extend(("--feature-baseline", options["feature_baseline"]))
         command.append("--direct-id" if options["direct_id"] else "--no-direct-id")
+        command.append(
+            "--FeatureFinderIdentification"
+            if options.get("feature_finder_identification", True)
+            else "--no-FeatureFinderIdentification"
+        )
+        command.extend(
+            (
+                "--FeatureFinderIdentification-path",
+                str(options.get("feature_finder_identification_path", "FeatureFinderIdentification")),
+            )
+        )
         command.append("--external-id" if options["external_id"] else "--no-external-id")
         for key, default in (
             ("external_weak_min_mono_points", 2),

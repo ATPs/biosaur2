@@ -193,6 +193,19 @@ README.md and examples/hybrid_project_manifest.tsv.
         )
         parser.add_argument("--feature-baseline", choices=("none", "edge_linear"), default="edge_linear", help=_advanced_help(show_all, "baseline preprocessing before hybrid feature quantification"))
         parser.add_argument("--direct-id", action=argparse.BooleanOptionalAction, default=True, help=_advanced_help(show_all, "enable/disable q-filtered same-run direct PSM assays in hybrid mode"))
+        parser.add_argument(
+            "--FeatureFinderIdentification", "--feature-finder-identification",
+            dest="feature_finder_identification",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="enable/disable OpenMS FeatureFinderIdentification rescue in Hybrid runs",
+        )
+        parser.add_argument(
+            "--FeatureFinderIdentification-path", "--feature-finder-identification-path",
+            dest="feature_finder_identification_path",
+            default="FeatureFinderIdentification",
+            help="FeatureFinderIdentification executable path or PATH command",
+        )
         parser.add_argument("--external-id", action=argparse.BooleanOptionalAction, default=True, help="enable/disable weak-candidate generation and cross-run strong-feature support inside compatible alignment groups")
         parser.add_argument("--external-q-value-max", type=float, default=0.10, help=_advanced_help(show_all, "maximum target/decoy q-value for feature match-between-runs rescue"))
         parser.add_argument("--external-ppm", type=float, default=8.0, help=_advanced_help(show_all, "m/z tolerance in ppm for strong-feature RT anchors and weak-to-strong support matches"))

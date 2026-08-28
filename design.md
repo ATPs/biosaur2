@@ -136,6 +136,9 @@ mzML/mzML.gz + optional Percolator PSM table
        recheck unresolved direct and generic MS2 events
                     |
                     v
+ optional OpenMS FeatureFinderIdentification direct-PSM rescue
+                    |
+                    v
  de-duplicated features + one quant row/feature + one audit row/MS2
 ```
 
@@ -355,6 +358,29 @@ association is obtained.
 Finally, every MS2 event has exactly one audit row. Quantitative feature links,
 precursor-only signal, statistical rejection, metadata failure, insufficient
 chromatographic evidence and ambiguity are mutually exclusive final outcomes.
+
+### Stage 11: OpenMS FeatureFinderIdentification rescue
+
+After the native Hybrid stages finish, exact-formula direct assays that pass
+`--psm-q-value-max` and remain unlinked may be submitted to OpenMS
+`FeatureFinderIdentification`. This is enabled by default through
+`--FeatureFinderIdentification`; a missing executable is a recorded no-op for
+ordinary Hybrid runs. The executable is resolved from `$PATH` by default or
+through `--FeatureFinderIdentification-path`.
+
+Only final target, non-offset OpenMS features are considered. A unique
+same-charge, FAIMS-compatible 8 ppm and overlapping-RT match reuses an
+existing Biosaur2 feature; otherwise a deterministic feature ID is appended.
+Ambiguous reuse and PSM-to-multiple-feature mappings remain unlinked. New rows
+use `feature_origin=openms_ffi_rescue`, `confidence_tier=direct_id`, and the
+OpenMS feature intensity as their quantitative value. They are visible in the
+ordinary Hybrid tables but never become Project strong donors.
+
+`biosaur2 rescue` applies the same operation atomically to an existing Hybrid
+Parquet or DuckDB output. It validates mzML provenance, preserves the three
+public tables or unrelated DuckDB tables, and does not rewrite an output when
+no candidate remains. The rescue threshold is always `--psm-q-value-max`; it
+does not use `--generic-q-value-max`.
 
 ## Hill repair and overlap policy
 

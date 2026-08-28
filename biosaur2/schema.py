@@ -83,7 +83,7 @@ MS2_COLUMNS = (
     "metadata_flags",
 )
 
-HYBRID_SCHEMA_VERSION = "9"
+HYBRID_SCHEMA_VERSION = "10"
 PROJECT_SCHEMA_VERSION = "12"
 
 HYBRID_FEATURE_QUANT_COLUMNS = (
@@ -115,10 +115,7 @@ HYBRID_QUANT_DETAIL_COLUMNS = (
     "area_mono_raw",
     "area_mono_corrected",
 )
-HYBRID_QUANT_REDUNDANT_COLUMNS = (
-    "envelope_apex",
-    "feature_quality_score",
-)
+HYBRID_QUANT_REDUNDANT_COLUMNS = ("envelope_apex",)
 
 
 def hybrid_quant_output_columns(quant_details=False):

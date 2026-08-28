@@ -212,7 +212,7 @@ def test_hybrid_summary_is_persisted_in_merged_output_metadata(tmp_path):
     metadata = pq.ParquetFile(
         tmp_path / "hybrid.features.parquet"
     ).metadata.metadata
-    assert metadata[b"biosaur2_hybrid_schema_version"] == b"9"
+    assert metadata[b"biosaur2_hybrid_schema_version"] == b"10"
     assert json.loads(metadata[b"biosaur2_hybrid_summary_json"]) == args[
         "_hybrid_summary"
     ]
@@ -268,10 +268,10 @@ def test_hybrid_splits_compact_linked_ms2_rows_from_features(tmp_path):
         "area_envelope_corrected",
         "area_mono_raw",
         "area_mono_corrected",
-        "envelope_apex",
-        "feature_quality_score",
-    ):
-        assert removed not in feature_schema.names
+            "envelope_apex",
+        ):
+            assert removed not in feature_schema.names
+    assert "feature_quality_score" in feature_schema.names
     feature = pq.read_table(tmp_path / "hybrid.features.parquet").to_pylist()[0]
     assert (feature["scanStart"], feature["scanApex"], feature["scanEnd"]) == (
         100, 101, 102
@@ -309,7 +309,7 @@ def test_hybrid_diagnostic_switches_restore_large_optional_columns(tmp_path):
     assert "area_mono_raw" in names
     assert "area_mono_corrected" in names
     assert "envelope_apex" not in names
-    assert "feature_quality_score" not in names
+    assert "feature_quality_score" in names
 
 
 def test_hybrid_tsv_writes_only_tsv_feature_and_identification_tables(tmp_path):

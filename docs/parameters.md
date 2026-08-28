@@ -23,6 +23,8 @@ scientific tolerance changes on representative data.
 | --- | --- | --- |
 | `--psm-path` | empty | Percolator target PSM TSV (compressed text supported) or Parquet. A multi-run table is filtered to the current mzML stem when it has a run/idn field. See [the input example](getting-started.md#psm-input). |
 | `--psm-q-value-max` | 0.01 | Maximum Percolator PSM q-value used to build direct peptide assays. |
+| `--FeatureFinderIdentification` / `--no-FeatureFinderIdentification` | enabled | Run or disable the optional OpenMS rescue for exact, still-unlinked direct PSMs after Hybrid detection. A missing executable skips this stage without failing the ordinary run. |
+| `--FeatureFinderIdentification-path` | `FeatureFinderIdentification` | Executable path or command resolved from `$PATH`. |
 | `--fixed-mod` | none | Repeatable `SITE=MOD`, for example `C=UNIMOD:4` or `peptide_n_term=UNIMOD:1`. |
 | `--generic-ms2-refine` | true | For MS2 without a usable direct assay, test precursor hypotheses with target/decoy control and local recovery. |
 | `--generic-q-value-max` | 0.05 | Maximum estimated false-discovery rate for generic, unidentified-MS2-to-feature associations. It does not filter Percolator peptide IDs. |
@@ -81,6 +83,20 @@ The advanced `--psm-*-column` options, visible only in `biosaur2 --help-all`,
 override automatic semantic-column detection for composite PSM IDs, split
 run/scan/charge/rank identity, peptide, q-value and optional annotations.
 Extra source columns are accepted but are not copied to Biosaur2 outputs.
+
+### OpenMS direct-PSM rescue
+
+OpenMS rescue is a final same-run Hybrid stage, not Project match-between-runs
+rescue and not generic MS2 target/decoy association. It receives only exact
+direct PSMs at `--psm-q-value-max` that remain unlinked after native Hybrid
+processing. Thus `--generic-q-value-max` has no effect on its input.
+
+Use `biosaur2 rescue input.mzML.gz --output input.features.parquet` to merge
+the same result atomically into a completed Hybrid Parquet output; a
+`.biosaur2.duckdb` output is also accepted. The command uses four OpenMS worker
+threads by default and accepts `--workers`, `--psm-q-value-max`, and
+`--FeatureFinderIdentification-path`. It preserves existing public tables and
+does not create a rescue sidecar file.
 
 ## External weak-feature rescue (`--help-all`)
 

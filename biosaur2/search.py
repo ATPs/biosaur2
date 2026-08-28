@@ -462,6 +462,7 @@ Examples:
     --psm-q-value-max 0.01 --fixed-mod C=UNIMOD:4 --quant-method all
   biosaur2 input.mzML.gz --feature-mode hybrid \\
     --cache-dir .biosaur2_cache --keep-cache
+  biosaur2 rescue input.mzML.gz --output input.features.parquet
 
 See README.md for a short introduction and docs/ for inputs, parameters,
 outputs, quantification and multi-run project workflows.
@@ -599,6 +600,23 @@ Advanced output notes:
     parser.add_argument(
         '--direct-id', action=argparse.BooleanOptionalAction, default=True,
         help=_advanced_help(show_all, 'enable/disable q-filtered same-run PSM assay association and local recovery in hybrid mode'),
+    )
+    parser.add_argument(
+        '--FeatureFinderIdentification', '--feature-finder-identification',
+        dest='feature_finder_identification',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            'enable/disable OpenMS FeatureFinderIdentification rescue for '
+            'unlinked exact-formula direct PSMs in hybrid mode'
+        ),
+    )
+    parser.add_argument(
+        '--FeatureFinderIdentification-path',
+        '--feature-finder-identification-path',
+        dest='feature_finder_identification_path',
+        default='FeatureFinderIdentification',
+        help='FeatureFinderIdentification executable path or PATH command',
     )
     parser.add_argument(
         '--external-id', action=argparse.BooleanOptionalAction, default=False,
@@ -745,6 +763,38 @@ Advanced output notes:
     return parser
 
 
+def _run_rescue(arguments):
+    parser = argparse.ArgumentParser(
+        prog='biosaur2 rescue',
+        description='Run OpenMS FeatureFinderIdentification rescue on an existing Hybrid Biosaur2 result.',
+        formatter_class=_HelpFormatter,
+    )
+    parser.add_argument('file', help='source mzML or mzML.gz file')
+    parser.add_argument('-o', '--output', required=True, help='existing Hybrid .features.parquet or .biosaur2.duckdb output')
+    parser.add_argument('--psm-q-value-max', type=float, default=0.01, help='maximum PSM q-value eligible for rescue')
+    parser.add_argument('--FeatureFinderIdentification-path', '--feature-finder-identification-path', dest='feature_finder_identification_path', default='FeatureFinderIdentification', help='FeatureFinderIdentification executable path or PATH command')
+    parser.add_argument('--workers', type=_positive_integer, default=4, help='OpenMS worker threads')
+    _add_log_level_argument(parser)
+    args = vars(parser.parse_args(arguments))
+    if not math.isfinite(args['psm_q_value_max']) or not 0 <= args['psm_q_value_max'] <= 1:
+        parser.error('--psm-q-value-max must be finite and in [0, 1].')
+    _configure_logging(args['log_level'])
+    from .openms_ffi import rescue_completed_output
+
+    try:
+        summary = rescue_completed_output(
+            source=args['file'], output=args['output'],
+            q_value_max=args['psm_q_value_max'],
+            executable_path=args['feature_finder_identification_path'],
+            workers=args['workers'],
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        logging.getLogger(__name__).error('FeatureFinderIdentification rescue failed: %s', exc)
+        return 1
+    logging.getLogger(__name__).info('FeatureFinderIdentification rescue: %s', summary)
+    return 0
+
+
 def _run_with_parser(parser):
     args = vars(parser.parse_args())
     args['format'] = args['format'] or (
@@ -879,6 +929,8 @@ def _run_with_parser(parser):
 
 
 def run():
+    if len(sys.argv) > 1 and sys.argv[1] == 'rescue':
+        return _run_rescue(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == 'project':
         from .project_cli import run_project_cli
 

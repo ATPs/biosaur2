@@ -355,6 +355,8 @@ def sidecar_rows(run_id, feature_rows, quant_rows, weak_rows):
         if feature_id is None:
             continue
         merged = {**row, **quant_by_id.get(int(feature_id), {})}
+        if merged.get("feature_origin") == "openms_ffi_rescue":
+            continue
         record = _record_from_row(run_id, merged)
         if record is not None:
             strong.append(record.__dict__)

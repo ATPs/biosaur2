@@ -16,6 +16,7 @@ from .external_mbr import (
     write_feature_sidecars,
 )
 from .external_weak import weak_feature_rows_from_contexts
+from .openms_ffi import rescue_hybrid_results
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,18 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
         final_feature_rows.extend(
             recovered_feature_rows + generic_recovered_feature_rows
         )
+    ffi_summary, next_feature_id = rescue_hybrid_results(
+        source=args["file"],
+        run_id=run_id,
+        assays=assay_result.assays,
+        audit_by_event=audit_by_event,
+        feature_rows=final_feature_rows,
+        quant_rows=final_quant_rows,
+        ms1_rows=ingestion.ms1_rows,
+        ms2_rows=ingestion.ms2_rows,
+        next_feature_id=next_feature_id,
+        args=args,
+    )
     # Weak candidates are private Project sidecar rows.  They are never
     # appended to the ordinary run output until cross-run FDR accepts them.
     weak_feature_rows, weak_candidate_audit = (
@@ -138,6 +151,7 @@ def _finalize_hybrid_results(*, run_id, ingestion, assay_result, strict_contexts
             ),
         },
         "local_candidate_cache": local_candidate_cache_telemetry,
+        "openms_ffi_rescue": ffi_summary,
     }
     if args.get("external_id") and args.get("external_weak_candidates_cache_path"):
         strong_rows, weak_rows = sidecar_rows(

@@ -71,6 +71,14 @@ def iter_ms1_and_ms2_metadata(input_file_path):
             yield spec
 
 
+def iter_spectrum_metadata(input_file_path):
+    """Yield spectrum metadata without decoding any binary peak arrays."""
+
+    with open_mzml_source(input_file_path) as mzml_source:
+        for spec in MetadataOnlyMzML(source=mzml_source):
+            yield spec
+
+
 def _build_hills_dict(
     hills_idx_array_unique,
     hills_mz_median,
@@ -326,6 +334,20 @@ class MS1AndMetadataMzML(mzml.MzML):
                 for child in list(element.iterchildren()):
                     if xml._local_name(child) == "binaryDataArrayList":
                         element.remove(child)
+        return super()._get_info_smart(element, **kwargs)
+
+
+class MetadataOnlyMzML(mzml.MzML):
+    """Avoid binary-array decoding when only scan and precursor metadata matter."""
+
+    _default_iter_path = "//spectrum"
+    _use_index = False
+
+    def _get_info_smart(self, element, **kwargs):
+        if xml._local_name(element) == "spectrum":
+            for child in list(element.iterchildren()):
+                if xml._local_name(child) == "binaryDataArrayList":
+                    element.remove(child)
         return super()._get_info_smart(element, **kwargs)
 
 def calibrate_mass(bwidth, mass_left, mass_right, true_md):
